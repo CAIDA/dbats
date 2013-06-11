@@ -58,7 +58,7 @@ typedef struct {
 typedef u_int32_t tsdb_value;
 
 typedef struct {
-  u_int8_t  alive_and_kicking;
+  u_int8_t  is_open;
   u_int8_t  read_only_mode;              /* Mode used to open the db file */
   u_int16_t num_values_per_entry;        /* How many tsdb_value will be specified per slot */
   u_int16_t values_len;                  /* Size of this value */

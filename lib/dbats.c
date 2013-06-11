@@ -95,7 +95,7 @@ int tsdb_open(char *tsdb_path, tsdb_handler *handler,
   memset(&handler->state_compress, 0, sizeof(handler->state_compress));
   memset(&handler->state_decompress, 0, sizeof(handler->state_decompress));
 
-  handler->alive_and_kicking = 1;
+  handler->is_open = 1;
 
   return(0);
 }
@@ -149,7 +149,7 @@ static void map_raw_set(tsdb_handler *handler,
   data.data = value, data.size = value_len;
 
   if(handler->db->put(handler->db, NULL, &key_data, &data, 0) != 0)
-    traceEvent(TRACE_WARNING, "Error while map_set(%u, %u)", key, value);
+    traceEvent(TRACE_WARNING, "Error while map_set(%.*s)", key_len, (char*)key);
 }
 
 /* *********************************************************************** */
@@ -167,6 +167,8 @@ static int map_raw_get(tsdb_handler *handler,
     *value = data.data, *value_len = data.size;
     return(0);
   } else {
+    int len = key_len;
+    //traceEvent(TRACE_WARNING, "map_raw_get failed: key=\"%.*s\"\n", len, (char*)key);
     return(-1);
   }
 }
@@ -222,7 +224,7 @@ static void tsdb_flush_chunk(tsdb_handler *handler) {
 
 void tsdb_close(tsdb_handler *handler) {
 
-  if(!handler->alive_and_kicking) {
+  if(!handler->is_open) {
     return;
   }
 
@@ -240,16 +242,11 @@ void tsdb_close(tsdb_handler *handler) {
 
 /* *********************************************************************** */
 
-u_int32_t normalize_epoch(tsdb_handler *handler, u_int32_t *epoch) {
-  int diff = timezone;
+static const time_t epoch_base = 259200; // 00:00 on first sunday of 1970, UTC
 
-  diff -= daylight*3600;
-
-  // *epoch = *epoch + (handler->rrd_slot_time_duration-1);
-  *epoch += diff;
-  *epoch -= *epoch % handler->rrd_slot_time_duration;
-  
-  return(*epoch);
+u_int32_t normalize_epoch(tsdb_handler *handler, u_int32_t *t) {
+  *t -= (*t - epoch_base) % handler->rrd_slot_time_duration;
+  return *t;
 }
 
 /* *********************************************************************** */
@@ -382,6 +379,8 @@ int tsdb_goto_epoch(tsdb_handler *handler,
   u_int32_t value_len, fragment_id = 0;
   char str[32];
 
+  traceEvent(TRACE_INFO, "goto_epoch %u", epoch_value);
+
   /* Flush ond chunk if loaded */
   tsdb_flush_chunk(handler);
 
@@ -394,6 +393,7 @@ int tsdb_goto_epoch(tsdb_handler *handler,
 
   snprintf(str, sizeof(str), "%u-%u", epoch_value, fragment_id);
   rc = map_raw_get(handler, str, strlen(str), &value, &value_len);
+  traceEvent(TRACE_INFO, "goto_epoch %u: map_raw_get -> %d", epoch_value, rc);
 
   if(rc == -1) {
     if(!create_if_needed) {
@@ -511,7 +511,8 @@ static int getOffset(tsdb_handler *handler, char *hash_name,
     traceEvent(TRACE_INFO, "%s mapped to idx %u", hash_name, hash_index);
 
   if(handler->chunk.load_page_on_demand || handler->read_only_mode) {
-    u_int32_t fragment_id = hash_index / CHUNK_GROWTH, value_len;
+    u_int32_t fragment_id = hash_index / CHUNK_GROWTH;
+    u_int32_t value_len;
     char str[32];
     void *value;
 
@@ -575,7 +576,7 @@ static int getOffset(tsdb_handler *handler, char *hash_name,
   *offset = handler->values_len * hash_index;
 
   if(*offset >= handler->chunk.chunk_mem_len)
-    traceEvent(TRACE_ERROR, "INTERNAL ERROR [Id: %s/%u][Offset: %u/%u]",
+    traceEvent(TRACE_ERROR, "INTERNAL ERROR [Id: %s/%u][Offset: %" PRIu64 "/%u]",
 	       hash_name, hash_index, *offset, handler->chunk.chunk_mem_len);
 
   return(0);
@@ -590,7 +591,7 @@ int tsdb_set(tsdb_handler *handler,
   u_int64_t offset;
   int rc;
 
-  if(!handler->alive_and_kicking)
+  if(!handler->is_open)
     return(-1);
 
   if((!handler->chunk.load_page_on_demand)
@@ -610,7 +611,7 @@ int tsdb_set(tsdb_handler *handler,
     if(fragment_id > MAX_NUM_FRAGMENTS)
       traceEvent(TRACE_ERROR, "Internal error [%u > %u]", fragment_id, MAX_NUM_FRAGMENTS);
     else {
-      traceEvent(TRACE_INFO, "Succesfully set value [offset=%u][value_len=%u][fragment_id=%u]",
+      traceEvent(TRACE_INFO, "Succesfully set value [offset=%" PRIu64 "][value_len=%u][fragment_id=%u]",
 		 offset, handler->values_len, fragment_id);
       handler->chunk.fragment_changed[fragment_id] = 1;
     }
@@ -629,7 +630,7 @@ int tsdb_get(tsdb_handler *handler,
 
   *value_to_read = &handler->default_unknown_value;
 
-  if(!handler->alive_and_kicking)
+  if(!handler->is_open)
     return(-1);
 
   if((!handler->chunk.load_page_on_demand)
@@ -641,7 +642,7 @@ int tsdb_get(tsdb_handler *handler,
   if((rc = getOffset(handler, hash_index, &offset, 0)) == 0) {
     *value_to_read = (tsdb_value*)(handler->chunk.chunk_mem + offset);
 
-    traceEvent(TRACE_INFO, "Succesfully read value [offset=%u][value_len=%u]",
+    traceEvent(TRACE_INFO, "Succesfully read value [offset=%" PRIu64 "][value_len=%u]",
 		 offset, handler->values_len);
   }
 
