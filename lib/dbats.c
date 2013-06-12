@@ -181,9 +181,6 @@ static void tsdb_flush_chunk(tsdb_handler *handler) {
   u_int fragment_size = handler->values_len * CHUNK_GROWTH;
   char str[32];
 
-  traceEvent(TRACE_INFO, "flush_chunk %u num_fragments=%u",
-    handler->chunk.load_epoch, handler->chunk.num_fragments);
-
   if (!handler->chunk.num_fragments) return;
 
   buf_len = fragment_size + 400 /* Static value */;
@@ -386,7 +383,7 @@ int tsdb_goto_epoch(tsdb_handler *handler,
 
   normalize_epoch(handler, &epoch_value);
   if (handler->chunk.load_epoch == epoch_value) {
-    traceEvent(TRACE_INFO, "goto_epoch %u: already loaded");
+    traceEvent(TRACE_INFO, "goto_epoch %u: already loaded", epoch_value);
     return 0;
   }
 
@@ -502,7 +499,7 @@ static int getOffset(tsdb_handler *handler, char *hash_name,
     traceEvent(TRACE_INFO, "%s mapped to idx %u", hash_name, hash_index);
 
   *fragment_id = hash_index / CHUNK_GROWTH;
-  *offset = hash_index % CHUNK_GROWTH;
+  *offset = (hash_index % CHUNK_GROWTH) * handler->values_len;
 
   if (*fragment_id > MAX_NUM_FRAGMENTS) {
     traceEvent(TRACE_ERROR, "Internal error [%u > %u]", *fragment_id, MAX_NUM_FRAGMENTS);
@@ -579,7 +576,7 @@ int tsdb_set(tsdb_handler *handler,
     return -1;
 
   if (getOffset(handler, hash_index, &fragment_id, &offset, 1) == 0) {
-    memcpy(handler->chunk.fragment[fragment_id] + offset * handler->values_len,
+    memcpy(handler->chunk.fragment[fragment_id] + offset,
 	value_to_store, handler->values_len);
     handler->chunk.fragment_changed[fragment_id] = 1;
 
@@ -608,7 +605,7 @@ int tsdb_get(tsdb_handler *handler,
   }
 
   if (getOffset(handler, hash_index, &fragment_id, &offset, 0) == 0) {
-    *value_to_read = (tsdb_value*)(handler->chunk.fragment[fragment_id] + offset * handler->values_len);
+    *value_to_read = (tsdb_value*)(handler->chunk.fragment[fragment_id] + offset);
 
     traceEvent(TRACE_INFO, "Succesfully read value [offset=%" PRIu64 "][value_len=%u]",
 		 offset, handler->values_len);
