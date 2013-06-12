@@ -44,14 +44,12 @@
 #define MAX_NUM_FRAGMENTS      16384
 
 typedef struct {
-  u_int8_t *chunk_mem;
-  u_int32_t chunk_mem_len;
+  u_int8_t *fragment[MAX_NUM_FRAGMENTS];
   u_int32_t begin_epoch;
   u_int8_t growable;
-  u_int32_t num_hash_indexes;
+  u_int32_t num_fragments;
   u_int8_t fragment_changed[MAX_NUM_FRAGMENTS];
-  u_int32_t base_index;
-  u_int8_t load_page_on_demand;
+  u_int8_t load_on_demand;
   u_int32_t load_epoch;
 } tsdb_chunk;
 
@@ -61,7 +59,7 @@ typedef struct {
   u_int8_t  is_open;
   u_int8_t  read_only_mode;              /* Mode used to open the db file */
   u_int16_t num_values_per_entry;        /* How many tsdb_value will be specified per slot */
-  u_int16_t values_len;                  /* Size of this value */
+  u_int16_t values_len;                  /* Size of a value in bytes */
   u_int32_t default_unknown_value;       /* Default 0 */
   u_int32_t lowest_free_index;           /* Hint for accelerating the assignment of free indexes */
   u_int32_t rrd_slot_time_duration;      /* (sec) */

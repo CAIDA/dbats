@@ -177,46 +177,49 @@ static int map_raw_get(tsdb_handler *handler,
 
 static void tsdb_flush_chunk(tsdb_handler *handler) {
   char *compressed;
-  u_int compressed_len, new_len, num_fragments, i;
+  u_int compressed_len, buf_len;
   u_int fragment_size = handler->values_len * CHUNK_GROWTH;
   char str[32];
 
-  if(!handler->chunk.chunk_mem) return;
+  traceEvent(TRACE_INFO, "flush_chunk %u num_fragments=%u",
+    handler->chunk.load_epoch, handler->chunk.num_fragments);
 
-  new_len = handler->chunk.chunk_mem_len + 400 /* Static value */;
-  compressed = (char*)malloc(new_len);
+  if (!handler->chunk.num_fragments) return;
+
+  buf_len = fragment_size + 400 /* Static value */;
+  compressed = (char*)malloc(buf_len);
   if(!compressed) {
-    traceEvent(TRACE_WARNING, "Not enough memory (%u bytes)", new_len);
+    traceEvent(TRACE_WARNING, "Not enough memory (%u bytes)", buf_len);
     return;
   }
 
-  /* Split chunks on the DB */
-  num_fragments = handler->chunk.chunk_mem_len / (handler->values_len * CHUNK_GROWTH);
+  /* Write fragments to the DB */
+  for (int i=0; i < handler->chunk.num_fragments; i++) {
 
-  for(i=0; i<num_fragments; i++) {
-    u_int offset;
+    if (!handler->chunk.fragment[i]) continue;
 
-    if((!handler->read_only_mode)
-       && handler->chunk.fragment_changed[i]) {
-      offset = i * fragment_size;
+    if (!handler->read_only_mode && handler->chunk.fragment_changed[i]) {
 
-      compressed_len = qlz_compress(&handler->chunk.chunk_mem[offset],
+      compressed_len = qlz_compress(handler->chunk.fragment[i],
 				    compressed, fragment_size,
 				    &handler->state_compress);
 
       traceEvent(TRACE_INFO, "Compression %u -> %u [fragment %u] [%.1f %%]",
 		 fragment_size, compressed_len, i,
-		 ((float)(compressed_len*100))/((float)fragment_size));
+		 compressed_len*100.0/fragment_size);
 
       snprintf(str, sizeof(str), "%u-%u", handler->chunk.begin_epoch, i);
 
       map_raw_set(handler, str, strlen(str), compressed, compressed_len);
-    } else
+    } else {
       traceEvent(TRACE_INFO, "Skipping fragment %u (unchanged)", i);
+    }
+    handler->chunk.fragment_changed[i] = 0;
+    free(handler->chunk.fragment[i]);
+    handler->chunk.fragment[i] = 0;
   }
 
   free(compressed);
-  free(handler->chunk.chunk_mem);
   memset(&handler->chunk, 0, sizeof(handler->chunk));
 }
 
@@ -373,7 +376,7 @@ int tsdb_goto_epoch(tsdb_handler *handler,
 		     u_int32_t epoch_value,
 		     u_int8_t create_if_needed,
 		     u_int8_t growable,
-		     u_int8_t load_page_on_demand) {
+		     u_int8_t load_on_demand) {
   int rc;
   void *value;
   u_int32_t value_len, fragment_id = 0;
@@ -381,14 +384,19 @@ int tsdb_goto_epoch(tsdb_handler *handler,
 
   traceEvent(TRACE_INFO, "goto_epoch %u", epoch_value);
 
-  /* Flush ond chunk if loaded */
+  normalize_epoch(handler, &epoch_value);
+  if (handler->chunk.load_epoch == epoch_value) {
+    traceEvent(TRACE_INFO, "goto_epoch %u: already loaded");
+    return 0;
+  }
+
+  /* Flush chunk if loaded */
   tsdb_flush_chunk(handler);
 
-  normalize_epoch(handler, &epoch_value);
-  handler->chunk.load_page_on_demand = load_page_on_demand;
+  handler->chunk.load_on_demand = load_on_demand;
   handler->chunk.load_epoch = epoch_value;
 
-  if(handler->chunk.load_page_on_demand)
+  if (handler->chunk.load_on_demand)
     return(0);
 
   snprintf(str, sizeof(str), "%u-%u", epoch_value, fragment_id);
@@ -399,54 +407,37 @@ int tsdb_goto_epoch(tsdb_handler *handler,
     if(!create_if_needed) {
       traceEvent(TRACE_INFO, "Unable to goto epoch %u", epoch_value);
       return(-1);
-    } else
-      traceEvent(TRACE_INFO, "Moving to goto epoch %u", epoch_value);
-
-    /* Create the entry */
-    handler->chunk.begin_epoch = epoch_value, handler->chunk.num_hash_indexes = CHUNK_GROWTH;
-    handler->chunk.chunk_mem_len = handler->values_len*handler->chunk.num_hash_indexes;
-    handler->chunk.chunk_mem = (u_int8_t*)malloc(handler->chunk.chunk_mem_len);
-
-    if(handler->chunk.chunk_mem == NULL) {
-      traceEvent(TRACE_WARNING, "Not enough memory (%u bytes)", handler->chunk.chunk_mem_len);
-      return(-2);
     }
+    traceEvent(TRACE_INFO, "new epoch %u", epoch_value);
 
-    memset(handler->chunk.chunk_mem, handler->default_unknown_value, handler->chunk.chunk_mem_len);
+    /* Create an empty chunk */
+    handler->chunk.begin_epoch = epoch_value;
+    handler->chunk.num_fragments = 0;
+
   } else {
-    /* We need to decompress data and glue up all fragments */
-    u_int32_t len, offset = 0;
-    u_int8_t *ptr;
+    /* We need to decompress data */
+    traceEvent(TRACE_INFO, "loaded epoch %u", epoch_value);
+    uint32_t len;
 
     fragment_id = 0;
-    handler->chunk.chunk_mem_len = 0;
+    handler->chunk.num_fragments = 0;
 
-    while(1) {
+    while (1) {
       len = qlz_size_decompressed(value);
 
-      ptr = (u_int8_t*)malloc(handler->chunk.chunk_mem_len + len);
-      if(ptr == NULL) {
-	traceEvent(TRACE_WARNING, "Not enough memory (%u bytes)",
-		   handler->chunk.chunk_mem_len+len);
+      uint8_t *newfrag = (u_int8_t*)malloc(len);
+      if (!newfrag) {
+	traceEvent(TRACE_WARNING, "Not enough memory (%u bytes)", len);
 	free(value);
 	return(-2);
       }
-
-      if(handler->chunk.chunk_mem_len > 0)
-	memcpy(ptr, handler->chunk.chunk_mem, handler->chunk.chunk_mem_len);
-
-      len = qlz_decompress(value, &ptr[offset], &handler->state_decompress);
-      //free(value);
-
+      len = qlz_decompress(value, newfrag, &handler->state_decompress);
       traceEvent(TRACE_NORMAL, "Decompression %u -> %u [fragment %u] [%.1f %%]",
 		 value_len, len, fragment_id,
-		 ((float)(len*100))/((float)value_len));
+		 len*100.0/value_len);
 
-      handler->chunk.chunk_mem_len += len;
-      fragment_id++, offset = handler->chunk.chunk_mem_len;
-
-      free(handler->chunk.chunk_mem);
-      handler->chunk.chunk_mem = ptr;
+      handler->chunk.fragment[fragment_id] = newfrag;
+      fragment_id++;
 
       snprintf(str, sizeof(str), "%u-%u", epoch_value, fragment_id);
       if(map_raw_get(handler, str, strlen(str), &value, &value_len) == -1)
@@ -454,7 +445,7 @@ int tsdb_goto_epoch(tsdb_handler *handler,
     } /* while */
 
     handler->chunk.begin_epoch = epoch_value;
-    handler->chunk.num_hash_indexes = handler->chunk.chunk_mem_len / handler->values_len;
+    handler->chunk.num_fragments = fragment_id;
 
     traceEvent(TRACE_INFO, "Moved to goto epoch %u", epoch_value);
   }
@@ -501,7 +492,7 @@ static int mapIndexToHash(tsdb_handler *handler, char *idx,
 /* *********************************************************************** */
 
 static int getOffset(tsdb_handler *handler, char *hash_name,
-		     u_int64_t *offset, u_int8_t create_idx_if_needed) {
+		     uint32_t *fragment_id, u_int64_t *offset, u_int8_t create_idx_if_needed) {
   u_int32_t hash_index;
 
   if(mapIndexToHash(handler, hash_name, &hash_index, create_idx_if_needed) == -1) {
@@ -510,89 +501,68 @@ static int getOffset(tsdb_handler *handler, char *hash_name,
   } else
     traceEvent(TRACE_INFO, "%s mapped to idx %u", hash_name, hash_index);
 
-  u_int32_t fragment_id = hash_index / CHUNK_GROWTH;
+  *fragment_id = hash_index / CHUNK_GROWTH;
+  *offset = hash_index % CHUNK_GROWTH;
 
-  if (handler->chunk.chunk_mem &&
-    //handler->chunk.begin_epoch == handler->chunk.load_epoch &&
-    handler->chunk.base_index == fragment_id * CHUNK_GROWTH)
-  {
-    // We already have the right chunk-fragment.
-    hash_index -= handler->chunk.base_index;
+  if (*fragment_id > MAX_NUM_FRAGMENTS) {
+    traceEvent(TRACE_ERROR, "Internal error [%u > %u]", *fragment_id, MAX_NUM_FRAGMENTS);
+    return -2;
+  }
 
-  } else if(handler->chunk.load_page_on_demand || handler->read_only_mode) {
+  if (handler->chunk.fragment[*fragment_id]) {
+    // We already have the right fragment.  Do nothing.
+
+  } else if (handler->chunk.load_on_demand || handler->read_only_mode) {
+    // We should load the fragment.
     u_int32_t value_len;
     char str[32];
     void *value;
 
-    if (handler->chunk.chunk_mem) {
-      // We have the wrong chunk-fragment; free it before loading the right one.
-      free(handler->chunk.chunk_mem);
-      handler->chunk.chunk_mem = 0;
-      handler->chunk.chunk_mem_len = 0;
-    }
+    // TODO: optionally, unload other fragments?
 
-    /* We need to load the epoch handler->chunk.load_epoch/fragment_id */
-
-    snprintf(str, sizeof(str), "%u-%u", handler->chunk.load_epoch, fragment_id);
+    snprintf(str, sizeof(str), "%u-%u", handler->chunk.load_epoch, *fragment_id);
     if(map_raw_get(handler, str, strlen(str), &value, &value_len) == -1)
       return(-1);
 
-    handler->chunk.chunk_mem_len = qlz_size_decompressed(value);
+    uint32_t len = qlz_size_decompressed(value);
 
-    handler->chunk.chunk_mem = (u_int8_t*)malloc(handler->chunk.chunk_mem_len);
-    if(handler->chunk.chunk_mem == NULL) {
-      traceEvent(TRACE_WARNING, "Not enough memory (%u bytes)", handler->chunk.chunk_mem_len);
+    handler->chunk.fragment[*fragment_id] = (u_int8_t*)malloc(len);
+    if (!handler->chunk.fragment[*fragment_id]) {
+      traceEvent(TRACE_WARNING, "Not enough memory (%u bytes)", len);
       return(-2);
     }
 
-    qlz_decompress(value, handler->chunk.chunk_mem, &handler->state_decompress);
+    qlz_decompress(value, handler->chunk.fragment[*fragment_id], &handler->state_decompress);
     //free(value);
 
     handler->chunk.begin_epoch = handler->chunk.load_epoch;
-    handler->chunk.num_hash_indexes = handler->chunk.chunk_mem_len / handler->values_len;
-    handler->chunk.base_index = fragment_id * CHUNK_GROWTH;
+    if (handler->chunk.num_fragments <= *fragment_id)
+      handler->chunk.num_fragments = *fragment_id + 1;
 
-    /* Shift index */
-    hash_index -= handler->chunk.base_index;
-  }
+  } else if (handler->chunk.growable) {
+    // We should allocate a new fragment.
+    u_int32_t frag_len = CHUNK_GROWTH * handler->values_len;
+    u_int8_t *ptr    = malloc(frag_len);
 
- redo_getOffset:
+    if (ptr) {
+      memset(ptr, handler->default_unknown_value, frag_len);       
+      handler->chunk.fragment[*fragment_id] = ptr;
+      handler->chunk.num_fragments = *fragment_id + 1;
 
-  if(hash_index >= handler->chunk.num_hash_indexes) {
-    if(!handler->chunk.growable) {
-      traceEvent(TRACE_ERROR, "Index %u out of range %u...%u",
-		 hash_index,
-		 0,
-		 handler->chunk.num_hash_indexes);
-      return(-1);
+      traceEvent(TRACE_INFO, "Grown table to %u elements",
+        handler->chunk.num_fragments * CHUNK_GROWTH);
+
     } else {
-      u_int32_t to_add  = CHUNK_GROWTH * handler->values_len;
-      u_int32_t new_len = handler->chunk.chunk_mem_len + to_add;
-      u_int8_t *ptr    = malloc(new_len);
-
-      if(ptr != NULL) {
-	memcpy(ptr, handler->chunk.chunk_mem, handler->chunk.chunk_mem_len);
-	memset(&ptr[handler->chunk.chunk_mem_len], handler->default_unknown_value, to_add);       
-	free(handler->chunk.chunk_mem); /* Courtesy of Francesco Fusco <fusco@ntop.org> */
-	handler->chunk.num_hash_indexes += CHUNK_GROWTH;
-	handler->chunk.chunk_mem = ptr, handler->chunk.chunk_mem_len = new_len;
-
-	traceEvent(TRACE_INFO, "Grown table to %u elements", handler->chunk.num_hash_indexes);
-
-	goto redo_getOffset;
-      } else {
-	traceEvent(TRACE_WARNING, "Not enough memory (%u bytes): unable to grow table", new_len);
-	return(-2);
-      }
+      traceEvent(TRACE_WARNING, "Not enough memory (%u bytes): unable to grow table", frag_len);
+      return(-2);
     }
+
+  } else {
+    traceEvent(TRACE_ERROR, "Index %u out of range %u...%u",
+	       hash_index, 0,
+	       handler->chunk.num_fragments * CHUNK_GROWTH - 1);
+    return(-1);
   }
-
-  /* All hashes of one period are one attached to the other: fast insert, slow data extraction */
-  *offset = handler->values_len * hash_index;
-
-  if(*offset >= handler->chunk.chunk_mem_len)
-    traceEvent(TRACE_ERROR, "INTERNAL ERROR [Id: %s/%u][Offset: %" PRIu64 "/%u]",
-	       hash_name, hash_index, *offset, handler->chunk.chunk_mem_len);
 
   return(0);
 }
@@ -602,37 +572,26 @@ static int getOffset(tsdb_handler *handler, char *hash_name,
 int tsdb_set(tsdb_handler *handler,
 	     char *hash_index,
 	     tsdb_value *value_to_store) {
-  u_int32_t *value;
   u_int64_t offset;
-  int rc;
+  uint32_t fragment_id;
 
-  if(!handler->is_open)
-    return(-1);
+  if (!handler->is_open)
+    return -1;
 
-  if((!handler->chunk.load_page_on_demand)
-     && (handler->chunk.chunk_mem == NULL)) {
+  if (getOffset(handler, hash_index, &fragment_id, &offset, 1) == 0) {
+    memcpy(handler->chunk.fragment[fragment_id] + offset * handler->values_len,
+	value_to_store, handler->values_len);
+    handler->chunk.fragment_changed[fragment_id] = 1;
+
+    traceEvent(TRACE_INFO, "Succesfully set value [offset=%" PRIu64 "][value_len=%u][fragment_id=%u]",
+	       offset, handler->values_len, fragment_id);
+
+  } else {
     traceEvent(TRACE_ERROR, "Missing epoch");
-    return(-2);
+    return -2;
   }
 
-  if((rc = getOffset(handler, hash_index, &offset, 1)) == 0) {
-    int fragment_id = offset/(handler->values_len * CHUNK_GROWTH);
-
-    value = (tsdb_value*)(handler->chunk.chunk_mem + offset);
-    memcpy(value, value_to_store, handler->values_len);
-
-    /* Mark a fragment as changed */
-
-    if(fragment_id > MAX_NUM_FRAGMENTS)
-      traceEvent(TRACE_ERROR, "Internal error [%u > %u]", fragment_id, MAX_NUM_FRAGMENTS);
-    else {
-      traceEvent(TRACE_INFO, "Succesfully set value [offset=%" PRIu64 "][value_len=%u][fragment_id=%u]",
-		 offset, handler->values_len, fragment_id);
-      handler->chunk.fragment_changed[fragment_id] = 1;
-    }
-  }
-
-  return(rc);
+  return 0;
 }
 
 /* *********************************************************************** */
@@ -641,27 +600,26 @@ int tsdb_get(tsdb_handler *handler,
 	     char *hash_index,
 	     tsdb_value **value_to_read) {
   u_int64_t offset;
-  int rc;
+  uint32_t fragment_id;
 
-  *value_to_read = &handler->default_unknown_value;
-
-  if(!handler->is_open)
-    return(-1);
-
-  if((!handler->chunk.load_page_on_demand)
-     && (handler->chunk.chunk_mem == NULL)) {
-    traceEvent(TRACE_ERROR, "Missing epoch");
-    return(-2);
+  if(!handler->is_open) {
+    *value_to_read = &handler->default_unknown_value;
+    return -1;
   }
 
-  if((rc = getOffset(handler, hash_index, &offset, 0)) == 0) {
-    *value_to_read = (tsdb_value*)(handler->chunk.chunk_mem + offset);
+  if (getOffset(handler, hash_index, &fragment_id, &offset, 0) == 0) {
+    *value_to_read = (tsdb_value*)(handler->chunk.fragment[fragment_id] + offset * handler->values_len);
 
     traceEvent(TRACE_INFO, "Succesfully read value [offset=%" PRIu64 "][value_len=%u]",
 		 offset, handler->values_len);
+
+  } else {
+    traceEvent(TRACE_ERROR, "Missing epoch");
+    *value_to_read = &handler->default_unknown_value;
+    return -2;
   }
 
-  return(rc);
+  return 0;
 }
 
 /* *********************************************************************** */
