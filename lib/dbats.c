@@ -167,7 +167,7 @@ static int map_raw_get(tsdb_handler *handler,
     *value = data.data, *value_len = data.size;
     return(0);
   } else {
-    int len = key_len;
+    //int len = key_len;
     //traceEvent(TRACE_WARNING, "map_raw_get failed: key=\"%.*s\"\n", len, (char*)key);
     return(-1);
   }
@@ -281,7 +281,7 @@ static int hash_index_in_use(tsdb_handler *handler, u_int32_t idx) {
 static int get_map_hash_index(tsdb_handler *handler, char *name, u_int32_t *value) {
   void *ptr;
   u_int32_t len;
-  char str[32] = { 0 };
+  char str[128] = { 0 };
 
   snprintf(str, sizeof(str), "map-%s", name);
 
@@ -313,7 +313,7 @@ static int drop_map_hash_index(tsdb_handler *handler, char *idx,
 			       u_int32_t epoch_value, u_int32_t *value) {
   void *ptr;
   u_int32_t len;
-  char str[32];
+  char str[128];
 
   snprintf(str, sizeof(str), "map-%s", idx);
 
@@ -356,7 +356,7 @@ void tsdb_drop_key(tsdb_handler *handler,
 /* *********************************************************************** */
 
 static void set_map_hash_index(tsdb_handler *handler, char *idx, u_int32_t value) {
-  char str[32];
+  char str[128];
   tsdb_hash_mapping mapping;
 
   snprintf(str, sizeof(str), "map-%s", idx);
@@ -510,11 +510,26 @@ static int getOffset(tsdb_handler *handler, char *hash_name,
   } else
     traceEvent(TRACE_INFO, "%s mapped to idx %u", hash_name, hash_index);
 
-  if(handler->chunk.load_page_on_demand || handler->read_only_mode) {
-    u_int32_t fragment_id = hash_index / CHUNK_GROWTH;
+  u_int32_t fragment_id = hash_index / CHUNK_GROWTH;
+
+  if (handler->chunk.chunk_mem &&
+    //handler->chunk.begin_epoch == handler->chunk.load_epoch &&
+    handler->chunk.base_index == fragment_id * CHUNK_GROWTH)
+  {
+    // We already have the right chunk-fragment.
+    hash_index -= handler->chunk.base_index;
+
+  } else if(handler->chunk.load_page_on_demand || handler->read_only_mode) {
     u_int32_t value_len;
     char str[32];
     void *value;
+
+    if (handler->chunk.chunk_mem) {
+      // We have the wrong chunk-fragment; free it before loading the right one.
+      free(handler->chunk.chunk_mem);
+      handler->chunk.chunk_mem = 0;
+      handler->chunk.chunk_mem_len = 0;
+    }
 
     /* We need to load the epoch handler->chunk.load_epoch/fragment_id */
 
@@ -572,7 +587,7 @@ static int getOffset(tsdb_handler *handler, char *hash_name,
     }
   }
 
-  /* All hashes of one day are one attached to the other: fast insert, slow data extraction */
+  /* All hashes of one period are one attached to the other: fast insert, slow data extraction */
   *offset = handler->values_len * hash_index;
 
   if(*offset >= handler->chunk.chunk_mem_len)
