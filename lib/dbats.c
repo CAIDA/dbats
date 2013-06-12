@@ -251,7 +251,7 @@ u_int32_t normalize_epoch(tsdb_handler *handler, u_int32_t *t) {
 
 /* *********************************************************************** */
 
-static void reserve_hash_index(tsdb_handler *handler, u_int32_t idx) {
+static void reserve_key_index(tsdb_handler *handler, u_int32_t idx) {
   char str[32];
 
   snprintf(str, sizeof(str), "rsv-%u", idx);
@@ -260,7 +260,7 @@ static void reserve_hash_index(tsdb_handler *handler, u_int32_t idx) {
 
 /* *********************************************************************** */
 
-static void unreserve_hash_index(tsdb_handler *handler, u_int32_t idx) {
+static void unreserve_key_index(tsdb_handler *handler, u_int32_t idx) {
   char str[32];
 
   snprintf(str, sizeof(str), "rsv-%u", idx);
@@ -269,7 +269,7 @@ static void unreserve_hash_index(tsdb_handler *handler, u_int32_t idx) {
 
 /* *********************************************************************** */
 
-static int hash_index_in_use(tsdb_handler *handler, u_int32_t idx) {
+static int key_index_in_use(tsdb_handler *handler, u_int32_t idx) {
   char str[32];
 
   snprintf(str, sizeof(str), "rsv-%u", idx);
@@ -278,22 +278,22 @@ static int hash_index_in_use(tsdb_handler *handler, u_int32_t idx) {
 
 /* *********************************************************************** */
 
-static int get_map_hash_index(tsdb_handler *handler, char *name, u_int32_t *value) {
+static int get_key_index(tsdb_handler *handler, char *key, u_int32_t *value) {
   void *ptr;
   u_int32_t len;
   char str[128] = { 0 };
 
-  snprintf(str, sizeof(str), "map-%s", name);
+  snprintf(str, sizeof(str), "map-%s", key);
 
   if(map_raw_get(handler, str, strlen(str), &ptr, &len) == 0) {
-    tsdb_hash_mapping *mappings = (tsdb_hash_mapping*)ptr;
-    u_int i, found = 0, num_mappings = len / sizeof(tsdb_hash_mapping);
+    tsdb_key_mapping *mappings = (tsdb_key_mapping*)ptr;
+    u_int i, found = 0, num_mappings = len / sizeof(tsdb_key_mapping);
 
     for(i=0; i<num_mappings; i++) {
       if((mappings[i].epoch_start <= handler->chunk.load_epoch)
 	 && ((mappings[i].epoch_end == 0)
 	     || (mappings[i].epoch_end <= handler->chunk.load_epoch))) {
-	*value = mappings[i].hash_idx;
+	*value = mappings[i].key_idx;
 	found = 1;
 	break;
       }
@@ -309,17 +309,17 @@ static int get_map_hash_index(tsdb_handler *handler, char *name, u_int32_t *valu
 
 /* *********************************************************************** */
 
-static int drop_map_hash_index(tsdb_handler *handler, char *idx,
+static int drop_key_index(tsdb_handler *handler, char *key,
 			       u_int32_t epoch_value, u_int32_t *value) {
   void *ptr;
   u_int32_t len;
   char str[128];
 
-  snprintf(str, sizeof(str), "map-%s", idx);
+  snprintf(str, sizeof(str), "map-%s", key);
 
   if(map_raw_get(handler, str, strlen(str), &ptr, &len) == 0) {
-    tsdb_hash_mapping *mappings = (tsdb_hash_mapping*)ptr;
-    u_int i, found = 0, num_mappings = len / sizeof(tsdb_hash_mapping);
+    tsdb_key_mapping *mappings = (tsdb_key_mapping*)ptr;
+    u_int i, found = 0, num_mappings = len / sizeof(tsdb_key_mapping);
 
     for(i=0; i<num_mappings; i++) {
       if(mappings[i].epoch_end == 0) {
@@ -331,7 +331,7 @@ static int drop_map_hash_index(tsdb_handler *handler, char *idx,
     }
 
     //free(ptr);
-    // traceEvent(TRACE_INFO, "[GET] Mapping %u -> %u", idx, *value);
+    // traceEvent(TRACE_INFO, "[GET] Mapping %u -> %u", key, *value);
     return(found ? 0 : -1);
   }
 
@@ -341,30 +341,29 @@ static int drop_map_hash_index(tsdb_handler *handler, char *idx,
 /* *********************************************************************** */
 
 void tsdb_drop_key(tsdb_handler *handler,
-		    char *hash_name,
+		    char *key,
 		    u_int32_t epoch_value) {
-  u_int32_t hash_idx;
+  u_int32_t key_idx = 0;
 
-  if(drop_map_hash_index(handler, hash_name,
-			 epoch_value, &hash_idx) == 0) {
-    traceEvent(TRACE_INFO, "Index %s mapped to hash %u", hash_name, hash_idx);
-    unreserve_hash_index(handler, hash_idx);
+  if(drop_key_index(handler, key, epoch_value, &key_idx) == 0) {
+    traceEvent(TRACE_INFO, "Key %s mapped to index %u", key, key_idx);
+    unreserve_key_index(handler, key_idx);
   } else
-    traceEvent(TRACE_WARNING, "Unable to drop key %s", hash_name);
+    traceEvent(TRACE_WARNING, "Unable to drop key %s", key);
 }
 
 /* *********************************************************************** */
 
-static void set_map_hash_index(tsdb_handler *handler, char *idx, u_int32_t value) {
+static void set_key_index(tsdb_handler *handler, char *key, u_int32_t value) {
   char str[128];
-  tsdb_hash_mapping mapping;
+  tsdb_key_mapping mapping;
 
-  snprintf(str, sizeof(str), "map-%s", idx);
+  snprintf(str, sizeof(str), "map-%s", key);
   mapping.epoch_start = handler->chunk.load_epoch; /* Courtesy of Francesco Fusco <fusco@ntop.org> */
-  mapping.epoch_end = 0, mapping.hash_idx = value;
+  mapping.epoch_end = 0, mapping.key_idx = value;
   map_raw_set(handler, str, strlen(str), &mapping, sizeof(mapping));
 
-  traceEvent(TRACE_INFO, "[SET] Mapping %s -> %u", idx, value);
+  traceEvent(TRACE_INFO, "[SET] Mapping %s -> %u", key, value);
 }
 
 /* *********************************************************************** */
@@ -454,16 +453,16 @@ int tsdb_goto_epoch(tsdb_handler *handler,
 
 /* *********************************************************************** */
 
-static int mapIndexToHash(tsdb_handler *handler, char *idx,
+static int mapKeyToIndex(tsdb_handler *handler, char *key,
 			  u_int32_t *value, u_int8_t create_idx_if_needed) {
   /* Check if this is a known value */
-  if(get_map_hash_index(handler, idx, value) == 0) {
-    traceEvent(TRACE_INFO, "Index %s mapped to hash %u", idx, *value);
+  if(get_key_index(handler, key, value) == 0) {
+    traceEvent(TRACE_INFO, "Key %s mapped to index %u", key, *value);
     return(0);
   }
 
   if(!create_idx_if_needed) {
-    traceEvent(TRACE_INFO, "Unable to find index %s", idx);
+    traceEvent(TRACE_INFO, "Unable to find key %s", key);
     return(-1);
   }
 
@@ -471,16 +470,16 @@ static int mapIndexToHash(tsdb_handler *handler, char *idx,
   while(1) {
     *value = handler->lowest_free_index++;
 
-    if(!hash_index_in_use(handler, *value)) {
-      set_map_hash_index(handler, idx, *value);
-      reserve_hash_index(handler, *value);
+    if(!key_index_in_use(handler, *value)) {
+      set_key_index(handler, key, *value);
+      reserve_key_index(handler, *value);
       break;
     }
   }
 
-  // traceEvent(TRACE_NORMAL, "lowest_free_index:      %u [%s]", handler->lowest_free_index, idx);
+  // traceEvent(TRACE_NORMAL, "lowest_free_index:      %u [%s]", handler->lowest_free_index, key);
 
-  /* traceEvent(TRACE_INFO, "Index %s mapped to hash %u", idx, *value); */
+  /* traceEvent(TRACE_INFO, "Key %s mapped to index %u", key, *value); */
 
   return(0);
 }
@@ -488,18 +487,18 @@ static int mapIndexToHash(tsdb_handler *handler, char *idx,
 
 /* *********************************************************************** */
 
-static int getOffset(tsdb_handler *handler, char *hash_name,
+static int getOffset(tsdb_handler *handler, char *key,
 		     uint32_t *fragment_id, u_int64_t *offset, u_int8_t create_idx_if_needed) {
-  u_int32_t hash_index;
+  u_int32_t key_index;
 
-  if(mapIndexToHash(handler, hash_name, &hash_index, create_idx_if_needed) == -1) {
-    traceEvent(TRACE_INFO, "Unable to find index %s", hash_name);
+  if(mapKeyToIndex(handler, key, &key_index, create_idx_if_needed) == -1) {
+    traceEvent(TRACE_INFO, "Unable to find key %s", key);
     return(-1);
   } else
-    traceEvent(TRACE_INFO, "%s mapped to idx %u", hash_name, hash_index);
+    traceEvent(TRACE_INFO, "%s mapped to idx %u", key, key_index);
 
-  *fragment_id = hash_index / CHUNK_GROWTH;
-  *offset = (hash_index % CHUNK_GROWTH) * handler->values_len;
+  *fragment_id = key_index / CHUNK_GROWTH;
+  *offset = (key_index % CHUNK_GROWTH) * handler->values_len;
 
   if (*fragment_id > MAX_NUM_FRAGMENTS) {
     traceEvent(TRACE_ERROR, "Internal error [%u > %u]", *fragment_id, MAX_NUM_FRAGMENTS);
@@ -556,7 +555,7 @@ static int getOffset(tsdb_handler *handler, char *hash_name,
 
   } else {
     traceEvent(TRACE_ERROR, "Index %u out of range %u...%u",
-	       hash_index, 0,
+	       key_index, 0,
 	       handler->chunk.num_fragments * CHUNK_GROWTH - 1);
     return(-1);
   }
@@ -567,7 +566,7 @@ static int getOffset(tsdb_handler *handler, char *hash_name,
 /* *********************************************************************** */
 
 int tsdb_set(tsdb_handler *handler,
-	     char *hash_index,
+	     char *key,
 	     tsdb_value *value_to_store) {
   u_int64_t offset;
   uint32_t fragment_id;
@@ -575,7 +574,7 @@ int tsdb_set(tsdb_handler *handler,
   if (!handler->is_open)
     return -1;
 
-  if (getOffset(handler, hash_index, &fragment_id, &offset, 1) == 0) {
+  if (getOffset(handler, key, &fragment_id, &offset, 1) == 0) {
     memcpy(handler->chunk.fragment[fragment_id] + offset,
 	value_to_store, handler->values_len);
     handler->chunk.fragment_changed[fragment_id] = 1;
@@ -594,7 +593,7 @@ int tsdb_set(tsdb_handler *handler,
 /* *********************************************************************** */
 
 int tsdb_get(tsdb_handler *handler,
-	     char *hash_index,
+	     char *key,
 	     tsdb_value **value_to_read) {
   u_int64_t offset;
   uint32_t fragment_id;
@@ -604,7 +603,7 @@ int tsdb_get(tsdb_handler *handler,
     return -1;
   }
 
-  if (getOffset(handler, hash_index, &fragment_id, &offset, 0) == 0) {
+  if (getOffset(handler, key, &fragment_id, &offset, 0) == 0) {
     *value_to_read = (tsdb_value*)(handler->chunk.fragment[fragment_id] + offset);
 
     traceEvent(TRACE_INFO, "Succesfully read value [offset=%" PRIu64 "][value_len=%u]",

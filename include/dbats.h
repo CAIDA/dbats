@@ -76,8 +76,8 @@ typedef struct {
 typedef struct {
   u_int32_t epoch_start; /* Epoch since this mapping is valid       */
   u_int32_t epoch_end;   /* Epoch until which this mapping is valid */
-  u_int32_t hash_idx;
-} tsdb_hash_mapping;
+  u_int32_t key_idx;
+} tsdb_key_mapping;
 
 /* ************************************************** */
 
@@ -98,15 +98,15 @@ extern int tsdb_goto_epoch(tsdb_handler *handler,
 			    u_int8_t load_page_on_demand);
 
 extern int tsdb_set(tsdb_handler *handler,
-		    char *hash_index,
+		    char *key,
 		    tsdb_value *value_to_store);
 
 extern int tsdb_get(tsdb_handler *handler,
-		    char *hash_index,
+		    char *key,
 		    tsdb_value **value_to_read);
 
 extern void tsdb_drop_key(tsdb_handler *handler,
-			  char *hash_index,
+			  char *key,
 			  u_int32_t epoch_value);
 
 extern void tsdb_stat_print(tsdb_handler *handler);
