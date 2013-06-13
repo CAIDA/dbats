@@ -466,21 +466,20 @@ static int mapKeyToIndex(tsdb_handler *handler, char *key,
   }
 
 
-  while(1) {
+  while (handler->lowest_free_index < MAX_NUM_FRAGMENTS * CHUNK_GROWTH) {
     *value = handler->lowest_free_index++;
 
     if(!key_index_in_use(handler, *value)) {
       set_key_index(handler, key, *value);
       reserve_key_index(handler, *value);
+      traceEvent(TRACE_INFO, "Key %s mapped to index %u", key, *value);
+      return 0;
       break;
     }
   }
 
-  // traceEvent(TRACE_NORMAL, "lowest_free_index:      %u [%s]", handler->lowest_free_index, key);
-
-  /* traceEvent(TRACE_INFO, "Key %s mapped to index %u", key, *value); */
-
-  return(0);
+  traceEvent(TRACE_ERROR, "Out of indexes");
+  return -1;
 }
 
 
