@@ -11,14 +11,14 @@
 /* *********************************************************************** */
 
 static void map_raw_set(const tsdb_handler *handler,
-    void *key, u_int32_t key_len,
-    void *value, u_int32_t value_len);
+    const char *key, u_int32_t key_len,
+    const void *value, u_int32_t value_len);
 
 static void map_raw_delete(const tsdb_handler *handler,
-    void *key, u_int32_t key_len);
+    const char *key, u_int32_t key_len);
 
 static int map_raw_get(const tsdb_handler *handler,
-    void *key, u_int32_t key_len,
+    const char *key, u_int32_t key_len,
     void **value, u_int32_t *value_len);
 
 /* *********************************************************************** */
@@ -80,7 +80,7 @@ int tsdb_open(const char *tsdb_path, tsdb_handler *handler,
 /* *********************************************************************** */
 
 static void map_raw_delete(const tsdb_handler *handler,
-    void *key, u_int32_t key_len)
+    const char *key, u_int32_t key_len)
 {
     DBT key_data;
 
@@ -90,7 +90,8 @@ static void map_raw_delete(const tsdb_handler *handler,
     }
 
     memset(&key_data, 0, sizeof(key_data));
-    key_data.data = key, key_data.size = key_len;
+    key_data.data = (void*)key; // assumption: DB won't write to *key_data.data
+    key_data.size = key_len;
 
     if (handler->db->del(handler->db, NULL, &key_data, 0) != 0)
 	traceEvent(TRACE_WARNING, "Error while deleting key");
@@ -99,7 +100,7 @@ static void map_raw_delete(const tsdb_handler *handler,
 /* *********************************************************************** */
 
 static int map_raw_key_exists(const tsdb_handler *handler,
-    void *key, u_int32_t key_len)
+    const char *key, u_int32_t key_len)
 {
     void *value;
     u_int value_len;
@@ -113,8 +114,8 @@ static int map_raw_key_exists(const tsdb_handler *handler,
 /* *********************************************************************** */
 
 static void map_raw_set(const tsdb_handler *handler,
-    void *key, u_int32_t key_len,
-    void *value, u_int32_t value_len)
+    const char *key, u_int32_t key_len,
+    const void *value, u_int32_t value_len)
 {
     DBT key_data, data;
 
@@ -125,8 +126,10 @@ static void map_raw_set(const tsdb_handler *handler,
 
     memset(&key_data, 0, sizeof(key_data));
     memset(&data, 0, sizeof(data));
-    key_data.data = key, key_data.size = key_len;
-    data.data = value, data.size = value_len;
+    key_data.data = (void*)key; // assumption: DB won't write to *key_data.data
+    key_data.size = key_len;
+    data.data = (void*)value; // assuption: DB won't write to *data.data
+    data.size = value_len;
 
     if (handler->db->put(handler->db, NULL, &key_data, &data, 0) != 0)
 	traceEvent(TRACE_WARNING, "Error while map_set(%.*s)", key_len, (char*)key);
@@ -135,7 +138,7 @@ static void map_raw_set(const tsdb_handler *handler,
 /* *********************************************************************** */
 
 static int map_raw_get(const tsdb_handler *handler,
-    void *key, u_int32_t key_len,
+    const char *key, u_int32_t key_len,
     void **value, u_int32_t *value_len)
 {
     DBT key_data, data;
@@ -143,9 +146,11 @@ static int map_raw_get(const tsdb_handler *handler,
     memset(&key_data, 0, sizeof(key_data));
     memset(&data, 0, sizeof(data));
 
-    key_data.data = key, key_data.size = key_len;
+    key_data.data = (void*)key; // assumption: DB won't write to *key_data.data
+    key_data.size = key_len;
     if (handler->db->get(handler->db, NULL, &key_data, &data, 0) == 0) {
-	*value = data.data, *value_len = data.size;
+	*value = data.data;
+	*value_len = data.size;
 	return(0);
     } else {
 	//int len = key_len;

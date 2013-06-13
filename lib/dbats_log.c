@@ -23,12 +23,13 @@
 
 int traceLevel = 2;
 
-void traceEvent(int eventTraceLevel, char* file, int line, char * format, ...) {
+void traceEvent(int eventTraceLevel, const char* file, int line, const char * format, ...) {
   va_list va_ap;
 
   if(eventTraceLevel <= traceLevel) {
     char buf[2048], out_buf[640];
-    char theDate[32], *extra_msg = "";
+    char theDate[32];
+    const char *extra_msg = "";
     time_t theTime = time(NULL);
 
     va_start (va_ap, format);

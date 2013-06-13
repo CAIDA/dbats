@@ -24,6 +24,6 @@
 #define TRACE_INFO      3, __FILE__, __LINE__
 
 extern int traceLevel;
-extern void traceEvent(int eventTraceLevel, char* file, int line, char * format, ...)
+extern void traceEvent(int eventTraceLevel, const char* file, int line, const char * format, ...)
     __attribute__ ((format (printf, 4, 5)));
 

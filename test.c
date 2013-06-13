@@ -21,9 +21,9 @@
 #include "tsdb_api.h"
 
 int main(int argc, char *argv[]) {
-  char *tsdb_path = "my.tsdb";
+  const char *tsdb_path = "my.tsdb";
   tsdb_handler handler;
-  u_int32_t num_hash_indexes = 1000000, i;
+  u_int32_t i;
 
   traceLevel = 99;
 

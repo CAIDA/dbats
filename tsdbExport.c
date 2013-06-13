@@ -32,7 +32,7 @@ static void help(void) {
 
 /* ***************************************************************** */
 
-static void dump_argcv(int argc, char *argv[]){
+static void dump_argcv(int argc, const char *argv[]){
   int i;
 
   return; // FIX
@@ -53,7 +53,8 @@ static int create_rrd(tsdb_handler *handler, char *name, u_int start_time, u_int
   struct stat s;
 
   if(stat(name, &s) != 0) {
-    char *argv[32], str[6][32];
+    const char *argv[32];
+    char str[6][32];
     int argc = 0, rc, j;
 
     for(j=0; j<handler->num_values_per_entry; j++) {
@@ -68,7 +69,7 @@ static int create_rrd(tsdb_handler *handler, char *name, u_int start_time, u_int
 
     dump_argcv(argc, argv);
     rrd_clear_error();
-    rc = rrd_create_r(name, rrd_step, roundRRDtime(start_time-1, rrd_step)-rrd_step, argc, (const char**)argv);
+    rc = rrd_create_r(name, rrd_step, roundRRDtime(start_time-1, rrd_step)-rrd_step, argc, argv);
 
     if(rc != 0)
       traceEvent(TRACE_WARNING, "%s", rrd_get_error());
@@ -81,7 +82,7 @@ static int create_rrd(tsdb_handler *handler, char *name, u_int start_time, u_int
 /* ***************************************************************** */
 
 static int update_rrd(tsdb_handler *handler, char *name, u_int when, const u_int32_t *values) {
-  char *argv[32];
+  const char *argv[32];
   int argc = 0, rc, j;
   char str[32];
   time_t t = when;
