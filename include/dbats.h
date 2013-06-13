@@ -44,67 +44,64 @@
 #define MAX_NUM_FRAGMENTS      16384
 
 typedef struct {
-  u_int8_t *fragment[MAX_NUM_FRAGMENTS];
-  u_int32_t time;
-  u_int8_t growable;
-  u_int32_t num_fragments;
-  u_int8_t fragment_changed[MAX_NUM_FRAGMENTS];
-  u_int8_t load_on_demand;
+    u_int8_t *fragment[MAX_NUM_FRAGMENTS];
+    u_int32_t time;
+    u_int8_t growable;
+    u_int32_t num_fragments;
+    u_int8_t fragment_changed[MAX_NUM_FRAGMENTS];
+    u_int8_t load_on_demand;
 } tsdb_chunk;
 
 typedef u_int32_t tsdb_value;
 
 typedef struct {
-  u_int8_t  is_open;
-  u_int8_t  read_only_mode;              /* Mode used to open the db file */
-  u_int16_t num_values_per_entry;        /* How many tsdb_value will be specified per slot */
-  u_int16_t values_len;                  /* Size of a value in bytes */
-  u_int32_t default_unknown_value;       /* Default 0 */
-  u_int32_t lowest_free_index;           /* Hint for accelerating the assignment of free indexes */
-  u_int32_t rrd_slot_time_duration;      /* (sec) */
-  qlz_state_compress state_compress;     /* */
-  qlz_state_decompress state_decompress; /* */
+    u_int8_t  is_open;
+    u_int8_t  read_only_mode;              /* Mode used to open the db file */
+    u_int16_t num_values_per_entry;        /* How many tsdb_value will be specified per slot */
+    u_int16_t values_len;                  /* Size of a value in bytes */
+    u_int32_t default_unknown_value;       /* Default 0 */
+    u_int32_t lowest_free_index;           /* Hint for accelerating the assignment of free indexes */
+    u_int32_t rrd_slot_time_duration;      /* (sec) */
+    qlz_state_compress state_compress;     /* */
+    qlz_state_decompress state_decompress; /* */
 
-  /* Chunks */
-  tsdb_chunk chunk;
+    /* Chunks */
+    tsdb_chunk chunk;
 
-  /* Index mapping hash */
-  DB *db;
+    /* Index mapping hash */
+    DB *db;
 } tsdb_handler;
 
 typedef struct {
-  u_int32_t time_start; // First time in which this mapping is valid
-  u_int32_t time_end;   // Last time in which this mapping is valid
-  u_int32_t key_idx;
+    u_int32_t time_start; // First time in which this mapping is valid
+    u_int32_t time_end;   // Last time in which this mapping is valid
+    u_int32_t key_idx;
 } tsdb_key_mapping;
 
 /* ************************************************** */
 
-extern int  tsdb_open(char *tsdb_path, tsdb_handler *handler,
-		      u_int16_t *num_values_per_entry,
-		      u_int32_t rrd_slot_time_duration,
-		      u_int8_t read_only_mode);
+extern int tsdb_open(char *tsdb_path, tsdb_handler *handler,
+    u_int16_t *num_values_per_entry,
+    u_int32_t rrd_slot_time_duration,
+    u_int8_t read_only_mode);
 
 extern void tsdb_close(tsdb_handler *handler);
 
 extern u_int32_t normalize_time(tsdb_handler *handler, u_int32_t *time);
 
 extern int tsdb_goto_time(tsdb_handler *handler,
-			  u_int32_t time_value,
-			  u_int8_t create_if_needed,
-			  u_int8_t growable,
-			  u_int8_t load_page_on_demand);
+    u_int32_t time_value,
+    u_int8_t create_if_needed,
+    u_int8_t growable,
+    u_int8_t load_page_on_demand);
 
 extern int tsdb_set(tsdb_handler *handler,
-		    char *key,
-		    tsdb_value *value_to_store);
+    char *key, tsdb_value *value_to_store);
 
 extern int tsdb_get(tsdb_handler *handler,
-		    char *key,
-		    tsdb_value **value_to_read);
+    char *key, tsdb_value **value_to_read);
 
 extern void tsdb_drop_key(tsdb_handler *handler,
-			  char *key,
-			  u_int32_t time_value);
+    char *key, u_int32_t time_value);
 
 extern void tsdb_stat_print(tsdb_handler *handler);
