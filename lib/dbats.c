@@ -24,12 +24,10 @@ static int map_raw_get(tsdb_handler *handler,
 /* *********************************************************************** */
 
 int tsdb_open(char *tsdb_path, tsdb_handler *handler,
-    u_int16_t *num_values_per_entry,
+    u_int16_t num_values_per_entry,
     u_int32_t rrd_slot_time_duration,
     u_int8_t read_only_mode)
 {
-    void *value;
-    u_int32_t value_len;
     int ret, mode;
 
     memset(handler, 0, sizeof(tsdb_handler));
@@ -51,47 +49,25 @@ int tsdb_open(char *tsdb_path, tsdb_handler *handler,
 	return(-1);
     }
 
-    if (map_raw_get(handler, "lowest_free_index",
-	strlen("lowest_free_index"), &value, &value_len) == 0)
-    {
-	handler->lowest_free_index = *((u_int32_t*)value);
-    } else {
-	if (!handler->read_only_mode) {
-	    handler->lowest_free_index = 0;
-	    map_raw_set(handler, "lowest_free_index", strlen("lowest_free_index"),
-	        &handler->lowest_free_index, sizeof(handler->lowest_free_index));
-	}
-    }
+#define initcfg(handler, type, field, defaultval) \
+    do { \
+	void *value; \
+	u_int32_t value_len; \
+	if (map_raw_get(handler, #field, strlen(#field), &value, &value_len) == 0) { \
+	    handler->field = *((type*)value); \
+	} else if (!handler->read_only_mode) { \
+	    handler->field = (defaultval); \
+	    map_raw_set(handler, #field, strlen(#field), \
+		&handler->field, sizeof(handler->field)); \
+	} \
+	traceEvent(TRACE_INFO, "%-.22s = %u", #field, handler->field); \
+    } while (0)
 
-    if (map_raw_get(handler, "rrd_slot_time_duration",
-	strlen("rrd_slot_time_duration"), &value, &value_len) == 0)
-    {
-	handler->rrd_slot_time_duration = *((u_int32_t*)value);
-    } else {
-	if (!handler->read_only_mode) {
-	    handler->rrd_slot_time_duration = rrd_slot_time_duration;
-	    map_raw_set(handler, "rrd_slot_time_duration", strlen("rrd_slot_time_duration"),
-	        &handler->rrd_slot_time_duration, sizeof(handler->rrd_slot_time_duration));
-	}
-    }
-
-    if (map_raw_get(handler, "num_values_per_entry",
-	strlen("num_values_per_entry"), &value, &value_len) == 0)
-    {
-	*num_values_per_entry = handler->num_values_per_entry = *((u_int16_t*)value);
-    } else {
-	if (!handler->read_only_mode) {
-	    handler->num_values_per_entry = *num_values_per_entry;
-	    map_raw_set(handler, "num_values_per_entry", strlen("num_values_per_entry"),
-	        &handler->num_values_per_entry, sizeof(handler->num_values_per_entry));
-	}
-    }
+    initcfg(handler, u_int32_t, lowest_free_index,      0);
+    initcfg(handler, u_int32_t, rrd_slot_time_duration, rrd_slot_time_duration);
+    initcfg(handler, u_int16_t, num_values_per_entry,   num_values_per_entry);
 
     handler->values_len = handler->num_values_per_entry * sizeof(tsdb_value);
-
-    traceEvent(TRACE_INFO, "lowest_free_index:      %u", handler->lowest_free_index);
-    traceEvent(TRACE_INFO, "rrd_slot_time_duration: %u", handler->rrd_slot_time_duration);
-    traceEvent(TRACE_INFO, "num_values_per_entry:   %u", handler->num_values_per_entry);
 
     memset(&handler->state_compress, 0, sizeof(handler->state_compress));
     memset(&handler->state_decompress, 0, sizeof(handler->state_decompress));
@@ -387,9 +363,7 @@ static void set_key_index(tsdb_handler *handler, char *key, u_int32_t value)
 
 int tsdb_goto_time(tsdb_handler *handler,
     u_int32_t time_value,
-    u_int8_t create_if_needed,
-    u_int8_t growable,
-    u_int8_t load_on_demand)
+    uint32_t flags)
 {
     int rc;
     void *value;
@@ -408,7 +382,7 @@ int tsdb_goto_time(tsdb_handler *handler,
     /* Flush chunk if loaded */
     tsdb_flush_chunk(handler);
 
-    handler->chunk.load_on_demand = load_on_demand;
+    handler->chunk.load_on_demand = !!(flags & TSDB_LOAD_ON_DEMAND);
     handler->chunk.time = time_value;
 
     if (handler->chunk.load_on_demand)
@@ -419,7 +393,7 @@ int tsdb_goto_time(tsdb_handler *handler,
     traceEvent(TRACE_INFO, "goto_time %u: map_raw_get -> %d", time_value, rc);
 
     if (rc == -1) {
-	if (!create_if_needed) {
+	if (!(flags & TSDB_CREATE)) {
 	    traceEvent(TRACE_INFO, "Unable to goto time %u", time_value);
 	    return(-1);
 	}
@@ -462,7 +436,7 @@ int tsdb_goto_time(tsdb_handler *handler,
 	traceEvent(TRACE_INFO, "Moved to time %u", time_value);
     }
 
-    handler->chunk.growable = growable;
+    handler->chunk.growable = !!(flags & TSDB_GROWABLE);
 
     return(0);
 }

@@ -43,6 +43,11 @@
 #define CHUNK_GROWTH        10000
 #define MAX_NUM_FRAGMENTS      16384
 
+// Flags
+#define TSDB_CREATE          0x01
+#define TSDB_GROWABLE        0x02
+#define TSDB_LOAD_ON_DEMAND  0x04
+
 typedef struct {
     u_int8_t *fragment[MAX_NUM_FRAGMENTS];
     u_int32_t time;
@@ -81,7 +86,7 @@ typedef struct {
 /* ************************************************** */
 
 extern int tsdb_open(char *tsdb_path, tsdb_handler *handler,
-    u_int16_t *num_values_per_entry,
+    u_int16_t num_values_per_entry,
     u_int32_t rrd_slot_time_duration,
     u_int8_t read_only_mode);
 
@@ -90,10 +95,7 @@ extern void tsdb_close(tsdb_handler *handler);
 extern u_int32_t normalize_time(tsdb_handler *handler, u_int32_t *time);
 
 extern int tsdb_goto_time(tsdb_handler *handler,
-    u_int32_t time_value,
-    u_int8_t create_if_needed,
-    u_int8_t growable,
-    u_int8_t load_page_on_demand);
+    u_int32_t time_value, uint32_t flags);
 
 extern int tsdb_set(tsdb_handler *handler,
     char *key, tsdb_value *value_to_store);
