@@ -45,12 +45,11 @@
 
 typedef struct {
   u_int8_t *fragment[MAX_NUM_FRAGMENTS];
-  u_int32_t begin_epoch;
+  u_int32_t time;
   u_int8_t growable;
   u_int32_t num_fragments;
   u_int8_t fragment_changed[MAX_NUM_FRAGMENTS];
   u_int8_t load_on_demand;
-  u_int32_t load_epoch;
 } tsdb_chunk;
 
 typedef u_int32_t tsdb_value;
@@ -74,8 +73,8 @@ typedef struct {
 } tsdb_handler;
 
 typedef struct {
-  u_int32_t epoch_start; /* Epoch since this mapping is valid       */
-  u_int32_t epoch_end;   /* Epoch until which this mapping is valid */
+  u_int32_t time_start; // First time in which this mapping is valid
+  u_int32_t time_end;   // Last time in which this mapping is valid
   u_int32_t key_idx;
 } tsdb_key_mapping;
 
@@ -88,14 +87,13 @@ extern int  tsdb_open(char *tsdb_path, tsdb_handler *handler,
 
 extern void tsdb_close(tsdb_handler *handler);
 
-extern u_int32_t normalize_epoch(tsdb_handler *handler,
-				 u_int32_t *epoch);
+extern u_int32_t normalize_time(tsdb_handler *handler, u_int32_t *time);
 
-extern int tsdb_goto_epoch(tsdb_handler *handler,
-			    u_int32_t epoch_value,
-			    u_int8_t create_if_needed,
-			    u_int8_t growable,
-			    u_int8_t load_page_on_demand);
+extern int tsdb_goto_time(tsdb_handler *handler,
+			  u_int32_t time_value,
+			  u_int8_t create_if_needed,
+			  u_int8_t growable,
+			  u_int8_t load_page_on_demand);
 
 extern int tsdb_set(tsdb_handler *handler,
 		    char *key,
@@ -107,6 +105,6 @@ extern int tsdb_get(tsdb_handler *handler,
 
 extern void tsdb_drop_key(tsdb_handler *handler,
 			  char *key,
-			  u_int32_t epoch_value);
+			  u_int32_t time_value);
 
 extern void tsdb_stat_print(tsdb_handler *handler);

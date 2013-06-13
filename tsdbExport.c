@@ -174,7 +174,7 @@ int main(int argc, char *argv[]) {
 
   when = begin_when = time(NULL) + rrd_slot_time_duration * begin_day;
 
-  normalize_epoch(&handler, &when);
+  normalize_time(&handler, &when);
 
   the_time = time(NULL);
 
@@ -208,10 +208,10 @@ int main(int argc, char *argv[]) {
   for(i=0; i<num_days; i++) {
     int rc;
 
-    traceEvent(TRACE_INFO, "Moving to epoch %u", when);
+    traceEvent(TRACE_INFO, "Moving to time %u", when);
 
-    if((rc = tsdb_goto_epoch(&handler, when, 0, 0, 1 /* load on demand */)) == -1) {
-      traceEvent(TRACE_INFO, "Unable to find epoch %u", when);
+    if((rc = tsdb_goto_time(&handler, when, 0, 0, 1 /* load on demand */)) == -1) {
+      traceEvent(TRACE_INFO, "Unable to find time %u", when);
       rsp = defaults; /* Missing */
     } else
       rc = tsdb_get(&handler, hash_id, &rsp);

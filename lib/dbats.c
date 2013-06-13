@@ -205,7 +205,7 @@ static void tsdb_flush_chunk(tsdb_handler *handler) {
 		 fragment_size, compressed_len, i,
 		 compressed_len*100.0/fragment_size);
 
-      snprintf(str, sizeof(str), "%u-%u", handler->chunk.begin_epoch, i);
+      snprintf(str, sizeof(str), "%u-%u", handler->chunk.time, i);
 
       map_raw_set(handler, str, strlen(str), compressed, compressed_len);
     } else {
@@ -242,10 +242,10 @@ void tsdb_close(tsdb_handler *handler) {
 
 /* *********************************************************************** */
 
-static const time_t epoch_base = 259200; // 00:00 on first sunday of 1970, UTC
+static const time_t time_base = 259200; // 00:00 on first sunday of 1970, UTC
 
-u_int32_t normalize_epoch(tsdb_handler *handler, u_int32_t *t) {
-  *t -= (*t - epoch_base) % handler->rrd_slot_time_duration;
+u_int32_t normalize_time(tsdb_handler *handler, u_int32_t *t) {
+  *t -= (*t - time_base) % handler->rrd_slot_time_duration;
   return *t;
 }
 
@@ -290,9 +290,9 @@ static int get_key_index(tsdb_handler *handler, char *key, u_int32_t *value) {
     u_int i, found = 0, num_mappings = len / sizeof(tsdb_key_mapping);
 
     for(i=0; i<num_mappings; i++) {
-      if((mappings[i].epoch_start <= handler->chunk.load_epoch)
-	 && ((mappings[i].epoch_end == 0)
-	     || (mappings[i].epoch_end <= handler->chunk.load_epoch))) {
+      if((mappings[i].time_start <= handler->chunk.time)
+	 && ((mappings[i].time_end == 0)
+	     || (mappings[i].time_end <= handler->chunk.time /*???*/))) {
 	*value = mappings[i].key_idx;
 	found = 1;
 	break;
@@ -310,7 +310,7 @@ static int get_key_index(tsdb_handler *handler, char *key, u_int32_t *value) {
 /* *********************************************************************** */
 
 static int drop_key_index(tsdb_handler *handler, char *key,
-			       u_int32_t epoch_value, u_int32_t *value) {
+			       u_int32_t time_value, u_int32_t *value) {
   void *ptr;
   u_int32_t len;
   char str[128];
@@ -322,8 +322,8 @@ static int drop_key_index(tsdb_handler *handler, char *key,
     u_int i, found = 0, num_mappings = len / sizeof(tsdb_key_mapping);
 
     for(i=0; i<num_mappings; i++) {
-      if(mappings[i].epoch_end == 0) {
-	mappings[i].epoch_end = epoch_value;
+      if(mappings[i].time_end == 0) {
+	mappings[i].time_end = time_value;
 	found = 1;
 	map_raw_set(handler, str, strlen(str), &ptr, len);
 	break;
@@ -342,10 +342,10 @@ static int drop_key_index(tsdb_handler *handler, char *key,
 
 void tsdb_drop_key(tsdb_handler *handler,
 		    char *key,
-		    u_int32_t epoch_value) {
+		    u_int32_t time_value) {
   u_int32_t key_idx = 0;
 
-  if(drop_key_index(handler, key, epoch_value, &key_idx) == 0) {
+  if(drop_key_index(handler, key, time_value, &key_idx) == 0) {
     traceEvent(TRACE_INFO, "Key %s mapped to index %u", key, key_idx);
     unreserve_key_index(handler, key_idx);
   } else
@@ -359,8 +359,9 @@ static void set_key_index(tsdb_handler *handler, char *key, u_int32_t value) {
   tsdb_key_mapping mapping;
 
   snprintf(str, sizeof(str), "map-%s", key);
-  mapping.epoch_start = handler->chunk.load_epoch; /* Courtesy of Francesco Fusco <fusco@ntop.org> */
-  mapping.epoch_end = 0, mapping.key_idx = value;
+  mapping.time_start = handler->chunk.time; /* Courtesy of Francesco Fusco <fusco@ntop.org> */
+  mapping.time_end = 0;
+  mapping.key_idx = value;
   map_raw_set(handler, str, strlen(str), &mapping, sizeof(mapping));
 
   traceEvent(TRACE_INFO, "[SET] Mapping %s -> %u", key, value);
@@ -368,21 +369,21 @@ static void set_key_index(tsdb_handler *handler, char *key, u_int32_t value) {
 
 /* *********************************************************************** */
 
-int tsdb_goto_epoch(tsdb_handler *handler,
-		     u_int32_t epoch_value,
-		     u_int8_t create_if_needed,
-		     u_int8_t growable,
-		     u_int8_t load_on_demand) {
+int tsdb_goto_time(tsdb_handler *handler,
+		   u_int32_t time_value,
+		   u_int8_t create_if_needed,
+		   u_int8_t growable,
+		   u_int8_t load_on_demand) {
   int rc;
   void *value;
   u_int32_t value_len, fragment_id = 0;
   char str[32];
 
-  traceEvent(TRACE_INFO, "goto_epoch %u", epoch_value);
+  traceEvent(TRACE_INFO, "goto_time %u", time_value);
 
-  normalize_epoch(handler, &epoch_value);
-  if (handler->chunk.load_epoch == epoch_value) {
-    traceEvent(TRACE_INFO, "goto_epoch %u: already loaded", epoch_value);
+  normalize_time(handler, &time_value);
+  if (handler->chunk.time == time_value) {
+    traceEvent(TRACE_INFO, "goto_time %u: already loaded", time_value);
     return 0;
   }
 
@@ -390,29 +391,28 @@ int tsdb_goto_epoch(tsdb_handler *handler,
   tsdb_flush_chunk(handler);
 
   handler->chunk.load_on_demand = load_on_demand;
-  handler->chunk.load_epoch = epoch_value;
+  handler->chunk.time = time_value;
 
   if (handler->chunk.load_on_demand)
     return(0);
 
-  snprintf(str, sizeof(str), "%u-%u", epoch_value, fragment_id);
+  snprintf(str, sizeof(str), "%u-%u", time_value, fragment_id);
   rc = map_raw_get(handler, str, strlen(str), &value, &value_len);
-  traceEvent(TRACE_INFO, "goto_epoch %u: map_raw_get -> %d", epoch_value, rc);
+  traceEvent(TRACE_INFO, "goto_time %u: map_raw_get -> %d", time_value, rc);
 
   if(rc == -1) {
     if(!create_if_needed) {
-      traceEvent(TRACE_INFO, "Unable to goto epoch %u", epoch_value);
+      traceEvent(TRACE_INFO, "Unable to goto time %u", time_value);
       return(-1);
     }
-    traceEvent(TRACE_INFO, "new epoch %u", epoch_value);
+    traceEvent(TRACE_INFO, "new time %u", time_value);
 
     /* Create an empty chunk */
-    handler->chunk.begin_epoch = epoch_value;
     handler->chunk.num_fragments = 0;
 
   } else {
     /* We need to decompress data */
-    traceEvent(TRACE_INFO, "loaded epoch %u", epoch_value);
+    traceEvent(TRACE_INFO, "loaded time %u", time_value);
     uint32_t len;
 
     fragment_id = 0;
@@ -435,15 +435,14 @@ int tsdb_goto_epoch(tsdb_handler *handler,
       handler->chunk.fragment[fragment_id] = newfrag;
       fragment_id++;
 
-      snprintf(str, sizeof(str), "%u-%u", epoch_value, fragment_id);
+      snprintf(str, sizeof(str), "%u-%u", time_value, fragment_id);
       if(map_raw_get(handler, str, strlen(str), &value, &value_len) == -1)
 	break; /* No more fragments */
     } /* while */
 
-    handler->chunk.begin_epoch = epoch_value;
     handler->chunk.num_fragments = fragment_id;
 
-    traceEvent(TRACE_INFO, "Moved to goto epoch %u", epoch_value);
+    traceEvent(TRACE_INFO, "Moved to time %u", time_value);
   }
 
   handler->chunk.growable = growable;
@@ -516,7 +515,7 @@ static int getOffset(tsdb_handler *handler, char *key,
 
     // TODO: optionally, unload other fragments?
 
-    snprintf(str, sizeof(str), "%u-%u", handler->chunk.load_epoch, *fragment_id);
+    snprintf(str, sizeof(str), "%u-%u", handler->chunk.time, *fragment_id);
     if(map_raw_get(handler, str, strlen(str), &value, &value_len) == -1)
       return(-1);
 
@@ -531,7 +530,6 @@ static int getOffset(tsdb_handler *handler, char *key,
     qlz_decompress(value, handler->chunk.fragment[*fragment_id], &handler->state_decompress);
     //free(value);
 
-    handler->chunk.begin_epoch = handler->chunk.load_epoch;
     if (handler->chunk.num_fragments <= *fragment_id)
       handler->chunk.num_fragments = *fragment_id + 1;
 
@@ -583,7 +581,7 @@ int tsdb_set(tsdb_handler *handler,
 	       offset, handler->values_len, fragment_id);
 
   } else {
-    traceEvent(TRACE_ERROR, "Missing epoch");
+    traceEvent(TRACE_ERROR, "Missing time");
     return -2;
   }
 
@@ -610,7 +608,7 @@ int tsdb_get(tsdb_handler *handler,
 		 offset, handler->values_len);
 
   } else {
-    traceEvent(TRACE_ERROR, "Missing epoch");
+    traceEvent(TRACE_ERROR, "Missing time");
     *value_to_read = &handler->default_unknown_value;
     return -2;
   }

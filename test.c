@@ -34,7 +34,7 @@ int main(int argc, char *argv[]) {
   for(i=0; i<8; i++) {
     traceEvent(TRACE_INFO, "Run %u", i);
 
-    if(tsdb_goto_epoch(&handler, time(NULL)-(86400*i), 
+    if(tsdb_goto_time(&handler, time(NULL)-(86400*i), 
 			1 /* create_if_needed */,
 			1 /* growable */,
 			num_hash_indexes) == -1)
