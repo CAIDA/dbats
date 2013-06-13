@@ -24,21 +24,18 @@ int main(int argc, char *argv[]) {
   char *tsdb_path = "my.tsdb";
   tsdb_handler handler;
   u_int32_t num_hash_indexes = 1000000, i;
-  u_int16_t num_values_per_entry = 1;
 
   traceLevel = 99;
 
-  if(tsdb_open(tsdb_path, &handler, &num_values_per_entry, 86400 /* rrd_slot_time_duration */, 0) != 0)
+  if(tsdb_open(tsdb_path, &handler, 1, 86400 /* rrd_slot_time_duration */, 0) != 0)
     return(-1);
 
   for(i=0; i<8; i++) {
     traceEvent(TRACE_INFO, "Run %u", i);
 
-    if(tsdb_goto_time(&handler, time(NULL)-(86400*i), 
-			1 /* create_if_needed */,
-			1 /* growable */,
-			num_hash_indexes) == -1)
-      return(-1);
+    if (tsdb_goto_time(&handler, time(NULL)-(86400*i), 
+      TSDB_CREATE | TSDB_GROWABLE) == -1)
+        return(-1);
   }
 
   tsdb_close(&handler);

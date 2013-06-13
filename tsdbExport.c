@@ -114,7 +114,6 @@ int main(int argc, char *argv[]) {
   char *hash_id = NULL;
   char *tsdb_path = NULL, *out_filepath = NULL;
   u_int32_t rrd_slot_time_duration = 86400;
-  u_int16_t num_values_per_entry;
   u_int8_t js_mode = 0;
   FILE *out;
 
@@ -167,7 +166,7 @@ int main(int argc, char *argv[]) {
   traceEvent(TRACE_INFO, "Opening %s", tsdb_path);
 
   if(tsdb_open(tsdb_path, &handler,
-	       &num_values_per_entry, rrd_slot_time_duration, 1) != 0)
+	       1, rrd_slot_time_duration, 1) != 0)
     return(-1);
 
   tzset();
@@ -210,7 +209,7 @@ int main(int argc, char *argv[]) {
 
     traceEvent(TRACE_INFO, "Moving to time %u", when);
 
-    if((rc = tsdb_goto_time(&handler, when, 0, 0, 1 /* load on demand */)) == -1) {
+    if((rc = tsdb_goto_time(&handler, when, TSDB_LOAD_ON_DEMAND)) == -1) {
       traceEvent(TRACE_INFO, "Unable to find time %u", when);
       rsp = defaults; /* Missing */
     } else
