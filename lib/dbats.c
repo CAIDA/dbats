@@ -559,7 +559,7 @@ static int getOffset(tsdb_handler *handler, const char *key,
 /* *********************************************************************** */
 
 int tsdb_set(tsdb_handler *handler,
-    const char *key, tsdb_value *value_to_store)
+    const char *key, const tsdb_value *value_to_store)
 {
     u_int64_t offset;
     uint32_t fragment_id;
@@ -586,7 +586,7 @@ int tsdb_set(tsdb_handler *handler,
 /* *********************************************************************** */
 
 int tsdb_get(tsdb_handler *handler,
-    const char *key, tsdb_value **value_to_read)
+    const char *key, const tsdb_value **value_to_read)
 {
     u_int64_t offset;
     uint32_t fragment_id;

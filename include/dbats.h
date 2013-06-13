@@ -97,10 +97,10 @@ extern int tsdb_goto_time(tsdb_handler *handler,
     u_int32_t time_value, uint32_t flags);
 
 extern int tsdb_set(tsdb_handler *handler,
-    const char *key, tsdb_value *value_to_store);
+    const char *key, const tsdb_value *value_to_store);
 
 extern int tsdb_get(tsdb_handler *handler,
-    const char *key, tsdb_value **value_to_read);
+    const char *key, const tsdb_value **value_to_read);
 
 extern void tsdb_drop_key(const tsdb_handler *handler,
     const char *key, u_int32_t time_value);

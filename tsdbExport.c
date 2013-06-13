@@ -80,7 +80,7 @@ static int create_rrd(tsdb_handler *handler, char *name, u_int start_time, u_int
 
 /* ***************************************************************** */
 
-static int update_rrd(tsdb_handler *handler, char *name, u_int when, u_int32_t *values) {
+static int update_rrd(tsdb_handler *handler, char *name, u_int when, const u_int32_t *values) {
   char *argv[32];
   int argc = 0, rc, j;
   char str[32];
@@ -110,7 +110,9 @@ int main(int argc, char *argv[]) {
   int i, text_mode = 0, num_loops;
   tsdb_handler handler;
   int c, begin_day = 0, num_days = 0;
-  u_int32_t when, the_time, *rsp, defaults[] = { 0, 0 }, begin_when;
+  u_int32_t when, the_time, begin_when;
+  const u_int32_t *rsp;
+  uint32_t defaults[] = { 0, 0 };
   char *hash_id = NULL;
   char *tsdb_path = NULL, *out_filepath = NULL;
   u_int32_t rrd_slot_time_duration = 86400;
