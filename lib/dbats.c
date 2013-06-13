@@ -10,20 +10,20 @@
 
 /* *********************************************************************** */
 
-static void map_raw_set(tsdb_handler *handler,
+static void map_raw_set(const tsdb_handler *handler,
     void *key, u_int32_t key_len,
     void *value, u_int32_t value_len);
 
-static void map_raw_delete(tsdb_handler *handler,
+static void map_raw_delete(const tsdb_handler *handler,
     void *key, u_int32_t key_len);
 
-static int map_raw_get(tsdb_handler *handler,
+static int map_raw_get(const tsdb_handler *handler,
     void *key, u_int32_t key_len,
     void **value, u_int32_t *value_len);
 
 /* *********************************************************************** */
 
-int tsdb_open(char *tsdb_path, tsdb_handler *handler,
+int tsdb_open(const char *tsdb_path, tsdb_handler *handler,
     u_int16_t num_values_per_entry,
     u_int32_t rrd_slot_time_duration,
     u_int8_t read_only_mode)
@@ -79,7 +79,7 @@ int tsdb_open(char *tsdb_path, tsdb_handler *handler,
 
 /* *********************************************************************** */
 
-static void map_raw_delete(tsdb_handler *handler,
+static void map_raw_delete(const tsdb_handler *handler,
     void *key, u_int32_t key_len)
 {
     DBT key_data;
@@ -98,7 +98,7 @@ static void map_raw_delete(tsdb_handler *handler,
 
 /* *********************************************************************** */
 
-static int map_raw_key_exists(tsdb_handler *handler,
+static int map_raw_key_exists(const tsdb_handler *handler,
     void *key, u_int32_t key_len)
 {
     void *value;
@@ -112,7 +112,7 @@ static int map_raw_key_exists(tsdb_handler *handler,
 
 /* *********************************************************************** */
 
-static void map_raw_set(tsdb_handler *handler,
+static void map_raw_set(const tsdb_handler *handler,
     void *key, u_int32_t key_len,
     void *value, u_int32_t value_len)
 {
@@ -134,7 +134,7 @@ static void map_raw_set(tsdb_handler *handler,
 
 /* *********************************************************************** */
 
-static int map_raw_get(tsdb_handler *handler,
+static int map_raw_get(const tsdb_handler *handler,
     void *key, u_int32_t key_len,
     void **value, u_int32_t *value_len)
 {
@@ -219,13 +219,14 @@ void tsdb_close(tsdb_handler *handler)
 	traceEvent(TRACE_INFO, "Flushing database changes...");
 
     handler->db->close(handler->db, 0);
+    handler->is_open = 0;
 }
 
 /* *********************************************************************** */
 
 static const time_t time_base = 259200; // 00:00 on first sunday of 1970, UTC
 
-u_int32_t normalize_time(tsdb_handler *handler, u_int32_t *t)
+u_int32_t normalize_time(const tsdb_handler *handler, u_int32_t *t)
 {
     *t -= (*t - time_base) % handler->rrd_slot_time_duration;
     return *t;
@@ -233,7 +234,7 @@ u_int32_t normalize_time(tsdb_handler *handler, u_int32_t *t)
 
 /* *********************************************************************** */
 
-static void reserve_key_index(tsdb_handler *handler, u_int32_t idx)
+static void reserve_key_index(const tsdb_handler *handler, u_int32_t idx)
 {
     char str[32];
 
@@ -243,7 +244,7 @@ static void reserve_key_index(tsdb_handler *handler, u_int32_t idx)
 
 /* *********************************************************************** */
 
-static void unreserve_key_index(tsdb_handler *handler, u_int32_t idx)
+static void unreserve_key_index(const tsdb_handler *handler, u_int32_t idx)
 {
     char str[32];
 
@@ -253,7 +254,7 @@ static void unreserve_key_index(tsdb_handler *handler, u_int32_t idx)
 
 /* *********************************************************************** */
 
-static int key_index_in_use(tsdb_handler *handler, u_int32_t idx)
+static int key_index_in_use(const tsdb_handler *handler, u_int32_t idx)
 {
     char str[32];
 
@@ -263,7 +264,8 @@ static int key_index_in_use(tsdb_handler *handler, u_int32_t idx)
 
 /* *********************************************************************** */
 
-static int get_key_index(tsdb_handler *handler, char *key, u_int32_t *value)
+static int get_key_index(const tsdb_handler *handler,
+    const char *key, u_int32_t *value)
 {
     void *ptr;
     u_int32_t len;
@@ -298,7 +300,7 @@ static int get_key_index(tsdb_handler *handler, char *key, u_int32_t *value)
 
 /* *********************************************************************** */
 
-static int drop_key_index(tsdb_handler *handler, char *key,
+static int drop_key_index(const tsdb_handler *handler, const char *key,
     u_int32_t time_value, u_int32_t *value)
 {
     void *ptr;
@@ -332,7 +334,8 @@ static int drop_key_index(tsdb_handler *handler, char *key,
 
 /* *********************************************************************** */
 
-void tsdb_drop_key(tsdb_handler *handler, char *key, u_int32_t time_value)
+void tsdb_drop_key(const tsdb_handler *handler,
+    const char *key, u_int32_t time_value)
 {
     u_int32_t key_idx = 0;
 
@@ -345,7 +348,7 @@ void tsdb_drop_key(tsdb_handler *handler, char *key, u_int32_t time_value)
 
 /* *********************************************************************** */
 
-static void set_key_index(tsdb_handler *handler, char *key, u_int32_t value)
+static void set_key_index(const tsdb_handler *handler, const char *key, u_int32_t value)
 {
     char str[128];
     tsdb_key_mapping mapping;
@@ -443,7 +446,7 @@ int tsdb_goto_time(tsdb_handler *handler,
 
 /* *********************************************************************** */
 
-static int mapKeyToIndex(tsdb_handler *handler, char *key,
+static int mapKeyToIndex(tsdb_handler *handler, const char *key,
     u_int32_t *value, u_int8_t create_idx_if_needed)
 {
     /* Check if this is a known value */
@@ -477,7 +480,7 @@ static int mapKeyToIndex(tsdb_handler *handler, char *key,
 
 /* *********************************************************************** */
 
-static int getOffset(tsdb_handler *handler, char *key,
+static int getOffset(tsdb_handler *handler, const char *key,
     uint32_t *fragment_id, u_int64_t *offset, u_int8_t create_idx_if_needed)
 {
     u_int32_t key_index;
@@ -556,8 +559,7 @@ static int getOffset(tsdb_handler *handler, char *key,
 /* *********************************************************************** */
 
 int tsdb_set(tsdb_handler *handler,
-    char *key,
-    tsdb_value *value_to_store)
+    const char *key, tsdb_value *value_to_store)
 {
     u_int64_t offset;
     uint32_t fragment_id;
@@ -584,8 +586,7 @@ int tsdb_set(tsdb_handler *handler,
 /* *********************************************************************** */
 
 int tsdb_get(tsdb_handler *handler,
-    char *key,
-    tsdb_value **value_to_read)
+    const char *key, tsdb_value **value_to_read)
 {
     u_int64_t offset;
     uint32_t fragment_id;
@@ -612,7 +613,7 @@ int tsdb_get(tsdb_handler *handler,
 
 /* *********************************************************************** */
 
-void tsdb_stat_print(tsdb_handler *handler) {
+void tsdb_stat_print(const tsdb_handler *handler) {
     int ret;
     
     if ((ret = handler->db->stat_print(handler->db, DB_FAST_STAT)) != 0) {

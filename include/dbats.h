@@ -73,7 +73,6 @@ typedef struct {
     /* Chunks */
     tsdb_chunk chunk;
 
-    /* Index mapping hash */
     DB *db;
 } tsdb_handler;
 
@@ -85,25 +84,25 @@ typedef struct {
 
 /* ************************************************** */
 
-extern int tsdb_open(char *tsdb_path, tsdb_handler *handler,
+extern int tsdb_open(const char *tsdb_path, tsdb_handler *handler,
     u_int16_t num_values_per_entry,
     u_int32_t rrd_slot_time_duration,
     u_int8_t read_only_mode);
 
 extern void tsdb_close(tsdb_handler *handler);
 
-extern u_int32_t normalize_time(tsdb_handler *handler, u_int32_t *time);
+extern u_int32_t normalize_time(const tsdb_handler *handler, u_int32_t *time);
 
 extern int tsdb_goto_time(tsdb_handler *handler,
     u_int32_t time_value, uint32_t flags);
 
 extern int tsdb_set(tsdb_handler *handler,
-    char *key, tsdb_value *value_to_store);
+    const char *key, tsdb_value *value_to_store);
 
 extern int tsdb_get(tsdb_handler *handler,
-    char *key, tsdb_value **value_to_read);
+    const char *key, tsdb_value **value_to_read);
 
-extern void tsdb_drop_key(tsdb_handler *handler,
-    char *key, u_int32_t time_value);
+extern void tsdb_drop_key(const tsdb_handler *handler,
+    const char *key, u_int32_t time_value);
 
-extern void tsdb_stat_print(tsdb_handler *handler);
+extern void tsdb_stat_print(const tsdb_handler *handler);
