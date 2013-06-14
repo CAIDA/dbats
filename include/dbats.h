@@ -39,8 +39,8 @@
 
 /* ************************************************** */
 
-//#define CHUNK_GROWTH        100000
-#define CHUNK_GROWTH        10000
+//#define ENTRIES_PER_FRAG        100000
+#define ENTRIES_PER_FRAG        10000
 #define MAX_NUM_FRAGMENTS      16384
 
 // Flags
@@ -48,6 +48,8 @@
 #define TSDB_GROWABLE        0x02
 #define TSDB_LOAD_ON_DEMAND  0x04
 
+// Logical row or "time slice", containing all the entries for a given time.
+// Entries are actually batched into fragments within a tslice.
 typedef struct {
     u_int8_t *fragment[MAX_NUM_FRAGMENTS];
     u_int32_t time;
@@ -55,23 +57,22 @@ typedef struct {
     u_int32_t num_fragments;
     u_int8_t fragment_changed[MAX_NUM_FRAGMENTS];
     u_int8_t load_on_demand;
-} tsdb_chunk;
+} tsdb_tslice;
 
 typedef u_int32_t tsdb_value;
 
 typedef struct {
     u_int8_t  is_open;
-    u_int8_t  read_only_mode;              /* Mode used to open the db file */
-    u_int16_t num_values_per_entry;        /* How many tsdb_value will be specified per slot */
-    u_int16_t values_len;                  /* Size of a value in bytes */
-    u_int32_t default_unknown_value;       /* Default 0 */
-    u_int32_t lowest_free_index;           /* Hint for accelerating the assignment of free indexes */
-    u_int32_t rrd_slot_time_duration;      /* (sec) */
-    qlz_state_compress state_compress;     /* */
-    qlz_state_decompress state_decompress; /* */
+    u_int8_t  read_only_mode;              // Mode used to open the db file
+    u_int16_t num_values_per_entry;        // Number of tsdb_values per entry
+    u_int16_t entry_size;                  // Size of an entry (bytes)
+    u_int32_t default_unknown_value;       // Default 0
+    u_int32_t lowest_free_index;           // Hint to speed finding a free index
+    u_int32_t rrd_slot_time_duration;      // length of time slice (sec)
+    qlz_state_compress state_compress;     //
+    qlz_state_decompress state_decompress; //
 
-    /* Chunks */
-    tsdb_chunk chunk;
+    tsdb_tslice tslice;
 
     DB *db;
 } tsdb_handler;

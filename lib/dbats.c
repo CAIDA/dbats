@@ -67,7 +67,7 @@ int tsdb_open(const char *tsdb_path, tsdb_handler *handler,
     initcfg(handler, u_int32_t, rrd_slot_time_duration, rrd_slot_time_duration);
     initcfg(handler, u_int16_t, num_values_per_entry,   num_values_per_entry);
 
-    handler->values_len = handler->num_values_per_entry * sizeof(tsdb_value);
+    handler->entry_size = handler->num_values_per_entry * sizeof(tsdb_value);
 
     memset(&handler->state_compress, 0, sizeof(handler->state_compress));
     memset(&handler->state_decompress, 0, sizeof(handler->state_decompress));
@@ -161,14 +161,14 @@ static int map_raw_get(const tsdb_handler *handler,
 
 /* *********************************************************************** */
 
-static void tsdb_flush_chunk(tsdb_handler *handler)
+static void tsdb_flush_tslice(tsdb_handler *handler)
 {
     char *compressed;
     u_int compressed_len, buf_len;
-    u_int fragment_size = handler->values_len * CHUNK_GROWTH;
+    u_int fragment_size = handler->entry_size * ENTRIES_PER_FRAG;
     char str[32];
 
-    if (!handler->chunk.num_fragments) return;
+    if (!handler->tslice.num_fragments) return;
 
     buf_len = fragment_size + 400 /* Static value */;
     compressed = (char*)malloc(buf_len);
@@ -178,32 +178,32 @@ static void tsdb_flush_chunk(tsdb_handler *handler)
     }
 
     /* Write fragments to the DB */
-    for (int i=0; i < handler->chunk.num_fragments; i++) {
+    for (int i=0; i < handler->tslice.num_fragments; i++) {
 
-	if (!handler->chunk.fragment[i]) continue;
+	if (!handler->tslice.fragment[i]) continue;
 
-	if (!handler->read_only_mode && handler->chunk.fragment_changed[i]) {
+	if (!handler->read_only_mode && handler->tslice.fragment_changed[i]) {
 
-	    compressed_len = qlz_compress(handler->chunk.fragment[i],
+	    compressed_len = qlz_compress(handler->tslice.fragment[i],
 	        compressed, fragment_size, &handler->state_compress);
 
 	    traceEvent(TRACE_INFO, "Compression %u -> %u [fragment %u] [%.1f %%]",
 	        fragment_size, compressed_len, i,
 	        compressed_len*100.0/fragment_size);
 
-	    snprintf(str, sizeof(str), "%u-%u", handler->chunk.time, i);
+	    snprintf(str, sizeof(str), "%u-%u", handler->tslice.time, i);
 
 	    map_raw_set(handler, str, strlen(str), compressed, compressed_len);
 	} else {
 	    traceEvent(TRACE_INFO, "Skipping fragment %u (unchanged)", i);
 	}
-	handler->chunk.fragment_changed[i] = 0;
-	free(handler->chunk.fragment[i]);
-	handler->chunk.fragment[i] = 0;
+	handler->tslice.fragment_changed[i] = 0;
+	free(handler->tslice.fragment[i]);
+	handler->tslice.fragment[i] = 0;
     }
 
     free(compressed);
-    memset(&handler->chunk, 0, sizeof(handler->chunk));
+    memset(&handler->tslice, 0, sizeof(handler->tslice));
 }
 
 /* *********************************************************************** */
@@ -218,7 +218,7 @@ void tsdb_close(tsdb_handler *handler)
 	map_raw_set(handler, "lowest_free_index", strlen("lowest_free_index"),
 	    &handler->lowest_free_index, sizeof(handler->lowest_free_index));
 
-    tsdb_flush_chunk(handler);
+    tsdb_flush_tslice(handler);
 
     if (!handler->read_only_mode)
 	traceEvent(TRACE_INFO, "Flushing database changes...");
@@ -285,9 +285,9 @@ static int get_key_index(const tsdb_handler *handler,
 	u_int num_mappings = len / sizeof(tsdb_key_mapping);
 
 	for (i=0; i<num_mappings; i++) {
-	    if ((mappings[i].time_start <= handler->chunk.time) &&
+	    if ((mappings[i].time_start <= handler->tslice.time) &&
 		((mappings[i].time_end == 0) ||
-		(mappings[i].time_end <= handler->chunk.time /*???*/)))
+		(mappings[i].time_end <= handler->tslice.time /*???*/)))
 	    {
 	        *value = mappings[i].key_idx;
 	        found = 1;
@@ -359,7 +359,7 @@ static void set_key_index(const tsdb_handler *handler, const char *key, u_int32_
     tsdb_key_mapping mapping;
 
     snprintf(str, sizeof(str), "map-%s", key);
-    mapping.time_start = handler->chunk.time; /* Courtesy of Francesco Fusco <fusco@ntop.org> */
+    mapping.time_start = handler->tslice.time; /* Courtesy of Francesco Fusco <fusco@ntop.org> */
     mapping.time_end = 0;
     mapping.key_idx = value;
     map_raw_set(handler, str, strlen(str), &mapping, sizeof(mapping));
@@ -382,18 +382,18 @@ int tsdb_goto_time(tsdb_handler *handler,
     traceEvent(TRACE_INFO, "goto_time %u", time_value);
 
     normalize_time(handler, &time_value);
-    if (handler->chunk.time == time_value) {
+    if (handler->tslice.time == time_value) {
 	traceEvent(TRACE_INFO, "goto_time %u: already loaded", time_value);
 	return 0;
     }
 
-    /* Flush chunk if loaded */
-    tsdb_flush_chunk(handler);
+    /* Flush tslice if loaded */
+    tsdb_flush_tslice(handler);
 
-    handler->chunk.load_on_demand = !!(flags & TSDB_LOAD_ON_DEMAND);
-    handler->chunk.time = time_value;
+    handler->tslice.load_on_demand = !!(flags & TSDB_LOAD_ON_DEMAND);
+    handler->tslice.time = time_value;
 
-    if (handler->chunk.load_on_demand)
+    if (handler->tslice.load_on_demand)
 	return(0);
 
     snprintf(str, sizeof(str), "%u-%u", time_value, fragment_id);
@@ -407,8 +407,8 @@ int tsdb_goto_time(tsdb_handler *handler,
 	}
 	traceEvent(TRACE_INFO, "new time %u", time_value);
 
-	/* Create an empty chunk */
-	handler->chunk.num_fragments = 0;
+	/* Create an empty tslice */
+	handler->tslice.num_fragments = 0;
 
     } else {
 	/* We need to decompress data */
@@ -416,7 +416,7 @@ int tsdb_goto_time(tsdb_handler *handler,
 	uint32_t len;
 
 	fragment_id = 0;
-	handler->chunk.num_fragments = 0;
+	handler->tslice.num_fragments = 0;
 
 	while (1) {
 	    len = qlz_size_decompressed(value);
@@ -431,7 +431,7 @@ int tsdb_goto_time(tsdb_handler *handler,
 	    traceEvent(TRACE_NORMAL, "Decompression %u -> %u [fragment %u] [%.1f %%]",
 	        value_len, len, fragment_id, len*100.0/value_len);
 
-	    handler->chunk.fragment[fragment_id] = newfrag;
+	    handler->tslice.fragment[fragment_id] = newfrag;
 	    fragment_id++;
 
 	    snprintf(str, sizeof(str), "%u-%u", time_value, fragment_id);
@@ -439,12 +439,12 @@ int tsdb_goto_time(tsdb_handler *handler,
 	        break; /* No more fragments */
 	} /* while */
 
-	handler->chunk.num_fragments = fragment_id;
+	handler->tslice.num_fragments = fragment_id;
 
 	traceEvent(TRACE_INFO, "Moved to time %u", time_value);
     }
 
-    handler->chunk.growable = !!(flags & TSDB_GROWABLE);
+    handler->tslice.growable = !!(flags & TSDB_GROWABLE);
 
     return(0);
 }
@@ -465,10 +465,8 @@ static int mapKeyToIndex(tsdb_handler *handler, const char *key,
 	return(-1);
     }
 
-
-    while (handler->lowest_free_index < MAX_NUM_FRAGMENTS * CHUNK_GROWTH) {
+    while (handler->lowest_free_index < MAX_NUM_FRAGMENTS * ENTRIES_PER_FRAG) {
 	*value = handler->lowest_free_index++;
-
 	if (!key_index_in_use(handler, *value)) {
 	    set_key_index(handler, key, *value);
 	    reserve_key_index(handler, *value);
@@ -496,18 +494,18 @@ static int getOffset(tsdb_handler *handler, const char *key,
     } else
 	traceEvent(TRACE_INFO, "%s mapped to idx %u", key, key_index);
 
-    *fragment_id = key_index / CHUNK_GROWTH;
-    *offset = (key_index % CHUNK_GROWTH) * handler->values_len;
+    *fragment_id = key_index / ENTRIES_PER_FRAG;
+    *offset = (key_index % ENTRIES_PER_FRAG) * handler->entry_size;
 
     if (*fragment_id > MAX_NUM_FRAGMENTS) {
 	traceEvent(TRACE_ERROR, "Internal error [%u > %u]", *fragment_id, MAX_NUM_FRAGMENTS);
 	return -2;
     }
 
-    if (handler->chunk.fragment[*fragment_id]) {
+    if (handler->tslice.fragment[*fragment_id]) {
 	// We already have the right fragment.  Do nothing.
 
-    } else if (handler->chunk.load_on_demand || handler->read_only_mode) {
+    } else if (handler->tslice.load_on_demand || handler->read_only_mode) {
 	// We should load the fragment.
 	u_int32_t value_len;
 	char str[32];
@@ -515,36 +513,36 @@ static int getOffset(tsdb_handler *handler, const char *key,
 
 	// TODO: optionally, unload other fragments?
 
-	snprintf(str, sizeof(str), "%u-%u", handler->chunk.time, *fragment_id);
+	snprintf(str, sizeof(str), "%u-%u", handler->tslice.time, *fragment_id);
 	if (map_raw_get(handler, str, strlen(str), &value, &value_len) == -1)
 	    return(-1);
 
 	uint32_t len = qlz_size_decompressed(value);
 
-	handler->chunk.fragment[*fragment_id] = (u_int8_t*)malloc(len);
-	if (!handler->chunk.fragment[*fragment_id]) {
+	handler->tslice.fragment[*fragment_id] = (u_int8_t*)malloc(len);
+	if (!handler->tslice.fragment[*fragment_id]) {
 	    traceEvent(TRACE_WARNING, "Not enough memory (%u bytes)", len);
 	    return(-2);
 	}
 
-	qlz_decompress(value, handler->chunk.fragment[*fragment_id], &handler->state_decompress);
+	qlz_decompress(value, handler->tslice.fragment[*fragment_id], &handler->state_decompress);
 	//free(value);
 
-	if (handler->chunk.num_fragments <= *fragment_id)
-	    handler->chunk.num_fragments = *fragment_id + 1;
+	if (handler->tslice.num_fragments <= *fragment_id)
+	    handler->tslice.num_fragments = *fragment_id + 1;
 
-    } else if (handler->chunk.growable) {
+    } else if (handler->tslice.growable) {
 	// We should allocate a new fragment.
-	u_int32_t frag_len = CHUNK_GROWTH * handler->values_len;
+	u_int32_t frag_len = ENTRIES_PER_FRAG * handler->entry_size;
 	u_int8_t *ptr    = malloc(frag_len);
 
 	if (ptr) {
 	    memset(ptr, handler->default_unknown_value, frag_len);       
-	    handler->chunk.fragment[*fragment_id] = ptr;
-	    handler->chunk.num_fragments = *fragment_id + 1;
+	    handler->tslice.fragment[*fragment_id] = ptr;
+	    handler->tslice.num_fragments = *fragment_id + 1;
 
 	    traceEvent(TRACE_INFO, "Grown table to %u elements",
-	        handler->chunk.num_fragments * CHUNK_GROWTH);
+	        handler->tslice.num_fragments * ENTRIES_PER_FRAG);
 
 	} else {
 	    traceEvent(TRACE_WARNING, "Not enough memory (%u bytes): unable to grow table", frag_len);
@@ -554,7 +552,7 @@ static int getOffset(tsdb_handler *handler, const char *key,
     } else {
 	traceEvent(TRACE_ERROR, "Index %u out of range %u...%u",
 	    key_index, 0,
-	    handler->chunk.num_fragments * CHUNK_GROWTH - 1);
+	    handler->tslice.num_fragments * ENTRIES_PER_FRAG - 1);
 	return(-1);
     }
 
@@ -573,12 +571,12 @@ int tsdb_set(tsdb_handler *handler,
 	return -1;
 
     if (getOffset(handler, key, &fragment_id, &offset, 1) == 0) {
-	memcpy(handler->chunk.fragment[fragment_id] + offset,
-	        value_to_store, handler->values_len);
-	handler->chunk.fragment_changed[fragment_id] = 1;
+	memcpy(handler->tslice.fragment[fragment_id] + offset,
+	        value_to_store, handler->entry_size);
+	handler->tslice.fragment_changed[fragment_id] = 1;
 
 	traceEvent(TRACE_INFO, "Succesfully set value [offset=%" PRIu64 "][value_len=%u][fragment_id=%u]",
-	    offset, handler->values_len, fragment_id);
+	    offset, handler->entry_size, fragment_id);
 
     } else {
 	traceEvent(TRACE_ERROR, "Missing time");
@@ -602,10 +600,10 @@ int tsdb_get(tsdb_handler *handler,
     }
 
     if (getOffset(handler, key, &fragment_id, &offset, 0) == 0) {
-	*value_to_read = (tsdb_value*)(handler->chunk.fragment[fragment_id] + offset);
+	*value_to_read = (tsdb_value*)(handler->tslice.fragment[fragment_id] + offset);
 
 	traceEvent(TRACE_INFO, "Succesfully read value [offset=%" PRIu64 "][value_len=%u]",
-	    offset, handler->values_len);
+	    offset, handler->entry_size);
 
     } else {
 	traceEvent(TRACE_ERROR, "Missing time");
