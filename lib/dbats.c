@@ -72,6 +72,8 @@ int tsdb_open(const char *tsdb_path, tsdb_handler *handler,
     memset(&handler->state_compress, 0, sizeof(handler->state_compress));
     memset(&handler->state_decompress, 0, sizeof(handler->state_decompress));
 
+    handler->num_agglvls = 1; // XXX
+    handler->agg[0].period = handler->rrd_slot_time_duration; // XXX
     handler->is_open = 1;
 
     return(0);
@@ -105,10 +107,7 @@ static int map_raw_key_exists(const tsdb_handler *handler,
     void *value;
     u_int value_len;
 
-    if (map_raw_get(handler, key, key_len, &value, &value_len) == 0) {
-	return(1);
-    } else
-	return(0);
+    return (map_raw_get(handler, key, key_len, &value, &value_len) == 0);
 }
 
 /* *********************************************************************** */
@@ -161,49 +160,43 @@ static int map_raw_get(const tsdb_handler *handler,
 
 /* *********************************************************************** */
 
-static void tsdb_flush_tslice(tsdb_handler *handler)
+#define QLZ_OVERHEAD 400
+
+static void tsdb_flush_tslice(tsdb_handler *handler, int agglvl)
 {
-    char *compressed;
-    u_int compressed_len, buf_len;
     u_int fragment_size = handler->entry_size * ENTRIES_PER_FRAG;
-    char str[32];
-
-    if (!handler->tslice.num_fragments) return;
-
-    buf_len = fragment_size + 400 /* Static value */;
-    compressed = (char*)malloc(buf_len);
-    if (!compressed) {
+    char dbkey[32];
+    u_int buf_len = fragment_size + QLZ_OVERHEAD;
+    char *buf = (char*)malloc(buf_len);
+    if (!buf) {
 	traceEvent(TRACE_WARNING, "Not enough memory (%u bytes)", buf_len);
 	return;
     }
 
     /* Write fragments to the DB */
-    for (int i=0; i < handler->tslice.num_fragments; i++) {
+    for (int f=0; f < handler->tslice[agglvl].num_fragments; f++) {
+	if (!handler->tslice[agglvl].fragment[f]) continue;
 
-	if (!handler->tslice.fragment[i]) continue;
-
-	if (!handler->read_only_mode && handler->tslice.fragment_changed[i]) {
-
-	    compressed_len = qlz_compress(handler->tslice.fragment[i],
-	        compressed, fragment_size, &handler->state_compress);
-
+	if (!handler->read_only_mode && handler->tslice[agglvl].fragment_changed[f]) {
+	    u_int compressed_len = qlz_compress(handler->tslice[agglvl].fragment[f],
+		buf, fragment_size, &handler->state_compress);
 	    traceEvent(TRACE_INFO, "Compression %u -> %u [fragment %u] [%.1f %%]",
-	        fragment_size, compressed_len, i,
-	        compressed_len*100.0/fragment_size);
-
-	    snprintf(str, sizeof(str), "%u-%u", handler->tslice.time, i);
-
-	    map_raw_set(handler, str, strlen(str), compressed, compressed_len);
+		fragment_size, compressed_len, f,
+		compressed_len*100.0/fragment_size);
+	    snprintf(dbkey, sizeof(dbkey), "%u-%u", handler->tslice[agglvl].time, f);
+	    map_raw_set(handler, dbkey, strlen(dbkey), buf, compressed_len);
 	} else {
-	    traceEvent(TRACE_INFO, "Skipping fragment %u (unchanged)", i);
+	    traceEvent(TRACE_INFO, "Skipping level %d fragment %d (unchanged)", agglvl, f);
 	}
-	handler->tslice.fragment_changed[i] = 0;
-	free(handler->tslice.fragment[i]);
-	handler->tslice.fragment[i] = 0;
+
+	handler->tslice[agglvl].fragment_changed[f] = 0;
+	free(handler->tslice[agglvl].fragment[f]);
+	handler->tslice[agglvl].fragment[f] = 0;
     }
 
-    free(compressed);
-    memset(&handler->tslice, 0, sizeof(handler->tslice));
+    memset(&handler->tslice[agglvl], 0, sizeof(tsdb_tslice));
+
+    free(buf);
 }
 
 /* *********************************************************************** */
@@ -218,7 +211,9 @@ void tsdb_close(tsdb_handler *handler)
 	map_raw_set(handler, "lowest_free_index", strlen("lowest_free_index"),
 	    &handler->lowest_free_index, sizeof(handler->lowest_free_index));
 
-    tsdb_flush_tslice(handler);
+    for (int agglvl = 0; agglvl < handler->num_agglvls; agglvl++) {
+	tsdb_flush_tslice(handler, agglvl);
+    }
 
     if (!handler->read_only_mode)
 	traceEvent(TRACE_INFO, "Flushing database changes...");
@@ -231,9 +226,9 @@ void tsdb_close(tsdb_handler *handler)
 
 static const time_t time_base = 259200; // 00:00 on first sunday of 1970, UTC
 
-u_int32_t normalize_time(const tsdb_handler *handler, u_int32_t *t)
+u_int32_t normalize_time(const tsdb_handler *handler, int agglvl, u_int32_t *t)
 {
-    *t -= (*t - time_base) % handler->rrd_slot_time_duration;
+    *t -= (*t - time_base) % handler->agg[agglvl].period;
     return *t;
 }
 
@@ -241,62 +236,63 @@ u_int32_t normalize_time(const tsdb_handler *handler, u_int32_t *t)
 
 static void reserve_key_index(const tsdb_handler *handler, u_int32_t idx)
 {
-    char str[32];
+    char dbkey[32];
 
-    snprintf(str, sizeof(str), "rsv-%u", idx);
-    map_raw_set(handler, str, strlen(str), "", 0);
+    snprintf(dbkey, sizeof(dbkey), "rsv-%u", idx);
+    map_raw_set(handler, dbkey, strlen(dbkey), "", 0);
 }
 
 /* *********************************************************************** */
 
 static void unreserve_key_index(const tsdb_handler *handler, u_int32_t idx)
 {
-    char str[32];
+    char dbkey[32];
 
-    snprintf(str, sizeof(str), "rsv-%u", idx);
-    map_raw_delete(handler, str, strlen(str));
+    snprintf(dbkey, sizeof(dbkey), "rsv-%u", idx);
+    map_raw_delete(handler, dbkey, strlen(dbkey));
 }
 
 /* *********************************************************************** */
 
 static int key_index_in_use(const tsdb_handler *handler, u_int32_t idx)
 {
-    char str[32];
+    char dbkey[32];
 
-    snprintf(str, sizeof(str), "rsv-%u", idx);
-    return(map_raw_key_exists(handler, str, strlen(str)));
+    snprintf(dbkey, sizeof(dbkey), "rsv-%u", idx);
+    return(map_raw_key_exists(handler, dbkey, strlen(dbkey)));
 }
 
 /* *********************************************************************** */
 
-static int get_key_index(const tsdb_handler *handler,
-    const char *key, u_int32_t *value)
+static int get_key_index(const tsdb_handler *handler, int agglvl,
+    const char *key, u_int32_t *key_idx)
 {
     void *ptr;
     u_int32_t len;
-    char str[128] = { 0 };
+    char dbkey[128] = { 0 };
+    const tsdb_tslice *tslice = &handler->tslice[agglvl];
 
-    snprintf(str, sizeof(str), "map-%s", key);
+    snprintf(dbkey, sizeof(dbkey), "map-%s", key);
 
-    if (map_raw_get(handler, str, strlen(str), &ptr, &len) == 0) {
+    if (map_raw_get(handler, dbkey, strlen(dbkey), &ptr, &len) == 0) {
 	tsdb_key_mapping *mappings = (tsdb_key_mapping*)ptr;
 	u_int i;
 	u_int found = 0;
 	u_int num_mappings = len / sizeof(tsdb_key_mapping);
 
 	for (i=0; i<num_mappings; i++) {
-	    if ((mappings[i].time_start <= handler->tslice.time) &&
+	    if ((tslice->time >= mappings[i].time_start) &&
 		((mappings[i].time_end == 0) ||
-		(mappings[i].time_end <= handler->tslice.time /*???*/)))
+		(tslice->time < mappings[i].time_end)))
 	    {
-	        *value = mappings[i].key_idx;
+	        *key_idx = mappings[i].key_idx;
 	        found = 1;
 	        break;
 	    }
-	} /* for */
+	}
 
 	//free(ptr);
-	// traceEvent(TRACE_INFO, "[GET] Mapping %u -> %u", idx, *value);
+	// traceEvent(TRACE_INFO, "[GET] Mapping %u -> %u", idx, *key_idx);
 	return(found ? 0 : -1);
     }
 
@@ -306,15 +302,17 @@ static int get_key_index(const tsdb_handler *handler,
 /* *********************************************************************** */
 
 static int drop_key_index(const tsdb_handler *handler, const char *key,
-    u_int32_t time_value, u_int32_t *value)
+    u_int32_t time_value, u_int32_t *key_idx)
 {
     void *ptr;
     u_int32_t len;
-    char str[128];
+    char dbkey[128];
 
-    snprintf(str, sizeof(str), "map-%s", key);
+    // XXX TODO: allowed only if time_value is the latest time ever seen
 
-    if (map_raw_get(handler, str, strlen(str), &ptr, &len) == 0) {
+    snprintf(dbkey, sizeof(dbkey), "map-%s", key);
+
+    if (map_raw_get(handler, dbkey, strlen(dbkey), &ptr, &len) == 0) {
 	tsdb_key_mapping *mappings = (tsdb_key_mapping*)ptr;
 	u_int i;
 	u_int found = 0;
@@ -324,13 +322,13 @@ static int drop_key_index(const tsdb_handler *handler, const char *key,
 	    if (mappings[i].time_end == 0) {
 	        mappings[i].time_end = time_value;
 	        found = 1;
-	        map_raw_set(handler, str, strlen(str), &ptr, len);
+	        map_raw_set(handler, dbkey, strlen(dbkey), &ptr, len);
 	        break;
 	    }
 	}
 
 	//free(ptr);
-	// traceEvent(TRACE_INFO, "[GET] Mapping %u -> %u", key, *value);
+	// traceEvent(TRACE_INFO, "[GET] Mapping %u -> %u", key, *key_idx);
 	return(found ? 0 : -1);
     }
 
@@ -353,110 +351,112 @@ void tsdb_drop_key(const tsdb_handler *handler,
 
 /* *********************************************************************** */
 
-static void set_key_index(const tsdb_handler *handler, const char *key, u_int32_t value)
+static void set_key_index(const tsdb_handler *handler, const char *key, u_int32_t key_idx)
 {
-    char str[128];
+    char dbkey[128];
     tsdb_key_mapping mapping;
 
-    snprintf(str, sizeof(str), "map-%s", key);
-    mapping.time_start = handler->tslice.time; /* Courtesy of Francesco Fusco <fusco@ntop.org> */
+    snprintf(dbkey, sizeof(dbkey), "map-%s", key);
+    mapping.time_start = handler->tslice[0].time; // XXX
     mapping.time_end = 0;
-    mapping.key_idx = value;
-    map_raw_set(handler, str, strlen(str), &mapping, sizeof(mapping));
+    mapping.key_idx = key_idx;
+    map_raw_set(handler, dbkey, strlen(dbkey), &mapping, sizeof(mapping));
 
-    traceEvent(TRACE_INFO, "[SET] Mapping %s -> %u", key, value);
+    traceEvent(TRACE_INFO, "[SET] Mapping %s -> %u", key, key_idx);
 }
 
 /* *********************************************************************** */
 
-int tsdb_goto_time(tsdb_handler *handler,
-    u_int32_t time_value,
-    uint32_t flags)
+int tsdb_goto_time(tsdb_handler *handler, u_int32_t time_value, uint32_t flags)
 {
     int rc;
     void *value;
     u_int32_t value_len;
-    u_int32_t fragment_id = 0;
-    char str[32];
+    char dbkey[32];
 
     traceEvent(TRACE_INFO, "goto_time %u", time_value);
 
-    normalize_time(handler, &time_value);
-    if (handler->tslice.time == time_value) {
-	traceEvent(TRACE_INFO, "goto_time %u: already loaded", time_value);
-	return 0;
-    }
+    for (int agglvl = 0; agglvl < handler->num_agglvls; agglvl++) {
+	tsdb_tslice *tslice = &handler->tslice[agglvl];
+	u_int32_t t = time_value;
 
-    /* Flush tslice if loaded */
-    tsdb_flush_tslice(handler);
-
-    handler->tslice.load_on_demand = !!(flags & TSDB_LOAD_ON_DEMAND);
-    handler->tslice.time = time_value;
-
-    if (handler->tslice.load_on_demand)
-	return(0);
-
-    snprintf(str, sizeof(str), "%u-%u", time_value, fragment_id);
-    rc = map_raw_get(handler, str, strlen(str), &value, &value_len);
-    traceEvent(TRACE_INFO, "goto_time %u: map_raw_get -> %d", time_value, rc);
-
-    if (rc == -1) {
-	if (!(flags & TSDB_CREATE)) {
-	    traceEvent(TRACE_INFO, "Unable to goto time %u", time_value);
-	    return(-1);
+	normalize_time(handler, agglvl, &t);
+	if (tslice->time == t) {
+	    traceEvent(TRACE_INFO, "goto_time %u: already loaded", t);
+	    continue;
 	}
-	traceEvent(TRACE_INFO, "new time %u", time_value);
 
-	/* Create an empty tslice */
-	handler->tslice.num_fragments = 0;
+	/* Flush tslice if loaded */
+	tsdb_flush_tslice(handler, agglvl);
 
-    } else {
-	/* We need to decompress data */
-	traceEvent(TRACE_INFO, "loaded time %u", time_value);
-	uint32_t len;
+	tslice->load_on_demand = !!(flags & TSDB_LOAD_ON_DEMAND);
+	tslice->time = t;
 
-	fragment_id = 0;
-	handler->tslice.num_fragments = 0;
+	if (tslice->load_on_demand)
+	    continue;
 
-	while (1) {
-	    len = qlz_size_decompressed(value);
+	u_int32_t fragment_id = 0;
+	// XXX TODO: include agg level in dbkey
+	snprintf(dbkey, sizeof(dbkey), "%u-%u", t, fragment_id);
+	rc = map_raw_get(handler, dbkey, strlen(dbkey), &value, &value_len);
+	traceEvent(TRACE_INFO, "goto_time %u: map_raw_get -> %d", time_value, rc);
 
-	    uint8_t *newfrag = (u_int8_t*)malloc(len);
-	    if (!newfrag) {
-	        traceEvent(TRACE_WARNING, "Not enough memory (%u bytes)", len);
-	        free(value);
-	        return(-2);
+	if (rc == -1) {
+	    if (!(flags & TSDB_CREATE)) {
+		traceEvent(TRACE_INFO, "Unable to goto time %u", time_value);
+		return(-1);
 	    }
-	    len = qlz_decompress(value, newfrag, &handler->state_decompress);
-	    traceEvent(TRACE_NORMAL, "Decompression %u -> %u [fragment %u] [%.1f %%]",
-	        value_len, len, fragment_id, len*100.0/value_len);
+	    traceEvent(TRACE_INFO, "new time %u", time_value);
 
-	    handler->tslice.fragment[fragment_id] = newfrag;
-	    fragment_id++;
+	    /* Create an empty tslice */
+	    tslice->num_fragments = 0;
 
-	    snprintf(str, sizeof(str), "%u-%u", time_value, fragment_id);
-	    if (map_raw_get(handler, str, strlen(str), &value, &value_len) == -1)
-	        break; /* No more fragments */
-	} /* while */
+	} else {
+	    /* We need to decompress data */
+	    traceEvent(TRACE_INFO, "loaded time %u", t);
+	    uint32_t len;
+	    fragment_id = 0;
+	    tslice->num_fragments = 0;
 
-	handler->tslice.num_fragments = fragment_id;
+	    while (1) {
+		len = qlz_size_decompressed(value);
 
-	traceEvent(TRACE_INFO, "Moved to time %u", time_value);
+		uint8_t *newfrag = (u_int8_t*)malloc(len);
+		if (!newfrag) {
+		    traceEvent(TRACE_WARNING, "Not enough memory (%u bytes)", len);
+		    free(value);
+		    return(-2);
+		}
+		len = qlz_decompress(value, newfrag, &handler->state_decompress);
+		traceEvent(TRACE_NORMAL, "Decompression %u -> %u [slice %d] [fragment %u] [%.1f %%]",
+		    value_len, len, agglvl, fragment_id, len*100.0/value_len);
+
+		tslice->fragment[fragment_id] = newfrag;
+		fragment_id++;
+
+		snprintf(dbkey, sizeof(dbkey), "%u-%u", t, fragment_id);
+		if (map_raw_get(handler, dbkey, strlen(dbkey), &value, &value_len) == -1)
+		    break; /* No more fragments */
+	    } /* while */
+
+	    tslice->num_fragments = fragment_id;
+
+	    traceEvent(TRACE_INFO, "Moved to time %u", time_value);
+	}
+
+	tslice->growable = !!(flags & TSDB_GROWABLE);
     }
-
-    handler->tslice.growable = !!(flags & TSDB_GROWABLE);
-
     return(0);
 }
 
 /* *********************************************************************** */
 
-static int mapKeyToIndex(tsdb_handler *handler, const char *key,
-    u_int32_t *value, u_int8_t create_idx_if_needed)
+static int mapKeyToIndex(tsdb_handler *handler, int agglvl,
+    const char *key, u_int32_t *key_idx, u_int8_t create_idx_if_needed)
 {
-    /* Check if this is a known value */
-    if (get_key_index(handler, key, value) == 0) {
-	traceEvent(TRACE_INFO, "Key %s mapped to index %u", key, *value);
+    /* Check if this is a known key */
+    if (get_key_index(handler, agglvl, key, key_idx) == 0) {
+	traceEvent(TRACE_INFO, "Key %s mapped to index %u", key, *key_idx);
 	return(0);
     }
 
@@ -466,11 +466,11 @@ static int mapKeyToIndex(tsdb_handler *handler, const char *key,
     }
 
     while (handler->lowest_free_index < MAX_NUM_FRAGMENTS * ENTRIES_PER_FRAG) {
-	*value = handler->lowest_free_index++;
-	if (!key_index_in_use(handler, *value)) {
-	    set_key_index(handler, key, *value);
-	    reserve_key_index(handler, *value);
-	    traceEvent(TRACE_INFO, "Key %s mapped to index %u", key, *value);
+	*key_idx = handler->lowest_free_index++;
+	if (!key_index_in_use(handler, *key_idx)) {
+	    set_key_index(handler, key, *key_idx);
+	    reserve_key_index(handler, *key_idx);
+	    traceEvent(TRACE_INFO, "Key %s mapped to index %u", key, *key_idx);
 	    return 0;
 	    break;
 	}
@@ -483,66 +483,68 @@ static int mapKeyToIndex(tsdb_handler *handler, const char *key,
 
 /* *********************************************************************** */
 
-static int getOffset(tsdb_handler *handler, const char *key,
+static int getOffset(tsdb_handler *handler, int agglvl, const char *key,
     uint32_t *fragment_id, u_int64_t *offset, u_int8_t create_idx_if_needed)
 {
-    u_int32_t key_index;
+    u_int32_t key_idx;
 
-    if (mapKeyToIndex(handler, key, &key_index, create_idx_if_needed) == -1) {
+    if (mapKeyToIndex(handler, agglvl, key, &key_idx, create_idx_if_needed) == -1) {
 	traceEvent(TRACE_INFO, "Unable to find key %s", key);
 	return(-1);
-    } else
-	traceEvent(TRACE_INFO, "%s mapped to idx %u", key, key_index);
+    } else {
+	traceEvent(TRACE_INFO, "%s mapped to idx %u", key, key_idx);
+    }
 
-    *fragment_id = key_index / ENTRIES_PER_FRAG;
-    *offset = (key_index % ENTRIES_PER_FRAG) * handler->entry_size;
+    *fragment_id = key_idx / ENTRIES_PER_FRAG;
+    *offset = (key_idx % ENTRIES_PER_FRAG) * handler->entry_size;
+    tsdb_tslice *tslice = &handler->tslice[agglvl];
 
     if (*fragment_id > MAX_NUM_FRAGMENTS) {
 	traceEvent(TRACE_ERROR, "Internal error [%u > %u]", *fragment_id, MAX_NUM_FRAGMENTS);
 	return -2;
     }
 
-    if (handler->tslice.fragment[*fragment_id]) {
+    if (tslice->fragment[*fragment_id]) {
 	// We already have the right fragment.  Do nothing.
 
-    } else if (handler->tslice.load_on_demand || handler->read_only_mode) {
+    } else if (tslice->load_on_demand || handler->read_only_mode) {
 	// We should load the fragment.
 	u_int32_t value_len;
-	char str[32];
+	char dbkey[32];
 	void *value;
 
 	// TODO: optionally, unload other fragments?
 
-	snprintf(str, sizeof(str), "%u-%u", handler->tslice.time, *fragment_id);
-	if (map_raw_get(handler, str, strlen(str), &value, &value_len) == -1)
+	snprintf(dbkey, sizeof(dbkey), "%u-%u", tslice->time, *fragment_id);
+	if (map_raw_get(handler, dbkey, strlen(dbkey), &value, &value_len) == -1)
 	    return(-1);
 
 	uint32_t len = qlz_size_decompressed(value);
 
-	handler->tslice.fragment[*fragment_id] = (u_int8_t*)malloc(len);
-	if (!handler->tslice.fragment[*fragment_id]) {
+	tslice->fragment[*fragment_id] = (u_int8_t*)malloc(len);
+	if (!tslice->fragment[*fragment_id]) {
 	    traceEvent(TRACE_WARNING, "Not enough memory (%u bytes)", len);
 	    return(-2);
 	}
 
-	qlz_decompress(value, handler->tslice.fragment[*fragment_id], &handler->state_decompress);
+	qlz_decompress(value, tslice->fragment[*fragment_id], &handler->state_decompress);
 	//free(value);
 
-	if (handler->tslice.num_fragments <= *fragment_id)
-	    handler->tslice.num_fragments = *fragment_id + 1;
+	if (tslice->num_fragments <= *fragment_id)
+	    tslice->num_fragments = *fragment_id + 1;
 
-    } else if (handler->tslice.growable) {
+    } else if (tslice->growable) {
 	// We should allocate a new fragment.
 	u_int32_t frag_len = ENTRIES_PER_FRAG * handler->entry_size;
 	u_int8_t *ptr    = malloc(frag_len);
 
 	if (ptr) {
 	    memset(ptr, handler->default_unknown_value, frag_len);       
-	    handler->tslice.fragment[*fragment_id] = ptr;
-	    handler->tslice.num_fragments = *fragment_id + 1;
+	    tslice->fragment[*fragment_id] = ptr;
+	    tslice->num_fragments = *fragment_id + 1;
 
 	    traceEvent(TRACE_INFO, "Grown table to %u elements",
-	        handler->tslice.num_fragments * ENTRIES_PER_FRAG);
+		tslice->num_fragments * ENTRIES_PER_FRAG);
 
 	} else {
 	    traceEvent(TRACE_WARNING, "Not enough memory (%u bytes): unable to grow table", frag_len);
@@ -550,9 +552,10 @@ static int getOffset(tsdb_handler *handler, const char *key,
 	}
 
     } else {
-	traceEvent(TRACE_ERROR, "Index %u out of range %u...%u",
-	    key_index, 0,
-	    handler->tslice.num_fragments * ENTRIES_PER_FRAG - 1);
+	traceEvent(TRACE_ERROR, "Index %u out of range %u...%u (%u)",
+	    key_idx, 0,
+	    tslice->num_fragments * ENTRIES_PER_FRAG - 1,
+	    tslice->num_fragments);
 	return(-1);
     }
 
@@ -570,17 +573,25 @@ int tsdb_set(tsdb_handler *handler,
     if (!handler->is_open)
 	return -1;
 
-    if (getOffset(handler, key, &fragment_id, &offset, 1) == 0) {
-	memcpy(handler->tslice.fragment[fragment_id] + offset,
-	        value_to_store, handler->entry_size);
-	handler->tslice.fragment_changed[fragment_id] = 1;
-
+    if (getOffset(handler, 0, key, &fragment_id, &offset, 1) == 0) {
+	memcpy(handler->tslice[0].fragment[fragment_id] + offset,
+		value_to_store, handler->entry_size);
+	handler->tslice[0].fragment_changed[fragment_id] = 1;
 	traceEvent(TRACE_INFO, "Succesfully set value [offset=%" PRIu64 "][value_len=%u][fragment_id=%u]",
 	    offset, handler->entry_size, fragment_id);
 
     } else {
 	traceEvent(TRACE_ERROR, "Missing time");
 	return -2;
+    }
+
+    for (int agglvl = 1; agglvl < handler->num_agglvls; agglvl++) {
+	if (getOffset(handler, agglvl, key, &fragment_id, &offset, 1) == 0) {
+	    // XXX TODO AGGREGATE
+	} else {
+	    traceEvent(TRACE_ERROR, "Missing time");
+	    return -2;
+	}
     }
 
     return 0;
@@ -599,8 +610,10 @@ int tsdb_get(tsdb_handler *handler,
 	return -1;
     }
 
-    if (getOffset(handler, key, &fragment_id, &offset, 0) == 0) {
-	*value_to_read = (tsdb_value*)(handler->tslice.fragment[fragment_id] + offset);
+    int agglvl = 0; // XXX TODO select an agg level
+
+    if (getOffset(handler, agglvl, key, &fragment_id, &offset, 0) == 0) {
+	*value_to_read = (tsdb_value*)(handler->tslice[0].fragment[fragment_id] + offset);
 
 	traceEvent(TRACE_INFO, "Succesfully read value [offset=%" PRIu64 "][value_len=%u]",
 	    offset, handler->entry_size);
