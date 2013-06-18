@@ -59,9 +59,18 @@ typedef struct {
     u_int8_t fragment_changed[MAX_NUM_FRAGMENTS];
 } tsdb_tslice;
 
+#define TSDB_AGG_NONE   0
+#define TSDB_AGG_MIN    1
+#define TSDB_AGG_MAX    2
+#define TSDB_AGG_AVG    3
+#define TSDB_AGG_LAST   4
+#define TSDB_AGG_SUM    5
+
 // Aggregation parameters
 typedef struct {
-    u_int32_t period;                      // length of slice (seconds)
+    int func;               // aggregation function
+    int steps;              // number of primary data points in agg
+    u_int32_t period;       // length of slice (seconds)
 } tsdb_agg;
 
 typedef u_int32_t tsdb_value;
@@ -95,6 +104,8 @@ extern int tsdb_open(const char *tsdb_path, tsdb_handler *handler,
     u_int32_t rrd_slot_time_duration,
     u_int8_t read_only_mode);
 
+extern int tsdb_aggregate(tsdb_handler *handler, int func, int steps);
+
 extern void tsdb_close(tsdb_handler *handler);
 
 extern u_int32_t normalize_time(const tsdb_handler *handler, int s, u_int32_t *time);
@@ -103,10 +114,10 @@ extern int tsdb_goto_time(tsdb_handler *handler,
     u_int32_t time_value, uint32_t flags);
 
 extern int tsdb_set(tsdb_handler *handler,
-    const char *key, const tsdb_value *value_to_store);
+    const char *key, const tsdb_value *valuep);
 
 extern int tsdb_get(tsdb_handler *handler,
-    const char *key, const tsdb_value **value_to_read);
+    const char *key, const tsdb_value **valuepp, int agglvl);
 
 extern void tsdb_drop_key(const tsdb_handler *handler,
     const char *key, u_int32_t time_value);

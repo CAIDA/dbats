@@ -32,6 +32,7 @@ int tsdb_open(const char *tsdb_path, tsdb_handler *handler,
 
     memset(handler, 0, sizeof(tsdb_handler));
     handler->read_only_mode = read_only_mode;
+    handler->num_values_per_entry = 1;
 
     /* DB */
     if ((ret = db_create(&handler->db, NULL, 0)) != 0) {
@@ -66,15 +67,52 @@ int tsdb_open(const char *tsdb_path, tsdb_handler *handler,
     initcfg(handler, u_int32_t, lowest_free_index,      0);
     initcfg(handler, u_int32_t, rrd_slot_time_duration, rrd_slot_time_duration);
     initcfg(handler, u_int16_t, num_values_per_entry,   num_values_per_entry);
+    initcfg(handler, u_int16_t, num_agglvls,            1);
 
     handler->entry_size = handler->num_values_per_entry * sizeof(tsdb_value);
 
     memset(&handler->state_compress, 0, sizeof(handler->state_compress));
     memset(&handler->state_decompress, 0, sizeof(handler->state_decompress));
 
-    handler->num_agglvls = 1; // XXX
+    handler->agg[0].func = TSDB_AGG_NONE;
+    handler->agg[0].steps = 1;
     handler->agg[0].period = handler->rrd_slot_time_duration; // XXX
+
+    if (handler->num_agglvls > 1) {
+	void *value;
+	uint32_t value_len;
+	if (map_raw_get(handler, "agg", strlen("agg"), &value, &value_len) == 0) {
+	    if (value_len != handler->num_agglvls * sizeof(tsdb_agg)) {
+		traceEvent(TRACE_ERROR, "corrupt aggregation config %d != %d",
+		    value_len, handler->num_agglvls * sizeof(tsdb_agg));
+		return -1;
+	    }
+	}
+	memcpy(handler->agg, value, value_len);
+    }
+
     handler->is_open = 1;
+
+    return(0);
+}
+
+int tsdb_aggregate(tsdb_handler *handler, int func, int steps)
+{
+    // XXX TODO: if new agg is not on an agg period boundary, disallow it or
+    // go back and calculate it from historic values
+
+    if (handler->num_agglvls >= MAX_NUM_AGGLVLS) {
+	traceEvent(TRACE_ERROR, "Too many aggregation levels");
+	return -1;
+    }
+
+    int agglvl = handler->num_agglvls++;
+    handler->agg[agglvl].func = func;
+    handler->agg[agglvl].steps = steps;
+    handler->agg[agglvl].period = handler->agg[0].period * steps;
+
+    map_raw_set(handler, "agg", strlen("agg"), handler->agg, sizeof(tsdb_agg) * handler->num_agglvls);
+    map_raw_set(handler, "num_agglvls", strlen("num_agglvls"), &handler->num_agglvls, sizeof(handler->num_agglvls));
 
     return(0);
 }
@@ -127,7 +165,7 @@ static void map_raw_set(const tsdb_handler *handler,
     memset(&data, 0, sizeof(data));
     key_data.data = (void*)key; // assumption: DB won't write to *key_data.data
     key_data.size = key_len;
-    data.data = (void*)value; // assuption: DB won't write to *data.data
+    data.data = (void*)value; // assumption: DB won't write to *data.data
     data.size = value_len;
 
     if (handler->db->put(handler->db, NULL, &key_data, &data, 0) != 0)
@@ -136,9 +174,7 @@ static void map_raw_set(const tsdb_handler *handler,
 
 /* *********************************************************************** */
 
-static int map_raw_get(const tsdb_handler *handler,
-    const char *key, u_int32_t key_len,
-    void **value, u_int32_t *value_len)
+static int map_raw_get(const tsdb_handler *handler, const char *key, u_int32_t key_len, void **value, u_int32_t *value_len)
 {
     DBT key_data, data;
 
@@ -164,6 +200,7 @@ static int map_raw_get(const tsdb_handler *handler,
 
 static void tsdb_flush_tslice(tsdb_handler *handler, int agglvl)
 {
+    traceEvent(TRACE_INFO, "flush %u agglvl=%d", handler->tslice[agglvl].time, agglvl);
     u_int fragment_size = handler->entry_size * ENTRIES_PER_FRAG;
     char dbkey[32];
     u_int buf_len = fragment_size + QLZ_OVERHEAD;
@@ -183,10 +220,10 @@ static void tsdb_flush_tslice(tsdb_handler *handler, int agglvl)
 	    traceEvent(TRACE_INFO, "Compression %u -> %u [fragment %u] [%.1f %%]",
 		fragment_size, compressed_len, f,
 		compressed_len*100.0/fragment_size);
-	    snprintf(dbkey, sizeof(dbkey), "%u-%u", handler->tslice[agglvl].time, f);
+	    snprintf(dbkey, sizeof(dbkey), "%u-%d-%u", handler->tslice[agglvl].time, agglvl, f);
 	    map_raw_set(handler, dbkey, strlen(dbkey), buf, compressed_len);
 	} else {
-	    traceEvent(TRACE_INFO, "Skipping level %d fragment %d (unchanged)", agglvl, f);
+	    traceEvent(TRACE_INFO, "Skipping agglvl %d fragment %d (unchanged)", agglvl, f);
 	}
 
 	handler->tslice[agglvl].fragment_changed[f] = 0;
@@ -337,6 +374,7 @@ static int drop_key_index(const tsdb_handler *handler, const char *key,
 
 /* *********************************************************************** */
 
+// XXX don't un-reserve mapping until the end of all agglvls that use it
 void tsdb_drop_key(const tsdb_handler *handler,
     const char *key, u_int32_t time_value)
 {
@@ -382,7 +420,7 @@ int tsdb_goto_time(tsdb_handler *handler, u_int32_t time_value, uint32_t flags)
 
 	normalize_time(handler, agglvl, &t);
 	if (tslice->time == t) {
-	    traceEvent(TRACE_INFO, "goto_time %u: already loaded", t);
+	    traceEvent(TRACE_INFO, "goto_time %u, agglvl=%d: already loaded", t, agglvl);
 	    continue;
 	}
 
@@ -396,10 +434,9 @@ int tsdb_goto_time(tsdb_handler *handler, u_int32_t time_value, uint32_t flags)
 	    continue;
 
 	u_int32_t fragment_id = 0;
-	// XXX TODO: include agg level in dbkey
-	snprintf(dbkey, sizeof(dbkey), "%u-%u", t, fragment_id);
+	snprintf(dbkey, sizeof(dbkey), "%u-%d-%u", t, agglvl, fragment_id);
 	rc = map_raw_get(handler, dbkey, strlen(dbkey), &value, &value_len);
-	traceEvent(TRACE_INFO, "goto_time %u: map_raw_get -> %d", time_value, rc);
+	traceEvent(TRACE_INFO, "goto_time %u, agglvl=%d: map_raw_get -> %d", time_value, agglvl, rc);
 
 	if (rc == -1) {
 	    if (!(flags & TSDB_CREATE)) {
@@ -434,7 +471,7 @@ int tsdb_goto_time(tsdb_handler *handler, u_int32_t time_value, uint32_t flags)
 		tslice->fragment[fragment_id] = newfrag;
 		fragment_id++;
 
-		snprintf(dbkey, sizeof(dbkey), "%u-%u", t, fragment_id);
+		snprintf(dbkey, sizeof(dbkey), "%u-%d-%u", t, agglvl, fragment_id);
 		if (map_raw_get(handler, dbkey, strlen(dbkey), &value, &value_len) == -1)
 		    break; /* No more fragments */
 	    } /* while */
@@ -483,6 +520,8 @@ static int mapKeyToIndex(tsdb_handler *handler, int agglvl,
 
 /* *********************************************************************** */
 
+// XXX TODO: if there's no match and create_idx_if_needed, and there is a
+// match at a higher agglvl, use that (?)
 static int getOffset(tsdb_handler *handler, int agglvl, const char *key,
     uint32_t *fragment_id, u_int64_t *offset, u_int8_t create_idx_if_needed)
 {
@@ -515,7 +554,7 @@ static int getOffset(tsdb_handler *handler, int agglvl, const char *key,
 
 	// TODO: optionally, unload other fragments?
 
-	snprintf(dbkey, sizeof(dbkey), "%u-%u", tslice->time, *fragment_id);
+	snprintf(dbkey, sizeof(dbkey), "%u-%d-%u", tslice->time, agglvl, *fragment_id);
 	if (map_raw_get(handler, dbkey, strlen(dbkey), &value, &value_len) == -1)
 	    return(-1);
 
@@ -564,8 +603,7 @@ static int getOffset(tsdb_handler *handler, int agglvl, const char *key,
 
 /* *********************************************************************** */
 
-int tsdb_set(tsdb_handler *handler,
-    const char *key, const tsdb_value *value_to_store)
+int tsdb_set(tsdb_handler *handler, const char *key, const tsdb_value *valuep)
 {
     u_int64_t offset;
     uint32_t fragment_id;
@@ -574,24 +612,84 @@ int tsdb_set(tsdb_handler *handler,
 	return -1;
 
     if (getOffset(handler, 0, key, &fragment_id, &offset, 1) == 0) {
-	memcpy(handler->tslice[0].fragment[fragment_id] + offset,
-		value_to_store, handler->entry_size);
+	tsdb_value *dest = (tsdb_value*)(handler->tslice[0].fragment[fragment_id] + offset);
+	memcpy(dest, valuep, handler->entry_size);
 	handler->tslice[0].fragment_changed[fragment_id] = 1;
-	traceEvent(TRACE_INFO, "Succesfully set value [offset=%" PRIu64 "][value_len=%u][fragment_id=%u]",
-	    offset, handler->entry_size, fragment_id);
+	traceEvent(TRACE_INFO, "Succesfully set value "
+	    "[agglvl=%d][frag_id=%u][offset=%" PRIu64 "][value_len=%u]",
+	    0, fragment_id, offset, handler->entry_size);
+
+	for (int agglvl = 1; agglvl < handler->num_agglvls; agglvl++) {
+	    if (getOffset(handler, agglvl, key, &fragment_id, &offset, 1) == 0) {
+		uint8_t changed = 0;
+		// Aggregate *valuep into tslice[agglvl]
+		tsdb_value *aggval = (tsdb_value*)(handler->tslice[agglvl].fragment[fragment_id] + offset);
+		// n: number of steps contributing to aggregate (XXX temp hack)
+		int n = (handler->tslice[0].time - handler->tslice[agglvl].time) / handler->agg[0].period + 1;
+		switch (handler->agg[agglvl].func) {
+		case TSDB_AGG_MIN:
+		    for (int i = 0; i < handler->num_values_per_entry; i++) {
+			if (n == 1 || valuep[i] < aggval[i]) {
+			    aggval[i] = valuep[i];
+			    changed = 1;
+			}
+		    }
+		    break;
+		case TSDB_AGG_MAX:
+		    for (int i = 0; i < handler->num_values_per_entry; i++) {
+			if (n == 1 || valuep[i] > aggval[i]) {
+			    aggval[i] = valuep[i];
+			    changed = 1;
+			}
+		    }
+		    break;
+		case TSDB_AGG_AVG:
+		    for (int i = 0; i < handler->num_values_per_entry; i++) {
+			if (n == 1) {
+			    aggval[i] = valuep[i];
+			    changed = 1;
+			} else if (aggval[i] != valuep[i]) {
+			    aggval[i] += ((/*signed*/double)valuep[i] - aggval[i]) / n + 0.5;
+			    changed = 1;
+			}
+		    }
+		    break;
+		case TSDB_AGG_LAST:
+		    for (int i = 0; i < handler->num_values_per_entry; i++) {
+			if (aggval[i] != valuep[i]) {
+			    aggval[i] = valuep[i];
+			    changed = 1;
+			}
+		    }
+		    break;
+		case TSDB_AGG_SUM:
+		    for (int i = 0; i < handler->num_values_per_entry; i++) {
+			traceEvent(TRACE_INFO, "i=%d n=%d aggval=%" PRIu32 " val=%" PRIu32, i, n, aggval[i], valuep[i]);
+			if (n == 1)
+			    aggval[i] = valuep[i];
+			else
+			    aggval[i] += valuep[i];
+		    }
+		    changed = 1;
+		    break;
+		}
+
+		if (changed)
+		    handler->tslice[agglvl].fragment_changed[fragment_id] = 1;
+
+		traceEvent(TRACE_INFO, "Succesfully set value "
+		    "[agglvl=%d][frag_id=%u][offset=%" PRIu64 "][value_len=%u]",
+		    agglvl, fragment_id, offset, handler->entry_size);
+
+	    } else {
+		traceEvent(TRACE_ERROR, "Missing time");
+		return -2;
+	    }
+	}
 
     } else {
 	traceEvent(TRACE_ERROR, "Missing time");
 	return -2;
-    }
-
-    for (int agglvl = 1; agglvl < handler->num_agglvls; agglvl++) {
-	if (getOffset(handler, agglvl, key, &fragment_id, &offset, 1) == 0) {
-	    // XXX TODO AGGREGATE
-	} else {
-	    traceEvent(TRACE_ERROR, "Missing time");
-	    return -2;
-	}
     }
 
     return 0;
@@ -599,28 +697,26 @@ int tsdb_set(tsdb_handler *handler,
 
 /* *********************************************************************** */
 
-int tsdb_get(tsdb_handler *handler,
-    const char *key, const tsdb_value **value_to_read)
+int tsdb_get(tsdb_handler *handler, const char *key, const tsdb_value **valuepp,
+    int agglvl)
 {
     u_int64_t offset;
     uint32_t fragment_id;
 
     if (!handler->is_open) {
-	*value_to_read = &handler->default_unknown_value;
+	*valuepp = &handler->default_unknown_value;
 	return -1;
     }
 
-    int agglvl = 0; // XXX TODO select an agg level
-
     if (getOffset(handler, agglvl, key, &fragment_id, &offset, 0) == 0) {
-	*value_to_read = (tsdb_value*)(handler->tslice[0].fragment[fragment_id] + offset);
+	*valuepp = (tsdb_value*)(handler->tslice[agglvl].fragment[fragment_id] + offset);
 
 	traceEvent(TRACE_INFO, "Succesfully read value [offset=%" PRIu64 "][value_len=%u]",
 	    offset, handler->entry_size);
 
     } else {
 	traceEvent(TRACE_ERROR, "Missing time");
-	*value_to_read = &handler->default_unknown_value;
+	*valuepp = &handler->default_unknown_value;
 	return -2;
     }
 
