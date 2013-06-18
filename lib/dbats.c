@@ -11,45 +11,69 @@
 
 /* *********************************************************************** */
 
-static void map_raw_set(const tsdb_handler *handler,
+static void map_raw_set(const tsdb_handler *handler, DB *db,
     const char *key, u_int32_t key_len,
     const void *value, u_int32_t value_len);
 
-static void map_raw_delete(const tsdb_handler *handler,
+static void map_raw_delete(const tsdb_handler *handler, DB *db,
     const char *key, u_int32_t key_len);
 
-static int map_raw_get(const tsdb_handler *handler,
+static int map_raw_get(const tsdb_handler *handler, DB *db,
     const char *key, u_int32_t key_len,
     void **value, u_int32_t *value_len);
 
 /* *********************************************************************** */
 
-int tsdb_open(const char *tsdb_path, tsdb_handler *handler,
+static int raw_db_open(tsdb_handler *handler, DB **dbp, const char *path,
+    const char *dbname, u_int8_t readonly)
+{
+    int ret;
+    if ((ret = db_create(dbp, handler->dbenv, 0)) != 0) {
+	traceEvent(TRACE_ERROR, "Error creating DB handler %s: %s",
+	    dbname, db_strerror(ret));
+	return -1;
+    }
+
+    int mode = (readonly ? 00444 : 00777);
+    if ((ret = (*dbp)->open(*dbp, NULL, path, dbname,
+	DB_BTREE, (readonly ? 0 : DB_CREATE), mode)) != 0)
+    {
+	traceEvent(TRACE_ERROR, "Error opening DB %s %s (mode=%o): %s",
+	    path, dbname, mode, db_strerror(ret));
+	return -1;
+    }
+    return 0;
+}
+
+int tsdb_open(const char *path, tsdb_handler *handler,
     u_int16_t num_values_per_entry,
     u_int32_t rrd_slot_time_duration,
-    u_int8_t read_only_mode)
+    u_int8_t readonly)
 {
-    int ret, mode;
+    int ret;
+    const char *dbhome = "."; // XXX should be configurable
 
     memset(handler, 0, sizeof(tsdb_handler));
-    handler->read_only_mode = read_only_mode;
+    handler->readonly = readonly;
     handler->num_values_per_entry = 1;
 
-    /* DB */
-    if ((ret = db_create(&handler->db, NULL, 0)) != 0) {
-	traceEvent(TRACE_ERROR, "Error while creating DB handler [%s]", db_strerror(ret));
-	return(-1);
+    if ((ret = db_env_create(&handler->dbenv, 0)) != 0) {
+	traceEvent(TRACE_ERROR, "Error creating DB env: %s",
+	    db_strerror(ret));
+	return -1;
     }
 
-    mode = (read_only_mode ? 00444 : 00777 );
-    if ((ret = handler->db->open(handler->db,
-	NULL, (const char*)tsdb_path, NULL,
-	DB_BTREE, (read_only_mode ? 0 : DB_CREATE), mode)) != 0)
-    {
-	traceEvent(TRACE_ERROR, "Error while opening DB %s [%s][r/o=%u,mode=%o]", 
-	    tsdb_path, db_strerror(ret), read_only_mode, mode);
-	return(-1);
+    int mode = (readonly ? 00444 : 00777);
+    if ((ret = handler->dbenv->open(handler->dbenv, dbhome, DB_CREATE | DB_INIT_MPOOL, mode)) != 0) {
+	traceEvent(TRACE_ERROR, "Error opening DB env: %s",
+	    db_strerror(ret));
+	return -1;
     }
+
+    if (raw_db_open(handler, &handler->dbMeta,  path, "meta",  readonly) != 0) return -1;
+    if (raw_db_open(handler, &handler->dbKey,   path, "key",   readonly) != 0) return -1;
+    if (raw_db_open(handler, &handler->dbIndex, path, "index", readonly) != 0) return -1;
+    if (raw_db_open(handler, &handler->dbData,  path, "data",  readonly) != 0) return -1;
 
     handler->entry_size = sizeof(tsdb_value); // for db_get_buf_len
 
@@ -57,11 +81,11 @@ int tsdb_open(const char *tsdb_path, tsdb_handler *handler,
     do { \
 	void *value; \
 	u_int32_t value_len; \
-	if (map_raw_get(handler, #field, strlen(#field), &value, &value_len) == 0) { \
+	if (map_raw_get(handler, handler->dbMeta, #field, strlen(#field), &value, &value_len) == 0) { \
 	    handler->field = *((type*)value); \
-	} else if (!handler->read_only_mode) { \
+	} else if (!handler->readonly) { \
 	    handler->field = (defaultval); \
-	    map_raw_set(handler, #field, strlen(#field), \
+	    map_raw_set(handler, handler->dbMeta, #field, strlen(#field), \
 		&handler->field, sizeof(handler->field)); \
 	} \
 	traceEvent(TRACE_INFO, "%-.22s = %u", #field, handler->field); \
@@ -84,7 +108,7 @@ int tsdb_open(const char *tsdb_path, tsdb_handler *handler,
     if (handler->num_agglvls > 1) {
 	void *value;
 	uint32_t value_len;
-	if (map_raw_get(handler, "agg", strlen("agg"), &value, &value_len) == 0) {
+	if (map_raw_get(handler, handler->dbMeta, "agg", strlen("agg"), &value, &value_len) == 0) {
 	    if (value_len != handler->num_agglvls * sizeof(tsdb_agg)) {
 		traceEvent(TRACE_ERROR, "corrupt aggregation config %d != %d",
 		    value_len, handler->num_agglvls * sizeof(tsdb_agg));
@@ -114,20 +138,22 @@ int tsdb_aggregate(tsdb_handler *handler, int func, int steps)
     handler->agg[agglvl].steps = steps;
     handler->agg[agglvl].period = handler->agg[0].period * steps;
 
-    map_raw_set(handler, "agg", strlen("agg"), handler->agg, sizeof(tsdb_agg) * handler->num_agglvls);
-    map_raw_set(handler, "num_agglvls", strlen("num_agglvls"), &handler->num_agglvls, sizeof(handler->num_agglvls));
+    map_raw_set(handler, handler->dbMeta, "agg", strlen("agg"),
+	handler->agg, sizeof(tsdb_agg) * handler->num_agglvls);
+    map_raw_set(handler, handler->dbMeta, "num_agglvls", strlen("num_agglvls"),
+	&handler->num_agglvls, sizeof(handler->num_agglvls));
 
     return(0);
 }
 
 /* *********************************************************************** */
 
-static void map_raw_delete(const tsdb_handler *handler,
+static void map_raw_delete(const tsdb_handler *handler, DB *db,
     const char *key, u_int32_t key_len)
 {
     DBT key_data;
 
-    if (handler->read_only_mode) {
+    if (handler->readonly) {
 	traceEvent(TRACE_WARNING, "Unable to delete value (read-only mode)");
 	return;
     }
@@ -137,30 +163,31 @@ static void map_raw_delete(const tsdb_handler *handler,
     key_data.size = key_len;
     key_data.flags = DB_DBT_USERMEM;
 
-    if (handler->db->del(handler->db, NULL, &key_data, 0) != 0)
+    if (db->del(db, NULL, &key_data, 0) != 0)
 	traceEvent(TRACE_WARNING, "Error while deleting key");
 }
 
 /* *********************************************************************** */
 
-static int map_raw_key_exists(const tsdb_handler *handler,
+static int map_raw_key_exists(const tsdb_handler *handler, DB *db,
     const char *key, u_int32_t key_len)
 {
     void *value;
     u_int value_len;
 
-    return (map_raw_get(handler, key, key_len, &value, &value_len) == 0);
+    return (map_raw_get(handler, db, key, key_len, &value, &value_len) == 0);
 }
 
 /* *********************************************************************** */
 
-static void map_raw_set(const tsdb_handler *handler,
+static void map_raw_set(const tsdb_handler *handler, DB *db,
     const char *key, u_int32_t key_len,
     const void *value, u_int32_t value_len)
 {
     DBT key_data, data;
+    int ret;
 
-    if (handler->read_only_mode) {
+    if (handler->readonly) {
 	traceEvent(TRACE_WARNING, "Unable to set value (read-only mode)");
 	return;
     }
@@ -174,15 +201,15 @@ static void map_raw_set(const tsdb_handler *handler,
     data.size = value_len;
     data.flags = DB_DBT_USERMEM;
 
-    if (handler->db->put(handler->db, NULL, &key_data, &data, 0) != 0)
-	traceEvent(TRACE_WARNING, "Error while map_set(%.*s)", key_len, (char*)key);
+    if ((ret = db->put(db, NULL, &key_data, &data, 0)) != 0)
+	traceEvent(TRACE_WARNING, "Error in map_set(%.*s): %s", key_len, (char*)key, db_strerror(ret));
 }
 
 /* *********************************************************************** */
 
 #define QLZ_OVERHEAD 400
 
-static int map_raw_get(const tsdb_handler *handler, const char *key, u_int32_t key_len, void **value, u_int32_t *value_len)
+static int map_raw_get(const tsdb_handler *handler, DB* db, const char *key, u_int32_t key_len, void **value, u_int32_t *value_len)
 {
     DBT key_data, data;
 
@@ -204,7 +231,7 @@ static int map_raw_get(const tsdb_handler *handler, const char *key, u_int32_t k
     data.data = db_get_buf;
     data.ulen = db_get_buf_len;
     data.flags = DB_DBT_USERMEM;
-    if (handler->db->get(handler->db, NULL, &key_data, &data, 0) == 0) {
+    if (db->get(db, NULL, &key_data, &data, 0) == 0) {
 	*value = data.data;
 	*value_len = data.size;
 	return(0);
@@ -233,14 +260,14 @@ static void tsdb_flush_tslice(tsdb_handler *handler, int agglvl)
     for (int f=0; f < handler->tslice[agglvl].num_fragments; f++) {
 	if (!handler->tslice[agglvl].fragment[f]) continue;
 
-	if (!handler->read_only_mode && handler->tslice[agglvl].fragment_changed[f]) {
+	if (!handler->readonly && handler->tslice[agglvl].fragment_changed[f]) {
 	    u_int compressed_len = qlz_compress(handler->tslice[agglvl].fragment[f],
 		buf, fragment_size, &handler->state_compress);
 	    traceEvent(TRACE_INFO, "Compression %u -> %u [fragment %u] [%.1f %%]",
 		fragment_size, compressed_len, f,
 		compressed_len*100.0/fragment_size);
 	    snprintf(dbkey, sizeof(dbkey), "%u-%d-%u", handler->tslice[agglvl].time, agglvl, f);
-	    map_raw_set(handler, dbkey, strlen(dbkey), buf, compressed_len);
+	    map_raw_set(handler, handler->dbData, dbkey, strlen(dbkey), buf, compressed_len);
 	} else {
 	    traceEvent(TRACE_INFO, "Skipping agglvl %d fragment %d (unchanged)", agglvl, f);
 	}
@@ -263,18 +290,22 @@ void tsdb_close(tsdb_handler *handler)
 	return;
     }
 
-    if (!handler->read_only_mode)
-	map_raw_set(handler, "lowest_free_index", strlen("lowest_free_index"),
+    if (!handler->readonly)
+	map_raw_set(handler, handler->dbMeta, "lowest_free_index", strlen("lowest_free_index"),
 	    &handler->lowest_free_index, sizeof(handler->lowest_free_index));
+
+    if (!handler->readonly)
+	traceEvent(TRACE_INFO, "Flushing database changes...");
 
     for (int agglvl = 0; agglvl < handler->num_agglvls; agglvl++) {
 	tsdb_flush_tslice(handler, agglvl);
     }
 
-    if (!handler->read_only_mode)
-	traceEvent(TRACE_INFO, "Flushing database changes...");
-
-    handler->db->close(handler->db, 0);
+    //handler->dbMeta->close(handler->dbMeta, 0);
+    //handler->dbKey->close(handler->dbKey, 0);
+    //handler->dbIndex->close(handler->dbIndex, 0);
+    //handler->dbData->close(handler->dbData, 0);
+    handler->dbenv->close(handler->dbenv, 0);
     handler->is_open = 0;
 }
 
@@ -295,7 +326,7 @@ static void reserve_key_index(const tsdb_handler *handler, u_int32_t idx)
     char dbkey[32];
 
     snprintf(dbkey, sizeof(dbkey), "rsv-%u", idx);
-    map_raw_set(handler, dbkey, strlen(dbkey), "", 0);
+    map_raw_set(handler, handler->dbIndex, dbkey, strlen(dbkey), "", 0);
 }
 
 /* *********************************************************************** */
@@ -305,7 +336,7 @@ static void unreserve_key_index(const tsdb_handler *handler, u_int32_t idx)
     char dbkey[32];
 
     snprintf(dbkey, sizeof(dbkey), "rsv-%u", idx);
-    map_raw_delete(handler, dbkey, strlen(dbkey));
+    map_raw_delete(handler, handler->dbIndex, dbkey, strlen(dbkey));
 }
 
 /* *********************************************************************** */
@@ -315,7 +346,7 @@ static int key_index_in_use(const tsdb_handler *handler, u_int32_t idx)
     char dbkey[32];
 
     snprintf(dbkey, sizeof(dbkey), "rsv-%u", idx);
-    return(map_raw_key_exists(handler, dbkey, strlen(dbkey)));
+    return(map_raw_key_exists(handler, handler->dbIndex, dbkey, strlen(dbkey)));
 }
 
 /* *********************************************************************** */
@@ -330,7 +361,7 @@ static int get_key_index(const tsdb_handler *handler, int agglvl,
 
     snprintf(dbkey, sizeof(dbkey), "map-%s", key);
 
-    if (map_raw_get(handler, dbkey, strlen(dbkey), &ptr, &len) == 0) {
+    if (map_raw_get(handler, handler->dbKey, dbkey, strlen(dbkey), &ptr, &len) == 0) {
 	tsdb_key_mapping *mappings = (tsdb_key_mapping*)ptr;
 	u_int i;
 	u_int found = 0;
@@ -368,7 +399,7 @@ static int drop_key_index(const tsdb_handler *handler, const char *key,
 
     snprintf(dbkey, sizeof(dbkey), "map-%s", key);
 
-    if (map_raw_get(handler, dbkey, strlen(dbkey), &ptr, &len) == 0) {
+    if (map_raw_get(handler, handler->dbKey, dbkey, strlen(dbkey), &ptr, &len) == 0) {
 	tsdb_key_mapping *mappings = (tsdb_key_mapping*)ptr;
 	u_int i;
 	u_int found = 0;
@@ -378,7 +409,7 @@ static int drop_key_index(const tsdb_handler *handler, const char *key,
 	    if (mappings[i].time_end == 0) {
 	        mappings[i].time_end = time_value;
 	        found = 1;
-	        map_raw_set(handler, dbkey, strlen(dbkey), &ptr, len);
+	        map_raw_set(handler, handler->dbKey, dbkey, strlen(dbkey), &ptr, len);
 	        break;
 	    }
 	}
@@ -417,7 +448,7 @@ static void set_key_index(const tsdb_handler *handler, const char *key, u_int32_
     mapping.time_start = handler->tslice[0].time; // XXX
     mapping.time_end = 0;
     mapping.key_idx = key_idx;
-    map_raw_set(handler, dbkey, strlen(dbkey), &mapping, sizeof(mapping));
+    map_raw_set(handler, handler->dbKey, dbkey, strlen(dbkey), &mapping, sizeof(mapping));
 
     traceEvent(TRACE_INFO, "[SET] Mapping %s -> %u", key, key_idx);
 }
@@ -454,7 +485,7 @@ int tsdb_goto_time(tsdb_handler *handler, u_int32_t time_value, uint32_t flags)
 
 	u_int32_t fragment_id = 0;
 	snprintf(dbkey, sizeof(dbkey), "%u-%d-%u", t, agglvl, fragment_id);
-	rc = map_raw_get(handler, dbkey, strlen(dbkey), &value, &value_len);
+	rc = map_raw_get(handler, handler->dbData, dbkey, strlen(dbkey), &value, &value_len);
 	traceEvent(TRACE_INFO, "goto_time %u, agglvl=%d: map_raw_get -> %d", time_value, agglvl, rc);
 
 	if (rc == -1) {
@@ -491,7 +522,7 @@ int tsdb_goto_time(tsdb_handler *handler, u_int32_t time_value, uint32_t flags)
 		fragment_id++;
 
 		snprintf(dbkey, sizeof(dbkey), "%u-%d-%u", t, agglvl, fragment_id);
-		if (map_raw_get(handler, dbkey, strlen(dbkey), &value, &value_len) == -1)
+		if (map_raw_get(handler, handler->dbData, dbkey, strlen(dbkey), &value, &value_len) == -1)
 		    break; /* No more fragments */
 	    } /* while */
 
@@ -565,7 +596,7 @@ static int getOffset(tsdb_handler *handler, int agglvl, const char *key,
     if (tslice->fragment[*fragment_id]) {
 	// We already have the right fragment.  Do nothing.
 
-    } else if (tslice->load_on_demand || handler->read_only_mode) {
+    } else if (tslice->load_on_demand || handler->readonly) {
 	// We should load the fragment.
 	u_int32_t value_len;
 	char dbkey[32];
@@ -574,7 +605,7 @@ static int getOffset(tsdb_handler *handler, int agglvl, const char *key,
 	// TODO: optionally, unload other fragments?
 
 	snprintf(dbkey, sizeof(dbkey), "%u-%d-%u", tslice->time, agglvl, *fragment_id);
-	if (map_raw_get(handler, dbkey, strlen(dbkey), &value, &value_len) == -1)
+	if (map_raw_get(handler, handler->dbData, dbkey, strlen(dbkey), &value, &value_len) == -1)
 	    return(-1);
 
 	uint32_t len = qlz_size_decompressed(value);
@@ -747,7 +778,12 @@ int tsdb_get(tsdb_handler *handler, const char *key, const tsdb_value **valuepp,
 void tsdb_stat_print(const tsdb_handler *handler) {
     int ret;
     
-    if ((ret = handler->db->stat_print(handler->db, DB_FAST_STAT)) != 0) {
-	traceEvent(TRACE_ERROR, "Error while dumping DB stats [%s]", db_strerror(ret));
-    }
+    if ((ret = handler->dbMeta->stat_print(handler->dbMeta, DB_FAST_STAT)) != 0)
+	traceEvent(TRACE_ERROR, "Error while dumping DB stats for Meta [%s]", db_strerror(ret));
+    if ((ret = handler->dbKey->stat_print(handler->dbKey, DB_FAST_STAT)) != 0)
+	traceEvent(TRACE_ERROR, "Error while dumping DB stats for Key [%s]", db_strerror(ret));
+    if ((ret = handler->dbIndex->stat_print(handler->dbIndex, DB_FAST_STAT)) != 0)
+	traceEvent(TRACE_ERROR, "Error while dumping DB stats for Index [%s]", db_strerror(ret));
+    if ((ret = handler->dbData->stat_print(handler->dbData, DB_FAST_STAT)) != 0)
+	traceEvent(TRACE_ERROR, "Error while dumping DB stats for Data [%s]", db_strerror(ret));
 }

@@ -77,7 +77,7 @@ typedef u_int32_t tsdb_value;
 
 typedef struct {
     u_int8_t  is_open;
-    u_int8_t  read_only_mode;             // Mode used to open the db file
+    u_int8_t  readonly;                   // Mode used to open the db file
     u_int16_t num_agglvls;                // Number of aggregation levels
     u_int16_t num_values_per_entry;       // Number of tsdb_values in an entry
     u_int16_t entry_size;                 // Size of an entry (bytes)
@@ -86,7 +86,11 @@ typedef struct {
     u_int32_t rrd_slot_time_duration;     // length of raw time slice (sec)
     qlz_state_compress state_compress;
     qlz_state_decompress state_decompress;
-    DB *db;
+    DB_ENV *dbenv;                        // DB environment
+    DB *dbMeta;                           // config parameters
+    DB *dbKey;                            // metric key -> index
+    DB *dbIndex;                          // index -> metric key
+    DB *dbData;                           // {time, agglvl, frag_id} -> data
     tsdb_tslice tslice[MAX_NUM_AGGLVLS];  // a tslice for each aggregation level
     tsdb_agg agg[MAX_NUM_AGGLVLS];        // parameters for each aggregation level
 } tsdb_handler;
@@ -102,7 +106,7 @@ typedef struct {
 extern int tsdb_open(const char *tsdb_path, tsdb_handler *handler,
     u_int16_t num_values_per_entry,
     u_int32_t rrd_slot_time_duration,
-    u_int8_t read_only_mode);
+    u_int8_t readonly);
 
 extern int tsdb_aggregate(tsdb_handler *handler, int func, int steps);
 
