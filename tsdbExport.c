@@ -176,7 +176,7 @@ int main(int argc, char *argv[]) {
 
   when = begin_when = time(NULL) + rrd_slot_time_duration * begin_day;
 
-  normalize_time(&handler, &when);
+  normalize_time(&handler, 0, &when);
 
   the_time = time(NULL);
 
@@ -216,7 +216,7 @@ int main(int argc, char *argv[]) {
       traceEvent(TRACE_INFO, "Unable to find time %u", when);
       rsp = defaults; /* Missing */
     } else
-      rc = tsdb_get(&handler, hash_id, &rsp);
+      rc = tsdb_get(&handler, hash_id, &rsp, 0);
 
     if(text_mode) {
       /* http://www.simile-widgets.org/timeplot/ */
