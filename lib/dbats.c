@@ -5,6 +5,7 @@
  * (at your option) any later version.
  */
 
+#include <db.h>
 #include "tsdb_api.h"
 
 
@@ -49,6 +50,8 @@ int tsdb_open(const char *tsdb_path, tsdb_handler *handler,
 	    tsdb_path, db_strerror(ret), read_only_mode, mode);
 	return(-1);
     }
+
+    handler->entry_size = sizeof(tsdb_value); // for db_get_buf_len
 
 #define initcfg(handler, type, field, defaultval) \
     do { \
@@ -132,6 +135,7 @@ static void map_raw_delete(const tsdb_handler *handler,
     memset(&key_data, 0, sizeof(key_data));
     key_data.data = (void*)key; // assumption: DB won't write to *key_data.data
     key_data.size = key_len;
+    key_data.flags = DB_DBT_USERMEM;
 
     if (handler->db->del(handler->db, NULL, &key_data, 0) != 0)
 	traceEvent(TRACE_WARNING, "Error while deleting key");
@@ -165,8 +169,10 @@ static void map_raw_set(const tsdb_handler *handler,
     memset(&data, 0, sizeof(data));
     key_data.data = (void*)key; // assumption: DB won't write to *key_data.data
     key_data.size = key_len;
+    key_data.flags = DB_DBT_USERMEM;
     data.data = (void*)value; // assumption: DB won't write to *data.data
     data.size = value_len;
+    data.flags = DB_DBT_USERMEM;
 
     if (handler->db->put(handler->db, NULL, &key_data, &data, 0) != 0)
 	traceEvent(TRACE_WARNING, "Error while map_set(%.*s)", key_len, (char*)key);
@@ -174,15 +180,30 @@ static void map_raw_set(const tsdb_handler *handler,
 
 /* *********************************************************************** */
 
+#define QLZ_OVERHEAD 400
+
 static int map_raw_get(const tsdb_handler *handler, const char *key, u_int32_t key_len, void **value, u_int32_t *value_len)
 {
     DBT key_data, data;
+
+    static uint8_t *db_get_buf = 0;
+    static uint16_t db_get_buf_len = 0;
+
+    if (db_get_buf_len < ENTRIES_PER_FRAG * handler->entry_size + QLZ_OVERHEAD) {
+	db_get_buf_len = ENTRIES_PER_FRAG * handler->entry_size + QLZ_OVERHEAD;
+	if (db_get_buf) free(db_get_buf);
+	db_get_buf = malloc(db_get_buf_len);
+    }
 
     memset(&key_data, 0, sizeof(key_data));
     memset(&data, 0, sizeof(data));
 
     key_data.data = (void*)key; // assumption: DB won't write to *key_data.data
     key_data.size = key_len;
+    key_data.flags = DB_DBT_USERMEM;
+    data.data = db_get_buf;
+    data.ulen = db_get_buf_len;
+    data.flags = DB_DBT_USERMEM;
     if (handler->db->get(handler->db, NULL, &key_data, &data, 0) == 0) {
 	*value = data.data;
 	*value_len = data.size;
@@ -195,8 +216,6 @@ static int map_raw_get(const tsdb_handler *handler, const char *key, u_int32_t k
 }
 
 /* *********************************************************************** */
-
-#define QLZ_OVERHEAD 400
 
 static void tsdb_flush_tslice(tsdb_handler *handler, int agglvl)
 {
