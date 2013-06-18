@@ -44,7 +44,17 @@ int main(int argc, char *argv[]) {
     tsdb_path = argv[0];
 
     if (tsdb_open(tsdb_path, &handler, num_values_per_entry, period, 0) != 0)
-        return(-1);
+        return -1;
+    if (tsdb_aggregate(&handler, TSDB_AGG_MIN, 10) != 0)
+	return -1;
+    if (tsdb_aggregate(&handler, TSDB_AGG_MAX, 10) != 0)
+	return -1;
+    if (tsdb_aggregate(&handler, TSDB_AGG_AVG, 10) != 0)
+	return -1;
+    if (tsdb_aggregate(&handler, TSDB_AGG_LAST, 10) != 0)
+	return -1;
+    if (tsdb_aggregate(&handler, TSDB_AGG_SUM, 10) != 0)
+	return -1;
 
     while (1) {
 	int n = scanf("%127s %" SCNu32 " %" SCNu32 "\n", key, &value, &t);

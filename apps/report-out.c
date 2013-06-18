@@ -85,25 +85,27 @@ int main(int argc, char *argv[]) {
     out = stdout;
     run_start = time(NULL);
 
-    for (uint32_t t = begin; t <= end; t += handler.rrd_slot_time_duration) {
-	int rc;
+    for (int agglvl = 0; agglvl < handler.num_agglvls; agglvl++) {
+	for (uint32_t t = begin; t <= end; t += handler.agg[agglvl].period) {
+	    int rc;
 
-	if ((rc = tsdb_goto_time(&handler, t, TSDB_LOAD_ON_DEMAND)) == -1) {
-	    traceEvent(TRACE_INFO, "Unable to find time %u", t);
-	    continue;
-	}
-
-	for (int k = 0; k < n_key; k++) {
-	    rc = tsdb_get(&handler, key[k], &values);
-	    if (rc < 0) {
-		fprintf(stdout, "error in tsdb_get(%s)\n", key[k]);
+	    if ((rc = tsdb_goto_time(&handler, t, TSDB_LOAD_ON_DEMAND)) == -1) {
+		traceEvent(TRACE_INFO, "Unable to find time %u", t);
 		continue;
 	    }
-	    fprintf(out, "%s ", key[k]);
-	    for (int j = 0; j < handler.num_values_per_entry; j++) {
-		fprintf(out, "%u ", values ? values[j] : 0);
+
+	    for (int k = 0; k < n_key; k++) {
+		rc = tsdb_get(&handler, key[k], &values, agglvl);
+		if (rc < 0) {
+		    fprintf(stdout, "error in tsdb_get(%s)\n", key[k]);
+		    continue;
+		}
+		fprintf(out, "%s ", key[k]);
+		for (int j = 0; j < handler.num_values_per_entry; j++) {
+		    fprintf(out, "%u ", values ? values[j] : 0);
+		}
+		fprintf(out, "%u %d\n", t, agglvl);
 	    }
-	    fprintf(out, "%u\n", t);
 	}
     }
 
