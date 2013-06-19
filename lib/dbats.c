@@ -771,6 +771,48 @@ int tsdb_get(tsdb_handler *handler, const char *key, const tsdb_value **valuepp,
     return 0;
 }
 
+int tsdb_keywalk_start(tsdb_handler *handler)
+{
+    int ret;
+
+    if ((ret = handler->dbKey->cursor(handler->dbKey, NULL, &handler->keywalk, 0)) != 0) {
+	traceEvent(TRACE_ERROR, "Error in tsdb_keywalk_start: %s", db_strerror(ret));
+	return -1;
+    }
+    return 0;
+}
+
+int tsdb_keywalk_next(tsdb_handler *handler, char **key, int *len)
+{
+    int ret;
+    DBT dbkey, dbdata;
+
+    memset(&dbkey, 0, sizeof(dbkey));
+    memset(&dbdata, 0, sizeof(dbdata));
+    if ((ret = handler->keywalk->get(handler->keywalk, &dbkey, &dbdata, DB_NEXT)) == 0) {
+	*key = dbkey.data;
+	*len = dbkey.size;
+	return 0;
+    } else {
+	if (ret != DB_NOTFOUND)
+	    traceEvent(TRACE_ERROR, "Error in tsdb_keywalk_next: %s", db_strerror(ret));
+	*key = 0;
+	*len = 0;
+	return -1;
+    }
+}
+
+int tsdb_keywalk_end(tsdb_handler *handler)
+{
+    int ret;
+
+    if ((ret = handler->keywalk->close(handler->keywalk)) != 0) {
+	traceEvent(TRACE_ERROR, "Error in tsdb_keywalk_end: %s", db_strerror(ret));
+	return -1;
+    }
+    return 0;
+}
+
 /* *********************************************************************** */
 
 void tsdb_stat_print(const tsdb_handler *handler) {
@@ -785,3 +827,4 @@ void tsdb_stat_print(const tsdb_handler *handler) {
     if ((ret = handler->dbData->stat_print(handler->dbData, DB_FAST_STAT)) != 0)
 	traceEvent(TRACE_ERROR, "Error while dumping DB stats for Data [%s]", db_strerror(ret));
 }
+

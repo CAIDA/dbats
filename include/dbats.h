@@ -91,6 +91,7 @@ typedef struct {
     DB *dbKey;                            // metric key -> index
     DB *dbIndex;                          // index -> metric key
     DB *dbData;                           // {time, agglvl, frag_id} -> data
+    DBC *keywalk;                         // cursor for iterating over keys
     tsdb_tslice tslice[MAX_NUM_AGGLVLS];  // a tslice for each aggregation level
     tsdb_agg agg[MAX_NUM_AGGLVLS];        // parameters for each aggregation level
 } tsdb_handler;
@@ -122,6 +123,10 @@ extern int tsdb_set(tsdb_handler *handler,
 
 extern int tsdb_get(tsdb_handler *handler,
     const char *key, const tsdb_value **valuepp, int agglvl);
+
+extern int tsdb_keywalk_start(tsdb_handler *handler);
+extern int tsdb_keywalk_next(tsdb_handler *handler, char **key, int *len);
+extern int tsdb_keywalk_end(tsdb_handler *handler);
 
 extern void tsdb_drop_key(const tsdb_handler *handler,
     const char *key, u_int32_t time_value);
