@@ -5,18 +5,19 @@ static char *progname = 0;
 /* *********************************** */
 
 static void help(void) {
-    fprintf(stderr, "%s [{options}] {tsdb_path} {keylist_path} {begin} {end}\n",
+    fprintf(stderr, "%s [{options}] {tsdb_path} {begin} {end}\n",
 	progname);
     fprintf(stderr, "options:\n");
     fprintf(stderr, "-v{0|1|2|3}    verbosity level\n");
+    fprintf(stderr, "-k{path}       load list of keys from {path}\n");
     exit(-1);
 }
 
 /* ***************************************************************** */
 
 #define MAX_KEYS 262144
-static char *key[MAX_KEYS];
-static int n_key = 0;
+static char *keys[MAX_KEYS];
+static int n_keys = 0;
 
 static void load_keys(const char *path)
 {
@@ -29,12 +30,23 @@ static void load_keys(const char *path)
     while (fgets(line, sizeof(line), keyfile)) {
 	char *p = strchr(line, '\n');
 	if (p) *p = 0;
-	key[n_key++] = strdup(line);
+	keys[n_keys++] = strdup(line);
     }
     if (ferror(keyfile)) {
 	fprintf(stderr, "%s: %s\n", path, strerror(errno));
 	exit(-1);
     }
+}
+
+static void get_keys(tsdb_handler *handler)
+{
+    char *key;
+    int len;
+    tsdb_keywalk_start(handler);
+    while (tsdb_keywalk_next(handler, &key, &len) == 0) {
+	(keys[n_keys++] = strncpy(malloc(len+1), key, len))[len] = 0;
+    }
+    tsdb_keywalk_end(handler);
 }
 
 int main(int argc, char *argv[]) {
@@ -48,10 +60,13 @@ int main(int argc, char *argv[]) {
     progname = argv[0];
 
     int c;
-    while ((c = getopt(argc, argv, "v:")) != -1) {
+    while ((c = getopt(argc, argv, "v:k:")) != -1) {
 	switch (c) {
 	case 'v':
 	    traceLevel = atoi(optarg);
+	    break;
+	case 'k':
+	    keyfile_path = strdup(optarg);
 	    break;
 	default:
 	    help();
@@ -62,24 +77,26 @@ int main(int argc, char *argv[]) {
     argc -= optind;
 
 
-    if (argc != 4)
+    if (argc != 3)
 	help();
 
     tsdb_path = argv[0];
-    keyfile_path = argv[1];
-    begin = atol(argv[2]);
-    end = atol(argv[3]);
+    begin = atol(argv[1]);
+    end = atol(argv[2]);
 
     traceEvent(TRACE_INFO, "begin=%"PRId32 " end=%"PRId32, begin, end);
     if ((begin <= 0) || (end < begin))
 	help();
 
-    load_keys(keyfile_path);
-
     traceEvent(TRACE_INFO, "Opening %s", tsdb_path);
 
     if (tsdb_open(tsdb_path, &handler, 0, 0, 1) != 0)
 	return(-1);
+
+    if (keyfile_path)
+	load_keys(keyfile_path);
+    else
+	get_keys(&handler);
 
     tzset();
     out = stdout;
@@ -94,13 +111,13 @@ int main(int argc, char *argv[]) {
 		continue;
 	    }
 
-	    for (int k = 0; k < n_key; k++) {
-		rc = tsdb_get(&handler, key[k], &values, agglvl);
+	    for (int k = 0; k < n_keys; k++) {
+		rc = tsdb_get(&handler, keys[k], &values, agglvl);
 		if (rc < 0) {
-		    fprintf(stdout, "error in tsdb_get(%s)\n", key[k]);
+		    fprintf(stdout, "error in tsdb_get(%s)\n", keys[k]);
 		    continue;
 		}
-		fprintf(out, "%s ", key[k]);
+		fprintf(out, "%s ", keys[k]);
 		for (int j = 0; j < handler.num_values_per_entry; j++) {
 		    fprintf(out, "%u ", values ? values[j] : 0);
 		}
