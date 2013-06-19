@@ -40,7 +40,7 @@
 /* ************************************************** */
 
 #define ENTRIES_PER_FRAG    10000 // number of entries in a fragment
-#define MAX_NUM_FRAGMENTS   16384 // max number of fragments in a tslice
+#define MAX_NUM_FRAGS       16384 // max number of fragments in a tslice
 #define MAX_NUM_AGGLVLS        16 // max number of aggregation levels
 
 // Flags
@@ -52,11 +52,11 @@
 // Entries are actually batched into fragments within a tslice.
 typedef struct {
     u_int32_t time;                        // start time (unix seconds)
-    u_int32_t num_fragments;               // number of fragments
+    u_int32_t num_frags;                   // number of fragments
     u_int8_t growable;                     // new fragments can be appended
     u_int8_t load_on_demand;               // don't load fragment until needed
-    u_int8_t *fragment[MAX_NUM_FRAGMENTS];
-    u_int8_t fragment_changed[MAX_NUM_FRAGMENTS];
+    u_int8_t *frag[MAX_NUM_FRAGS];
+    u_int8_t frag_changed[MAX_NUM_FRAGS];
 } tsdb_tslice;
 
 #define TSDB_AGG_NONE   0

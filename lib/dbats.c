@@ -266,24 +266,24 @@ static void tsdb_flush_tslice(tsdb_handler *handler, int agglvl)
     /* Write fragments to the DB */
     dbkey.time = handler->tslice[agglvl].time;
     dbkey.agglvl = agglvl;
-    for (int f=0; f < handler->tslice[agglvl].num_fragments; f++) {
-	if (!handler->tslice[agglvl].fragment[f]) continue;
+    for (int f=0; f < handler->tslice[agglvl].num_frags; f++) {
+	if (!handler->tslice[agglvl].frag[f]) continue;
 
-	if (!handler->readonly && handler->tslice[agglvl].fragment_changed[f]) {
-	    u_int compressed_len = qlz_compress(handler->tslice[agglvl].fragment[f],
+	if (!handler->readonly && handler->tslice[agglvl].frag_changed[f]) {
+	    u_int compressed_len = qlz_compress(handler->tslice[agglvl].frag[f],
 		buf, fragment_size, &handler->state_compress);
-	    traceEvent(TRACE_INFO, "Compression %u -> %u [fragment %u] [%.1f %%]",
+	    traceEvent(TRACE_INFO, "Compression %u -> %u [frag %u] [%.1f %%]",
 		fragment_size, compressed_len, f,
 		compressed_len*100.0/fragment_size);
 	    dbkey.frag_id = f;
 	    map_raw_set(handler, handler->dbData, &dbkey, sizeof(dbkey), buf, compressed_len);
 	} else {
-	    traceEvent(TRACE_INFO, "Skipping agglvl %d fragment %d (unchanged)", agglvl, f);
+	    traceEvent(TRACE_INFO, "Skipping agglvl %d frag %d (unchanged)", agglvl, f);
 	}
 
-	handler->tslice[agglvl].fragment_changed[f] = 0;
-	free(handler->tslice[agglvl].fragment[f]);
-	handler->tslice[agglvl].fragment[f] = 0;
+	handler->tslice[agglvl].frag_changed[f] = 0;
+	free(handler->tslice[agglvl].frag[f]);
+	handler->tslice[agglvl].frag[f] = 0;
     }
 
     memset(&handler->tslice[agglvl], 0, sizeof(tsdb_tslice));
@@ -475,10 +475,10 @@ int tsdb_goto_time(tsdb_handler *handler, u_int32_t time_value, uint32_t flags)
 	if (tslice->load_on_demand)
 	    continue;
 
-	u_int32_t fragment_id = 0;
+	u_int32_t frag_id = 0;
 	dbkey.time = t;
 	dbkey.agglvl = agglvl;
-	dbkey.frag_id = fragment_id;
+	dbkey.frag_id = frag_id;
 	rc = map_raw_get(handler, handler->dbData, &dbkey, sizeof(dbkey), &value, &value_len);
 	traceEvent(TRACE_INFO, "goto_time %u, agglvl=%d: map_raw_get -> %d", time_value, agglvl, rc);
 
@@ -490,14 +490,14 @@ int tsdb_goto_time(tsdb_handler *handler, u_int32_t time_value, uint32_t flags)
 	    traceEvent(TRACE_INFO, "new time %u", time_value);
 
 	    /* Create an empty tslice */
-	    tslice->num_fragments = 0;
+	    tslice->num_frags = 0;
 
 	} else {
 	    /* We need to decompress data */
 	    traceEvent(TRACE_INFO, "loaded time %u", t);
 	    uint32_t len;
-	    fragment_id = 0;
-	    tslice->num_fragments = 0;
+	    frag_id = 0;
+	    tslice->num_frags = 0;
 
 	    while (1) {
 		len = qlz_size_decompressed(value);
@@ -509,20 +509,20 @@ int tsdb_goto_time(tsdb_handler *handler, u_int32_t time_value, uint32_t flags)
 		    return(-2);
 		}
 		len = qlz_decompress(value, newfrag, &handler->state_decompress);
-		traceEvent(TRACE_NORMAL, "Decompression %u -> %u [slice %d] [fragment %u] [%.1f %%]",
-		    value_len, len, agglvl, fragment_id, len*100.0/value_len);
+		traceEvent(TRACE_NORMAL, "Decompression %u -> %u [slice %d] [frag %u] [%.1f %%]",
+		    value_len, len, agglvl, frag_id, len*100.0/value_len);
 
-		tslice->fragment[fragment_id] = newfrag;
-		fragment_id++;
+		tslice->frag[frag_id] = newfrag;
+		frag_id++;
 
 		dbkey.time = t;
 		dbkey.agglvl = agglvl;
-		dbkey.frag_id = fragment_id;
+		dbkey.frag_id = frag_id;
 		if (map_raw_get(handler, handler->dbData, &dbkey, sizeof(dbkey), &value, &value_len) == -1)
 		    break; /* No more fragments */
 	    } /* while */
 
-	    tslice->num_fragments = fragment_id;
+	    tslice->num_frags = frag_id;
 
 	    traceEvent(TRACE_INFO, "Moved to time %u", time_value);
 	}
@@ -548,7 +548,7 @@ static int mapKeyToIndex(tsdb_handler *handler, int agglvl,
 	return(-1);
     }
 
-    while (handler->lowest_free_index < MAX_NUM_FRAGMENTS * ENTRIES_PER_FRAG) {
+    while (handler->lowest_free_index < MAX_NUM_FRAGS * ENTRIES_PER_FRAG) {
 	*key_idx = handler->lowest_free_index++;
 	if (!key_index_in_use(handler, *key_idx)) {
 	    set_key_index(handler, key, *key_idx);
@@ -569,7 +569,7 @@ static int mapKeyToIndex(tsdb_handler *handler, int agglvl,
 // XXX TODO: if there's no match and create_idx_if_needed, and there is a
 // match at a higher agglvl, use that (?)
 static int getOffset(tsdb_handler *handler, int agglvl, const char *key,
-    uint32_t *fragment_id, u_int64_t *offset, u_int8_t create_idx_if_needed)
+    uint32_t *frag_id, u_int64_t *offset, u_int8_t create_idx_if_needed)
 {
     u_int32_t key_idx;
 
@@ -580,16 +580,16 @@ static int getOffset(tsdb_handler *handler, int agglvl, const char *key,
 	traceEvent(TRACE_INFO, "%s mapped to idx %u", key, key_idx);
     }
 
-    *fragment_id = key_idx / ENTRIES_PER_FRAG;
+    *frag_id = key_idx / ENTRIES_PER_FRAG;
     *offset = (key_idx % ENTRIES_PER_FRAG) * handler->entry_size;
     tsdb_tslice *tslice = &handler->tslice[agglvl];
 
-    if (*fragment_id > MAX_NUM_FRAGMENTS) {
-	traceEvent(TRACE_ERROR, "Internal error [%u > %u]", *fragment_id, MAX_NUM_FRAGMENTS);
+    if (*frag_id > MAX_NUM_FRAGS) {
+	traceEvent(TRACE_ERROR, "Internal error [%u > %u]", *frag_id, MAX_NUM_FRAGS);
 	return -2;
     }
 
-    if (tslice->fragment[*fragment_id]) {
+    if (tslice->frag[*frag_id]) {
 	// We already have the right fragment.  Do nothing.
 
     } else if (tslice->load_on_demand || handler->readonly) {
@@ -602,23 +602,23 @@ static int getOffset(tsdb_handler *handler, int agglvl, const char *key,
 
 	dbkey.time = tslice->time;
 	dbkey.agglvl = agglvl;
-	dbkey.frag_id = *fragment_id;
+	dbkey.frag_id = *frag_id;
 	if (map_raw_get(handler, handler->dbData, &dbkey, sizeof(dbkey), &value, &value_len) == -1)
 	    return(-1);
 
 	uint32_t len = qlz_size_decompressed(value);
 
-	tslice->fragment[*fragment_id] = (u_int8_t*)malloc(len);
-	if (!tslice->fragment[*fragment_id]) {
+	tslice->frag[*frag_id] = (u_int8_t*)malloc(len);
+	if (!tslice->frag[*frag_id]) {
 	    traceEvent(TRACE_WARNING, "Not enough memory (%u bytes)", len);
 	    return(-2);
 	}
 
-	qlz_decompress(value, tslice->fragment[*fragment_id], &handler->state_decompress);
+	qlz_decompress(value, tslice->frag[*frag_id], &handler->state_decompress);
 	//free(value);
 
-	if (tslice->num_fragments <= *fragment_id)
-	    tslice->num_fragments = *fragment_id + 1;
+	if (tslice->num_frags <= *frag_id)
+	    tslice->num_frags = *frag_id + 1;
 
     } else if (tslice->growable) {
 	// We should allocate a new fragment.
@@ -627,11 +627,11 @@ static int getOffset(tsdb_handler *handler, int agglvl, const char *key,
 
 	if (ptr) {
 	    memset(ptr, handler->default_unknown_value, frag_len);       
-	    tslice->fragment[*fragment_id] = ptr;
-	    tslice->num_fragments = *fragment_id + 1;
+	    tslice->frag[*frag_id] = ptr;
+	    tslice->num_frags = *frag_id + 1;
 
 	    traceEvent(TRACE_INFO, "Grown table to %u elements",
-		tslice->num_fragments * ENTRIES_PER_FRAG);
+		tslice->num_frags * ENTRIES_PER_FRAG);
 
 	} else {
 	    traceEvent(TRACE_WARNING, "Not enough memory (%u bytes): unable to grow table", frag_len);
@@ -641,8 +641,8 @@ static int getOffset(tsdb_handler *handler, int agglvl, const char *key,
     } else {
 	traceEvent(TRACE_ERROR, "Index %u out of range %u...%u (%u)",
 	    key_idx, 0,
-	    tslice->num_fragments * ENTRIES_PER_FRAG - 1,
-	    tslice->num_fragments);
+	    tslice->num_frags * ENTRIES_PER_FRAG - 1,
+	    tslice->num_frags);
 	return(-1);
     }
 
@@ -654,24 +654,24 @@ static int getOffset(tsdb_handler *handler, int agglvl, const char *key,
 int tsdb_set(tsdb_handler *handler, const char *key, const tsdb_value *valuep)
 {
     u_int64_t offset;
-    uint32_t fragment_id;
+    uint32_t frag_id;
 
     if (!handler->is_open)
 	return -1;
 
-    if (getOffset(handler, 0, key, &fragment_id, &offset, 1) == 0) {
-	tsdb_value *dest = (tsdb_value*)(handler->tslice[0].fragment[fragment_id] + offset);
+    if (getOffset(handler, 0, key, &frag_id, &offset, 1) == 0) {
+	tsdb_value *dest = (tsdb_value*)(handler->tslice[0].frag[frag_id] + offset);
 	memcpy(dest, valuep, handler->entry_size);
-	handler->tslice[0].fragment_changed[fragment_id] = 1;
+	handler->tslice[0].frag_changed[frag_id] = 1;
 	traceEvent(TRACE_INFO, "Succesfully set value "
 	    "[agglvl=%d][frag_id=%u][offset=%" PRIu64 "][value_len=%u]",
-	    0, fragment_id, offset, handler->entry_size);
+	    0, frag_id, offset, handler->entry_size);
 
 	for (int agglvl = 1; agglvl < handler->num_agglvls; agglvl++) {
-	    if (getOffset(handler, agglvl, key, &fragment_id, &offset, 1) == 0) {
+	    if (getOffset(handler, agglvl, key, &frag_id, &offset, 1) == 0) {
 		uint8_t changed = 0;
 		// Aggregate *valuep into tslice[agglvl]
-		tsdb_value *aggval = (tsdb_value*)(handler->tslice[agglvl].fragment[fragment_id] + offset);
+		tsdb_value *aggval = (tsdb_value*)(handler->tslice[agglvl].frag[frag_id] + offset);
 		// n: number of steps contributing to aggregate (XXX temp hack)
 		int n = (handler->tslice[0].time - handler->tslice[agglvl].time) / handler->agg[0].period + 1;
 		switch (handler->agg[agglvl].func) {
@@ -723,11 +723,11 @@ int tsdb_set(tsdb_handler *handler, const char *key, const tsdb_value *valuep)
 		}
 
 		if (changed)
-		    handler->tslice[agglvl].fragment_changed[fragment_id] = 1;
+		    handler->tslice[agglvl].frag_changed[frag_id] = 1;
 
 		traceEvent(TRACE_INFO, "Succesfully set value "
 		    "[agglvl=%d][frag_id=%u][offset=%" PRIu64 "][value_len=%u]",
-		    agglvl, fragment_id, offset, handler->entry_size);
+		    agglvl, frag_id, offset, handler->entry_size);
 
 	    } else {
 		traceEvent(TRACE_ERROR, "Missing time");
@@ -749,15 +749,15 @@ int tsdb_get(tsdb_handler *handler, const char *key, const tsdb_value **valuepp,
     int agglvl)
 {
     u_int64_t offset;
-    uint32_t fragment_id;
+    uint32_t frag_id;
 
     if (!handler->is_open) {
 	*valuepp = &handler->default_unknown_value;
 	return -1;
     }
 
-    if (getOffset(handler, agglvl, key, &fragment_id, &offset, 0) == 0) {
-	*valuepp = (tsdb_value*)(handler->tslice[agglvl].fragment[fragment_id] + offset);
+    if (getOffset(handler, agglvl, key, &frag_id, &offset, 0) == 0) {
+	*valuepp = (tsdb_value*)(handler->tslice[agglvl].frag[frag_id] + offset);
 
 	traceEvent(TRACE_INFO, "Succesfully read value [offset=%" PRIu64 "][value_len=%u]",
 	    offset, handler->entry_size);
