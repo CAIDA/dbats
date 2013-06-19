@@ -11,15 +11,21 @@
 
 /* *********************************************************************** */
 
+typedef struct {
+    uint32_t time;
+    int agglvl;
+    uint32_t frag_id;
+} fragkey_t;
+
 static void map_raw_set(const tsdb_handler *handler, DB *db,
-    const char *key, u_int32_t key_len,
+    const void *key, u_int32_t key_len,
     const void *value, u_int32_t value_len);
 
 static void map_raw_delete(const tsdb_handler *handler, DB *db,
-    const char *key, u_int32_t key_len);
+    const void *key, u_int32_t key_len);
 
 static int map_raw_get(const tsdb_handler *handler, DB *db,
-    const char *key, u_int32_t key_len,
+    const void *key, u_int32_t key_len,
     void **value, u_int32_t *value_len);
 
 /* *********************************************************************** */
@@ -149,7 +155,7 @@ int tsdb_aggregate(tsdb_handler *handler, int func, int steps)
 /* *********************************************************************** */
 
 static void map_raw_delete(const tsdb_handler *handler, DB *db,
-    const char *key, u_int32_t key_len)
+    const void *key, u_int32_t key_len)
 {
     DBT key_data;
 
@@ -170,7 +176,7 @@ static void map_raw_delete(const tsdb_handler *handler, DB *db,
 /* *********************************************************************** */
 
 static int map_raw_key_exists(const tsdb_handler *handler, DB *db,
-    const char *key, u_int32_t key_len)
+    const void *key, u_int32_t key_len)
 {
     void *value;
     u_int value_len;
@@ -181,7 +187,7 @@ static int map_raw_key_exists(const tsdb_handler *handler, DB *db,
 /* *********************************************************************** */
 
 static void map_raw_set(const tsdb_handler *handler, DB *db,
-    const char *key, u_int32_t key_len,
+    const void *key, u_int32_t key_len,
     const void *value, u_int32_t value_len)
 {
     DBT key_data, data;
@@ -209,7 +215,8 @@ static void map_raw_set(const tsdb_handler *handler, DB *db,
 
 #define QLZ_OVERHEAD 400
 
-static int map_raw_get(const tsdb_handler *handler, DB* db, const char *key, u_int32_t key_len, void **value, u_int32_t *value_len)
+static int map_raw_get(const tsdb_handler *handler, DB* db,
+    const void *key, u_int32_t key_len, void **value, u_int32_t *value_len)
 {
     DBT key_data, data;
 
@@ -248,7 +255,7 @@ static void tsdb_flush_tslice(tsdb_handler *handler, int agglvl)
 {
     traceEvent(TRACE_INFO, "flush %u agglvl=%d", handler->tslice[agglvl].time, agglvl);
     u_int fragment_size = handler->entry_size * ENTRIES_PER_FRAG;
-    char dbkey[32];
+    fragkey_t dbkey;
     u_int buf_len = fragment_size + QLZ_OVERHEAD;
     char *buf = (char*)malloc(buf_len);
     if (!buf) {
@@ -257,6 +264,8 @@ static void tsdb_flush_tslice(tsdb_handler *handler, int agglvl)
     }
 
     /* Write fragments to the DB */
+    dbkey.time = handler->tslice[agglvl].time;
+    dbkey.agglvl = agglvl;
     for (int f=0; f < handler->tslice[agglvl].num_fragments; f++) {
 	if (!handler->tslice[agglvl].fragment[f]) continue;
 
@@ -266,8 +275,8 @@ static void tsdb_flush_tslice(tsdb_handler *handler, int agglvl)
 	    traceEvent(TRACE_INFO, "Compression %u -> %u [fragment %u] [%.1f %%]",
 		fragment_size, compressed_len, f,
 		compressed_len*100.0/fragment_size);
-	    snprintf(dbkey, sizeof(dbkey), "%u-%d-%u", handler->tslice[agglvl].time, agglvl, f);
-	    map_raw_set(handler, handler->dbData, dbkey, strlen(dbkey), buf, compressed_len);
+	    dbkey.frag_id = f;
+	    map_raw_set(handler, handler->dbData, &dbkey, sizeof(dbkey), buf, compressed_len);
 	} else {
 	    traceEvent(TRACE_INFO, "Skipping agglvl %d fragment %d (unchanged)", agglvl, f);
 	}
@@ -323,30 +332,21 @@ u_int32_t normalize_time(const tsdb_handler *handler, int agglvl, u_int32_t *t)
 
 static void reserve_key_index(const tsdb_handler *handler, u_int32_t idx)
 {
-    char dbkey[32];
-
-    snprintf(dbkey, sizeof(dbkey), "rsv-%u", idx);
-    map_raw_set(handler, handler->dbIndex, dbkey, strlen(dbkey), "", 0);
+    map_raw_set(handler, handler->dbIndex, &idx, sizeof(idx), "", 0);
 }
 
 /* *********************************************************************** */
 
 static void unreserve_key_index(const tsdb_handler *handler, u_int32_t idx)
 {
-    char dbkey[32];
-
-    snprintf(dbkey, sizeof(dbkey), "rsv-%u", idx);
-    map_raw_delete(handler, handler->dbIndex, dbkey, strlen(dbkey));
+    map_raw_delete(handler, handler->dbIndex, &idx, sizeof(idx));
 }
 
 /* *********************************************************************** */
 
 static int key_index_in_use(const tsdb_handler *handler, u_int32_t idx)
 {
-    char dbkey[32];
-
-    snprintf(dbkey, sizeof(dbkey), "rsv-%u", idx);
-    return(map_raw_key_exists(handler, handler->dbIndex, dbkey, strlen(dbkey)));
+    return(map_raw_key_exists(handler, handler->dbIndex, &idx, sizeof(idx)));
 }
 
 /* *********************************************************************** */
@@ -356,12 +356,9 @@ static int get_key_index(const tsdb_handler *handler, int agglvl,
 {
     void *ptr;
     u_int32_t len;
-    char dbkey[128] = { 0 };
     const tsdb_tslice *tslice = &handler->tslice[agglvl];
 
-    snprintf(dbkey, sizeof(dbkey), "map-%s", key);
-
-    if (map_raw_get(handler, handler->dbKey, dbkey, strlen(dbkey), &ptr, &len) == 0) {
+    if (map_raw_get(handler, handler->dbKey, key, strlen(key), &ptr, &len) == 0) {
 	tsdb_key_mapping *mappings = (tsdb_key_mapping*)ptr;
 	u_int i;
 	u_int found = 0;
@@ -393,13 +390,10 @@ static int drop_key_index(const tsdb_handler *handler, const char *key,
 {
     void *ptr;
     u_int32_t len;
-    char dbkey[128];
 
     // XXX TODO: allowed only if time_value is the latest time ever seen
 
-    snprintf(dbkey, sizeof(dbkey), "map-%s", key);
-
-    if (map_raw_get(handler, handler->dbKey, dbkey, strlen(dbkey), &ptr, &len) == 0) {
+    if (map_raw_get(handler, handler->dbKey, key, strlen(key), &ptr, &len) == 0) {
 	tsdb_key_mapping *mappings = (tsdb_key_mapping*)ptr;
 	u_int i;
 	u_int found = 0;
@@ -409,7 +403,7 @@ static int drop_key_index(const tsdb_handler *handler, const char *key,
 	    if (mappings[i].time_end == 0) {
 	        mappings[i].time_end = time_value;
 	        found = 1;
-	        map_raw_set(handler, handler->dbKey, dbkey, strlen(dbkey), &ptr, len);
+	        map_raw_set(handler, handler->dbKey, key, strlen(key), &ptr, len);
 	        break;
 	    }
 	}
@@ -441,14 +435,12 @@ void tsdb_drop_key(const tsdb_handler *handler,
 
 static void set_key_index(const tsdb_handler *handler, const char *key, u_int32_t key_idx)
 {
-    char dbkey[128];
     tsdb_key_mapping mapping;
 
-    snprintf(dbkey, sizeof(dbkey), "map-%s", key);
     mapping.time_start = handler->tslice[0].time; // XXX
     mapping.time_end = 0;
     mapping.key_idx = key_idx;
-    map_raw_set(handler, handler->dbKey, dbkey, strlen(dbkey), &mapping, sizeof(mapping));
+    map_raw_set(handler, handler->dbKey, key, strlen(key), &mapping, sizeof(mapping));
 
     traceEvent(TRACE_INFO, "[SET] Mapping %s -> %u", key, key_idx);
 }
@@ -460,7 +452,7 @@ int tsdb_goto_time(tsdb_handler *handler, u_int32_t time_value, uint32_t flags)
     int rc;
     void *value;
     u_int32_t value_len;
-    char dbkey[32];
+    fragkey_t dbkey;
 
     traceEvent(TRACE_INFO, "goto_time %u", time_value);
 
@@ -484,8 +476,10 @@ int tsdb_goto_time(tsdb_handler *handler, u_int32_t time_value, uint32_t flags)
 	    continue;
 
 	u_int32_t fragment_id = 0;
-	snprintf(dbkey, sizeof(dbkey), "%u-%d-%u", t, agglvl, fragment_id);
-	rc = map_raw_get(handler, handler->dbData, dbkey, strlen(dbkey), &value, &value_len);
+	dbkey.time = t;
+	dbkey.agglvl = agglvl;
+	dbkey.frag_id = fragment_id;
+	rc = map_raw_get(handler, handler->dbData, &dbkey, sizeof(dbkey), &value, &value_len);
 	traceEvent(TRACE_INFO, "goto_time %u, agglvl=%d: map_raw_get -> %d", time_value, agglvl, rc);
 
 	if (rc == -1) {
@@ -521,8 +515,10 @@ int tsdb_goto_time(tsdb_handler *handler, u_int32_t time_value, uint32_t flags)
 		tslice->fragment[fragment_id] = newfrag;
 		fragment_id++;
 
-		snprintf(dbkey, sizeof(dbkey), "%u-%d-%u", t, agglvl, fragment_id);
-		if (map_raw_get(handler, handler->dbData, dbkey, strlen(dbkey), &value, &value_len) == -1)
+		dbkey.time = t;
+		dbkey.agglvl = agglvl;
+		dbkey.frag_id = fragment_id;
+		if (map_raw_get(handler, handler->dbData, &dbkey, sizeof(dbkey), &value, &value_len) == -1)
 		    break; /* No more fragments */
 	    } /* while */
 
@@ -599,13 +595,15 @@ static int getOffset(tsdb_handler *handler, int agglvl, const char *key,
     } else if (tslice->load_on_demand || handler->readonly) {
 	// We should load the fragment.
 	u_int32_t value_len;
-	char dbkey[32];
+	fragkey_t dbkey;
 	void *value;
 
 	// TODO: optionally, unload other fragments?
 
-	snprintf(dbkey, sizeof(dbkey), "%u-%d-%u", tslice->time, agglvl, *fragment_id);
-	if (map_raw_get(handler, handler->dbData, dbkey, strlen(dbkey), &value, &value_len) == -1)
+	dbkey.time = tslice->time;
+	dbkey.agglvl = agglvl;
+	dbkey.frag_id = *fragment_id;
+	if (map_raw_get(handler, handler->dbData, &dbkey, sizeof(dbkey), &value, &value_len) == -1)
 	    return(-1);
 
 	uint32_t len = qlz_size_decompressed(value);
