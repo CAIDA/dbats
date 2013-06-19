@@ -12,6 +12,12 @@
 /* *********************************************************************** */
 
 typedef struct {
+    u_int32_t time_start; // First time in which this mapping is valid
+    u_int32_t time_end;   // Last time in which this mapping is valid
+    u_int32_t key_idx;
+} tsdb_key_mapping;
+
+typedef struct {
     uint32_t time;
     int agglvl;
     uint32_t frag_id;

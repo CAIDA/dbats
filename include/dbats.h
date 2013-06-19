@@ -20,15 +20,11 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
-#include <signal.h>
 #include <fcntl.h>
 #include <ctype.h>
-#include <strings.h>
 #include <limits.h>
 #include <sys/types.h>
 #include <unistd.h>
-#include <sys/mman.h> /* mmap() */
-#include <stdarg.h>
 #include <sys/stat.h>
 #include <db.h>
 #include <errno.h>
@@ -95,12 +91,6 @@ typedef struct {
     tsdb_tslice tslice[MAX_NUM_AGGLVLS];  // a tslice for each aggregation level
     tsdb_agg agg[MAX_NUM_AGGLVLS];        // parameters for each aggregation level
 } tsdb_handler;
-
-typedef struct {
-    u_int32_t time_start; // First time in which this mapping is valid
-    u_int32_t time_end;   // Last time in which this mapping is valid
-    u_int32_t key_idx;
-} tsdb_key_mapping;
 
 /* ************************************************** */
 
