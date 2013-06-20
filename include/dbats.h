@@ -119,7 +119,4 @@ extern int tsdb_keywalk_start(tsdb_handler *handler);
 extern int tsdb_keywalk_next(tsdb_handler *handler, char **key, int *len);
 extern int tsdb_keywalk_end(tsdb_handler *handler);
 
-extern void tsdb_drop_key(const tsdb_handler *handler,
-    const char *key, u_int32_t time_value);
-
 extern void tsdb_stat_print(const tsdb_handler *handler);

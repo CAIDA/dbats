@@ -26,12 +26,6 @@ struct tsdb_frag {
 };
 
 typedef struct {
-    u_int32_t time_start; // First time in which this mapping is valid
-    u_int32_t time_end;   // Last time in which this mapping is valid
-    u_int32_t key_idx;
-} tsdb_key_mapping;
-
-typedef struct {
     uint32_t time;
     int agglvl;
     uint32_t frag_id;
@@ -40,9 +34,6 @@ typedef struct {
 static void map_raw_set(const tsdb_handler *handler, DB *db,
     const void *key, u_int32_t key_len,
     const void *value, u_int32_t value_len);
-
-static void map_raw_delete(const tsdb_handler *handler, DB *db,
-    const void *key, u_int32_t key_len);
 
 static int map_raw_get(const tsdb_handler *handler, DB *db,
     const void *key, u_int32_t key_len,
@@ -100,7 +91,6 @@ int tsdb_open(const char *path, tsdb_handler *handler,
 
     if (raw_db_open(handler, &handler->dbMeta,  path, "meta",  readonly) != 0) return -1;
     if (raw_db_open(handler, &handler->dbKey,   path, "key",   readonly) != 0) return -1;
-    if (raw_db_open(handler, &handler->dbIndex, path, "index", readonly) != 0) return -1;
     if (raw_db_open(handler, &handler->dbData,  path, "data",  readonly) != 0) return -1;
 
     handler->entry_size = sizeof(tsdb_value); // for db_get_buf_len
@@ -176,6 +166,7 @@ int tsdb_aggregate(tsdb_handler *handler, int func, int steps)
 
 /* *********************************************************************** */
 
+/*
 static void map_raw_delete(const tsdb_handler *handler, DB *db,
     const void *key, u_int32_t key_len)
 {
@@ -194,9 +185,11 @@ static void map_raw_delete(const tsdb_handler *handler, DB *db,
     if (db->del(db, NULL, &key_data, 0) != 0)
 	traceEvent(TRACE_WARNING, "Error while deleting key");
 }
+*/
 
 /* *********************************************************************** */
 
+/*
 static int map_raw_key_exists(const tsdb_handler *handler, DB *db,
     const void *key, u_int32_t key_len)
 {
@@ -205,6 +198,7 @@ static int map_raw_key_exists(const tsdb_handler *handler, DB *db,
 
     return (map_raw_get(handler, db, key, key_len, &value, &value_len) == 0);
 }
+*/
 
 /* *********************************************************************** */
 
@@ -273,6 +267,8 @@ static int map_raw_get(const tsdb_handler *handler, DB* db,
 
 /* *********************************************************************** */
 
+// Writes tslice to db (unless db is readonly).
+// Also cleans up in-memory tslice even if db is readonly.
 static void tsdb_flush_tslice(tsdb_handler *handler, int agglvl)
 {
     traceEvent(TRACE_INFO, "flush %u agglvl=%d", handler->tslice[agglvl].time, agglvl);
@@ -323,10 +319,6 @@ void tsdb_close(tsdb_handler *handler)
     }
 
     if (!handler->readonly)
-	map_raw_set(handler, handler->dbMeta, "lowest_free_index", strlen("lowest_free_index"),
-	    &handler->lowest_free_index, sizeof(handler->lowest_free_index));
-
-    if (!handler->readonly)
 	traceEvent(TRACE_INFO, "Flushing database changes...");
 
     for (int agglvl = 0; agglvl < handler->num_agglvls; agglvl++) {
@@ -335,7 +327,6 @@ void tsdb_close(tsdb_handler *handler)
 
     //handler->dbMeta->close(handler->dbMeta, 0);
     //handler->dbKey->close(handler->dbKey, 0);
-    //handler->dbIndex->close(handler->dbIndex, 0);
     //handler->dbData->close(handler->dbData, 0);
     handler->dbenv->close(handler->dbenv, 0);
     handler->is_open = 0;
@@ -353,116 +344,23 @@ u_int32_t normalize_time(const tsdb_handler *handler, int agglvl, u_int32_t *t)
 
 /* *********************************************************************** */
 
-static void reserve_key_index(const tsdb_handler *handler, u_int32_t idx)
-{
-    map_raw_set(handler, handler->dbIndex, &idx, sizeof(idx), "", 0);
-}
-
-/* *********************************************************************** */
-
-static void unreserve_key_index(const tsdb_handler *handler, u_int32_t idx)
-{
-    map_raw_delete(handler, handler->dbIndex, &idx, sizeof(idx));
-}
-
-/* *********************************************************************** */
-
-static int key_index_in_use(const tsdb_handler *handler, u_int32_t idx)
-{
-    return(map_raw_key_exists(handler, handler->dbIndex, &idx, sizeof(idx)));
-}
-
-/* *********************************************************************** */
-
-static int get_key_index(const tsdb_handler *handler, int agglvl,
+static int get_key_index(const tsdb_handler *handler,
     const char *key, u_int32_t *key_idx)
 {
     void *ptr;
     u_int32_t len;
-    const tsdb_tslice *tslice = &handler->tslice[agglvl];
-
     if (map_raw_get(handler, handler->dbKey, key, strlen(key), &ptr, &len) == 0) {
-	tsdb_key_mapping *mappings = (tsdb_key_mapping*)ptr;
-	u_int i;
-	u_int found = 0;
-	u_int num_mappings = len / sizeof(tsdb_key_mapping);
-
-	for (i=0; i<num_mappings; i++) {
-	    if ((tslice->time >= mappings[i].time_start) &&
-		((mappings[i].time_end == 0) ||
-		(tslice->time < mappings[i].time_end)))
-	    {
-	        *key_idx = mappings[i].key_idx;
-	        found = 1;
-	        break;
-	    }
-	}
-
-	//free(ptr);
-	// traceEvent(TRACE_INFO, "[GET] Mapping %u -> %u", idx, *key_idx);
-	return(found ? 0 : -1);
+	memcpy(key_idx, ptr, sizeof(*key_idx));
+	return 0;
     }
-
-    return(-1);
-}
-
-/* *********************************************************************** */
-
-static int drop_key_index(const tsdb_handler *handler, const char *key,
-    u_int32_t time_value, u_int32_t *key_idx)
-{
-    void *ptr;
-    u_int32_t len;
-
-    // XXX TODO: allowed only if time_value is the latest time ever seen
-
-    if (map_raw_get(handler, handler->dbKey, key, strlen(key), &ptr, &len) == 0) {
-	tsdb_key_mapping *mappings = (tsdb_key_mapping*)ptr;
-	u_int i;
-	u_int found = 0;
-	u_int num_mappings = len / sizeof(tsdb_key_mapping);
-
-	for (i=0; i<num_mappings; i++) {
-	    if (mappings[i].time_end == 0) {
-	        mappings[i].time_end = time_value;
-	        found = 1;
-	        map_raw_set(handler, handler->dbKey, key, strlen(key), &ptr, len);
-	        break;
-	    }
-	}
-
-	return(found ? 0 : -1);
-    }
-
-    return(-1);
-}
-
-/* *********************************************************************** */
-
-// XXX don't un-reserve mapping until the end of all agglvls that use it
-void tsdb_drop_key(const tsdb_handler *handler,
-    const char *key, u_int32_t time_value)
-{
-    u_int32_t key_idx = 0;
-
-    if (drop_key_index(handler, key, time_value, &key_idx) == 0) {
-	traceEvent(TRACE_INFO, "Key %s mapped to index %u", key, key_idx);
-	unreserve_key_index(handler, key_idx);
-    } else
-	traceEvent(TRACE_WARNING, "Unable to drop key %s", key);
+    return -1;
 }
 
 /* *********************************************************************** */
 
 static void set_key_index(const tsdb_handler *handler, const char *key, u_int32_t key_idx)
 {
-    tsdb_key_mapping mapping;
-
-    mapping.time_start = handler->tslice[0].time; // XXX
-    mapping.time_end = 0;
-    mapping.key_idx = key_idx;
-    map_raw_set(handler, handler->dbKey, key, strlen(key), &mapping, sizeof(mapping));
-
+    map_raw_set(handler, handler->dbKey, key, strlen(key), &key_idx, sizeof(key_idx));
     traceEvent(TRACE_INFO, "[SET] Mapping %s -> %u", key, key_idx);
 }
 
@@ -564,11 +462,11 @@ int tsdb_goto_time(tsdb_handler *handler, u_int32_t time_value, uint32_t flags)
 
 /* *********************************************************************** */
 
-static int mapKeyToIndex(tsdb_handler *handler, int agglvl,
+static int mapKeyToIndex(tsdb_handler *handler,
     const char *key, u_int32_t *key_idx, u_int8_t create_idx_if_needed)
 {
     /* Check if this is a known key */
-    if (get_key_index(handler, agglvl, key, key_idx) == 0) {
+    if (get_key_index(handler, key, key_idx) == 0) {
 	traceEvent(TRACE_INFO, "Key %s mapped to index %u", key, *key_idx);
 	return(0);
     }
@@ -578,15 +476,14 @@ static int mapKeyToIndex(tsdb_handler *handler, int agglvl,
 	return(-1);
     }
 
-    while (handler->lowest_free_index < MAX_NUM_FRAGS * ENTRIES_PER_FRAG) {
+    if (handler->lowest_free_index < MAX_NUM_FRAGS * ENTRIES_PER_FRAG) {
 	*key_idx = handler->lowest_free_index++;
-	if (!key_index_in_use(handler, *key_idx)) {
-	    set_key_index(handler, key, *key_idx);
-	    reserve_key_index(handler, *key_idx);
-	    traceEvent(TRACE_INFO, "Key %s mapped to index %u", key, *key_idx);
-	    return 0;
-	    break;
-	}
+	set_key_index(handler, key, *key_idx);
+	traceEvent(TRACE_INFO, "Key %s mapped to index %u", key, *key_idx);
+	map_raw_set(handler, handler->dbMeta,
+	    "lowest_free_index", strlen("lowest_free_index"),
+	    &handler->lowest_free_index, sizeof(handler->lowest_free_index));
+	return 0;
     }
 
     traceEvent(TRACE_ERROR, "Out of indexes");
@@ -596,14 +493,12 @@ static int mapKeyToIndex(tsdb_handler *handler, int agglvl,
 
 /* *********************************************************************** */
 
-// XXX TODO: if there's no match and create_idx_if_needed, and there is a
-// match at a higher agglvl, use that (?)
 static int getOffset(tsdb_handler *handler, int agglvl, const char *key,
     uint32_t *frag_id, uint32_t *offset, u_int8_t create_idx_if_needed)
 {
     u_int32_t key_idx;
 
-    if (mapKeyToIndex(handler, agglvl, key, &key_idx, create_idx_if_needed) == -1) {
+    if (mapKeyToIndex(handler, key, &key_idx, create_idx_if_needed) == -1) {
 	traceEvent(TRACE_INFO, "Unable to find key %s", key);
 	return(-1);
     } else {
@@ -828,8 +723,6 @@ void tsdb_stat_print(const tsdb_handler *handler) {
 	traceEvent(TRACE_ERROR, "Error while dumping DB stats for Meta [%s]", db_strerror(ret));
     if ((ret = handler->dbKey->stat_print(handler->dbKey, DB_FAST_STAT)) != 0)
 	traceEvent(TRACE_ERROR, "Error while dumping DB stats for Key [%s]", db_strerror(ret));
-    if ((ret = handler->dbIndex->stat_print(handler->dbIndex, DB_FAST_STAT)) != 0)
-	traceEvent(TRACE_ERROR, "Error while dumping DB stats for Index [%s]", db_strerror(ret));
     if ((ret = handler->dbData->stat_print(handler->dbData, DB_FAST_STAT)) != 0)
 	traceEvent(TRACE_ERROR, "Error while dumping DB stats for Data [%s]", db_strerror(ret));
 }
