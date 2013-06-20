@@ -451,91 +451,75 @@ int tsdb_goto_time(tsdb_handler *handler, uint32_t time_value, uint32_t flags)
 
 /* *********************************************************************** */
 
-static int mapKeyToIndex(tsdb_handler *handler,
-    const char *key, uint32_t *key_idx, uint8_t create_idx_if_needed)
-{
-    /* Check if this is a known key */
-    if (get_key_index(handler, key, key_idx) == 0) {
-	traceEvent(TRACE_INFO, "Key %s mapped to index %u", key, *key_idx);
-	return(0);
-    }
-
-    if (!create_idx_if_needed) {
-	traceEvent(TRACE_INFO, "Unable to find key %s", key);
-	return(-1);
-    }
-
-    if (handler->lowest_free_index < MAX_NUM_FRAGS * ENTRIES_PER_FRAG) {
-	*key_idx = handler->lowest_free_index++;
-	set_key_index(handler, key, *key_idx);
-	traceEvent(TRACE_INFO, "Key %s mapped to index %u", key, *key_idx);
-	raw_db_set(handler, handler->dbMeta,
-	    "lowest_free_index", strlen("lowest_free_index"),
-	    &handler->lowest_free_index, sizeof(handler->lowest_free_index));
-	return 0;
-    }
-
-    traceEvent(TRACE_ERROR, "Out of indexes");
-    return -1;
-}
-
-
-/* *********************************************************************** */
-
-static int getOffset(tsdb_handler *handler, int agglvl, const char *key,
+static int get_frag_offset(tsdb_handler *handler, const char *key,
     uint32_t *frag_id, uint32_t *offset, uint8_t create_idx_if_needed)
 {
     uint32_t key_idx;
 
-    if (mapKeyToIndex(handler, key, &key_idx, create_idx_if_needed) == -1) {
-	traceEvent(TRACE_INFO, "Unable to find key %s", key);
-	return(-1);
+    if (get_key_index(handler, key, &key_idx) == 0) {
+	traceEvent(TRACE_INFO, "Found key %s = index %u", key, key_idx);
+
+    } else if (!create_idx_if_needed) {
+	traceEvent(TRACE_INFO, "Key not found: %s", key);
+	return -1;
+
+    } else if (handler->lowest_free_index < MAX_NUM_FRAGS * ENTRIES_PER_FRAG) {
+	key_idx = handler->lowest_free_index++;
+	set_key_index(handler, key, key_idx);
+	traceEvent(TRACE_INFO, "Assigned key %s = index %u", key, key_idx);
+	raw_db_set(handler, handler->dbMeta,
+	    "lowest_free_index", strlen("lowest_free_index"),
+	    &handler->lowest_free_index, sizeof(handler->lowest_free_index));
+
     } else {
-	traceEvent(TRACE_INFO, "%s mapped to idx %u", key, key_idx);
+	traceEvent(TRACE_ERROR, "Out of indexes for key %s", key);
+	return -1;
     }
 
     *frag_id = key_idx / ENTRIES_PER_FRAG;
     *offset = key_idx % ENTRIES_PER_FRAG;
+    return 0;
+}
+
+static int instantiate_frag(tsdb_handler *handler, int agglvl, uint32_t frag_id)
+{
     tsdb_tslice *tslice = &handler->tslice[agglvl];
 
-    if (*frag_id > MAX_NUM_FRAGS) {
-	traceEvent(TRACE_ERROR, "Internal error [%u > %u]", *frag_id, MAX_NUM_FRAGS);
+    if (frag_id > MAX_NUM_FRAGS) {
+	traceEvent(TRACE_ERROR, "Internal error [%u > %u]", frag_id, MAX_NUM_FRAGS);
 	return -2;
     }
 
-    if (tslice->frag[*frag_id]) {
+    if (tslice->frag[frag_id]) {
 	// We already have the right fragment.  Do nothing.
 
     } else if (tslice->load_on_demand || handler->readonly) {
 	// We should load the fragment.
 	// TODO: optionally, unload other fragments?
-	int rc = load_frag(handler, tslice->time, agglvl, *frag_id);
+	int rc = load_frag(handler, tslice->time, agglvl, frag_id);
 	if (rc != 0)
 	    return rc;
 
     } else if (tslice->growable) {
 	// We should allocate a new fragment.
 	traceEvent(TRACE_NORMAL, "grow table for time %u, agglvl %d, frag_id %u",
-	    tslice->time, agglvl, *frag_id);
-	tslice->frag[*frag_id] = calloc(1, fragsize(handler));
-	if (!tslice->frag[*frag_id]) {
+	    tslice->time, agglvl, frag_id);
+	tslice->frag[frag_id] = calloc(1, fragsize(handler));
+	if (!tslice->frag[frag_id]) {
 	    traceEvent(TRACE_WARNING, "Not enough memory to grow table for "
-		"time %u, agglvl %d, frag_id %u", tslice->time, agglvl, *frag_id);
+		"time %u, agglvl %d, frag_id %u", tslice->time, agglvl, frag_id);
 	    return -2;
 	}
-	tslice->num_frags = *frag_id + 1;
+	tslice->num_frags = frag_id + 1;
 	traceEvent(TRACE_INFO, "Grew table to %u elements",
 	    tslice->num_frags * ENTRIES_PER_FRAG);
 
     } else {
-	traceEvent(TRACE_ERROR, "Index %u out of range %u...%u (%u)",
-	    key_idx, 0,
-	    tslice->num_frags * ENTRIES_PER_FRAG - 1,
-	    tslice->num_frags);
-	return(-1);
+	traceEvent(TRACE_ERROR, "Bad frag_id %u", frag_id);
+	return -1;
     }
 
-    return(0);
+    return 0;
 }
 
 /* *********************************************************************** */
@@ -548,7 +532,9 @@ int tsdb_set(tsdb_handler *handler, const char *key, const tsdb_value *valuep)
     if (!handler->is_open)
 	return -1;
 
-    if (getOffset(handler, 0, key, &frag_id, &offset, 1) == 0) {
+    if (get_frag_offset(handler, key, &frag_id, &offset, 1) == 0 &&
+	instantiate_frag(handler, 0, frag_id) == 0)
+    {
 	tsdb_value *dest = valueptr(handler, 0, frag_id, offset);
 	memcpy(dest, valuep, handler->entry_size);
 	vec_set(handler->tslice[0].frag[frag_id]->is_set, offset);
@@ -558,7 +544,9 @@ int tsdb_set(tsdb_handler *handler, const char *key, const tsdb_value *valuep)
 	    0, frag_id, offset, handler->entry_size);
 
 	for (int agglvl = 1; agglvl < handler->num_agglvls; agglvl++) {
-	    if (getOffset(handler, agglvl, key, &frag_id, &offset, 1) == 0) {
+	    // Because key-to-index mapping is fixed across time and
+	    // agg levels, we don't need to get_frag_offset() again.
+	    if (instantiate_frag(handler, agglvl, frag_id) == 0) {
 		uint8_t changed = 0;
 		// Aggregate *valuep into tslice[agglvl]
 		tsdb_value *aggval = valueptr(handler, agglvl, frag_id, offset);
@@ -602,7 +590,8 @@ int tsdb_set(tsdb_handler *handler, const char *key, const tsdb_value *valuep)
 		    break;
 		case TSDB_AGG_SUM:
 		    for (int i = 0; i < handler->num_values_per_entry; i++) {
-			traceEvent(TRACE_INFO, "i=%d n=%d aggval=%" PRIu32 " val=%" PRIu32, i, n, aggval[i], valuep[i]);
+			traceEvent(TRACE_INFO, "i=%d n=%d aggval=%" PRIu32 " val=%" PRIu32,
+			    i, n, aggval[i], valuep[i]);
 			if (n == 1)
 			    aggval[i] = valuep[i];
 			else
@@ -646,7 +635,9 @@ int tsdb_get(tsdb_handler *handler, const char *key, const tsdb_value **valuepp,
 	return -1;
     }
 
-    if (getOffset(handler, agglvl, key, &frag_id, &offset, 0) == 0) {
+    if (get_frag_offset(handler, key, &frag_id, &offset, 0) == 0 &&
+	instantiate_frag(handler, agglvl, frag_id) == 0)
+    {
 	*valuepp = valueptr(handler, agglvl, frag_id, offset);
 
 	traceEvent(TRACE_INFO, "Succesfully read value [offset=%" PRIu32 "][value_len=%u]",
