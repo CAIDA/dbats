@@ -49,12 +49,12 @@ typedef struct tsdb_frag tsdb_frag;
 // Logical row or "time slice", containing all the entries for a given time.
 // Entries are actually batched into fragments within a tslice.
 typedef struct {
-    u_int32_t time;                        // start time (unix seconds)
-    u_int32_t num_frags;                   // number of fragments
-    u_int8_t growable;                     // new fragments can be appended
-    u_int8_t load_on_demand;               // don't load fragment until needed
+    uint32_t time;                        // start time (unix seconds)
+    uint32_t num_frags;                   // number of fragments
+    uint8_t growable;                     // new fragments can be appended
+    uint8_t load_on_demand;               // don't load fragment until needed
     tsdb_frag *frag[MAX_NUM_FRAGS];
-    u_int8_t frag_changed[MAX_NUM_FRAGS];
+    uint8_t frag_changed[MAX_NUM_FRAGS];
 } tsdb_tslice;
 
 #define TSDB_AGG_NONE   0
@@ -68,19 +68,19 @@ typedef struct {
 typedef struct {
     int func;               // aggregation function
     int steps;              // number of primary data points in agg
-    u_int32_t period;       // length of slice (seconds)
+    uint32_t period;       // length of slice (seconds)
 } tsdb_agg;
 
-typedef u_int32_t tsdb_value;
+typedef uint32_t tsdb_value;
 
 typedef struct {
-    u_int8_t  is_open;
-    u_int8_t  readonly;                   // Mode used to open the db file
-    u_int16_t num_agglvls;                // Number of aggregation levels
-    u_int16_t num_values_per_entry;       // Number of tsdb_values in an entry
-    u_int16_t entry_size;                 // Size of an entry (bytes)
-    u_int32_t lowest_free_index;          // Hint to speed finding a free index
-    u_int32_t rrd_slot_time_duration;     // length of raw time slice (sec)
+    uint8_t  is_open;
+    uint8_t  readonly;                   // Mode used to open the db file
+    uint16_t num_agglvls;                // Number of aggregation levels
+    uint16_t num_values_per_entry;       // Number of tsdb_values in an entry
+    uint16_t entry_size;                 // Size of an entry (bytes)
+    uint32_t lowest_free_index;          // Hint to speed finding a free index
+    uint32_t rrd_slot_time_duration;     // length of raw time slice (sec)
     qlz_state_compress state_compress;
     qlz_state_decompress state_decompress;
     DB_ENV *dbenv;                        // DB environment
@@ -96,18 +96,18 @@ typedef struct {
 /* ************************************************** */
 
 extern int tsdb_open(const char *tsdb_path, tsdb_handler *handler,
-    u_int16_t num_values_per_entry,
-    u_int32_t rrd_slot_time_duration,
-    u_int8_t readonly);
+    uint16_t num_values_per_entry,
+    uint32_t rrd_slot_time_duration,
+    uint8_t readonly);
 
 extern int tsdb_aggregate(tsdb_handler *handler, int func, int steps);
 
 extern void tsdb_close(tsdb_handler *handler);
 
-extern u_int32_t normalize_time(const tsdb_handler *handler, int s, u_int32_t *time);
+extern uint32_t normalize_time(const tsdb_handler *handler, int s, uint32_t *time);
 
 extern int tsdb_goto_time(tsdb_handler *handler,
-    u_int32_t time_value, uint32_t flags);
+    uint32_t time_value, uint32_t flags);
 
 extern int tsdb_set(tsdb_handler *handler,
     const char *key, const tsdb_value *valuep);
