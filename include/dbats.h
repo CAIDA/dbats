@@ -44,6 +44,8 @@
 #define TSDB_GROWABLE        0x02
 #define TSDB_LOAD_ON_DEMAND  0x04
 
+typedef struct tsdb_frag tsdb_frag;
+
 // Logical row or "time slice", containing all the entries for a given time.
 // Entries are actually batched into fragments within a tslice.
 typedef struct {
@@ -51,7 +53,7 @@ typedef struct {
     u_int32_t num_frags;                   // number of fragments
     u_int8_t growable;                     // new fragments can be appended
     u_int8_t load_on_demand;               // don't load fragment until needed
-    u_int8_t *frag[MAX_NUM_FRAGS];
+    tsdb_frag *frag[MAX_NUM_FRAGS];
     u_int8_t frag_changed[MAX_NUM_FRAGS];
 } tsdb_tslice;
 
@@ -77,7 +79,6 @@ typedef struct {
     u_int16_t num_agglvls;                // Number of aggregation levels
     u_int16_t num_values_per_entry;       // Number of tsdb_values in an entry
     u_int16_t entry_size;                 // Size of an entry (bytes)
-    u_int32_t default_unknown_value;      // Default 0
     u_int32_t lowest_free_index;          // Hint to speed finding a free index
     u_int32_t rrd_slot_time_duration;     // length of raw time slice (sec)
     qlz_state_compress state_compress;
