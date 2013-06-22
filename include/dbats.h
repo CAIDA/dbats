@@ -68,7 +68,8 @@ typedef struct {
 typedef struct {
     int func;               // aggregation function
     int steps;              // number of primary data points in agg
-    uint32_t period;       // length of slice (seconds)
+    uint32_t period;        // length of slice (seconds)
+    uint32_t last_flush;    // time of latest flush
 } tsdb_agg;
 
 typedef uint32_t tsdb_value;

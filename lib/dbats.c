@@ -67,7 +67,10 @@ static void raw_db_set(const tsdb_handler *handler, DB *db,
     int ret;
 
     if (handler->readonly) {
-	traceEvent(TRACE_WARNING, "Unable to set value (read-only mode)");
+	const char *dbname;
+	db->get_dbname(db, NULL, &dbname);
+	traceEvent(TRACE_WARNING, "Unable to set value in database \"%s\" "
+	    "(read-only mode)", dbname);
 	return;
     }
 
@@ -81,7 +84,7 @@ static void raw_db_set(const tsdb_handler *handler, DB *db,
     data.flags = DB_DBT_USERMEM;
 
     if ((ret = db->put(db, NULL, &key_data, &data, 0)) != 0)
-	traceEvent(TRACE_WARNING, "Error in map_set(%.*s): %s", key_len, (char*)key, db_strerror(ret));
+	traceEvent(TRACE_WARNING, "Error in raw_db_set: %s", db_strerror(ret));
 }
 
 #define QLZ_OVERHEAD 400
@@ -196,7 +199,7 @@ int tsdb_open(const char *path, tsdb_handler *handler,
 	    raw_db_set(handler, handler->dbMeta, #field, strlen(#field), \
 		&handler->field, sizeof(handler->field)); \
 	} \
-	traceEvent(TRACE_INFO, "%-.22s = %u", #field, handler->field); \
+	traceEvent(TRACE_INFO, "cfg: %-.22s = %u", #field, handler->field); \
     } while (0)
 
     initcfg(handler, uint32_t, lowest_free_index,      0);
@@ -220,6 +223,7 @@ int tsdb_open(const char *path, tsdb_handler *handler,
 	    if (value_len != handler->num_agglvls * sizeof(tsdb_agg)) {
 		traceEvent(TRACE_ERROR, "corrupt aggregation config %d != %d",
 		    value_len, handler->num_agglvls * sizeof(tsdb_agg));
+		handler->readonly = 1;
 		return -1;
 	    }
 	}
@@ -257,7 +261,7 @@ int tsdb_aggregate(tsdb_handler *handler, int func, int steps)
 /* *********************************************************************** */
 
 // Writes tslice to db (unless db is readonly).
-// Also cleans up in-memory tslice even if db is readonly.
+// Also cleans up in-memory tslice, even if db is readonly.
 static void tsdb_flush_tslice(tsdb_handler *handler, int agglvl)
 {
     traceEvent(TRACE_INFO, "flush %u agglvl=%d", handler->tslice[agglvl].time, agglvl);
@@ -294,8 +298,14 @@ static void tsdb_flush_tslice(tsdb_handler *handler, int agglvl)
 	handler->tslice[agglvl].frag[f] = 0;
     }
 
-    memset(&handler->tslice[agglvl], 0, sizeof(tsdb_tslice));
+    if (!handler->readonly) {
+	if (handler->agg[agglvl].last_flush < handler->tslice[agglvl].time)
+	    handler->agg[agglvl].last_flush = handler->tslice[agglvl].time;
+	raw_db_set(handler, handler->dbMeta, "agg", strlen("agg"),
+	    handler->agg, sizeof(tsdb_agg) * handler->num_agglvls);
+    }
 
+    memset(&handler->tslice[agglvl], 0, sizeof(tsdb_tslice));
     free(buf);
 }
 
@@ -486,7 +496,8 @@ static int instantiate_frag(tsdb_handler *handler, int agglvl, uint32_t frag_id)
     tsdb_tslice *tslice = &handler->tslice[agglvl];
 
     if (frag_id > MAX_NUM_FRAGS) {
-	traceEvent(TRACE_ERROR, "Internal error [%u > %u]", frag_id, MAX_NUM_FRAGS);
+	traceEvent(TRACE_ERROR, "Internal error: frag_id %u > %u",
+	    frag_id, MAX_NUM_FRAGS);
 	return -2;
     }
 
@@ -526,98 +537,134 @@ static int instantiate_frag(tsdb_handler *handler, int agglvl, uint32_t frag_id)
 
 int tsdb_set(tsdb_handler *handler, const char *key, const tsdb_value *valuep)
 {
-    uint32_t offset;
     uint32_t frag_id;
+    uint32_t offset; // index of value within frag
+    int rc;
 
-    if (!handler->is_open)
+    if (!handler->is_open || handler->readonly)
 	return -1;
+    if ((rc = get_frag_offset(handler, key, &frag_id, &offset, 1)) != 0) {
+	handler->readonly = 1;
+	return rc;
+    }
+    if ((rc = instantiate_frag(handler, 0, frag_id)) != 0) {
+	handler->readonly = 1;
+	return rc;
+    }
 
-    if (get_frag_offset(handler, key, &frag_id, &offset, 1) == 0 &&
-	instantiate_frag(handler, 0, frag_id) == 0)
-    {
-	tsdb_value *dest = valueptr(handler, 0, frag_id, offset);
-	memcpy(dest, valuep, handler->entry_size);
-	vec_set(handler->tslice[0].frag[frag_id]->is_set, offset);
-	handler->tslice[0].frag_changed[frag_id] = 1;
-	traceEvent(TRACE_INFO, "Succesfully set value "
-	    "[agglvl=%d][frag_id=%u][offset=%" PRIu32 "][value_len=%u]",
-	    0, frag_id, offset, handler->entry_size);
+    uint8_t was_set = vec_test(handler->tslice[0].frag[frag_id]->is_set, offset);
+    tsdb_value *oldvaluep = valueptr(handler, 0, frag_id, offset);
 
-	for (int agglvl = 1; agglvl < handler->num_agglvls; agglvl++) {
-	    // Because key-to-index mapping is fixed across time and
-	    // agg levels, we don't need to get_frag_offset() again.
-	    if (instantiate_frag(handler, agglvl, frag_id) == 0) {
-		uint8_t changed = 0;
-		// Aggregate *valuep into tslice[agglvl]
-		tsdb_value *aggval = valueptr(handler, agglvl, frag_id, offset);
-		// n: number of steps contributing to aggregate (XXX temp hack)
-		int n = (handler->tslice[0].time - handler->tslice[agglvl].time) / handler->agg[0].period + 1;
-		switch (handler->agg[agglvl].func) {
-		case TSDB_AGG_MIN:
-		    for (int i = 0; i < handler->num_values_per_entry; i++) {
-			if (n == 1 || valuep[i] < aggval[i]) {
-			    aggval[i] = valuep[i];
-			    changed = 1;
-			}
-		    }
-		    break;
-		case TSDB_AGG_MAX:
-		    for (int i = 0; i < handler->num_values_per_entry; i++) {
-			if (n == 1 || valuep[i] > aggval[i]) {
-			    aggval[i] = valuep[i];
-			    changed = 1;
-			}
-		    }
-		    break;
-		case TSDB_AGG_AVG:
-		    for (int i = 0; i < handler->num_values_per_entry; i++) {
-			if (n == 1) {
-			    aggval[i] = valuep[i];
-			    changed = 1;
-			} else if (aggval[i] != valuep[i]) {
-			    aggval[i] += ((/*signed*/double)valuep[i] - aggval[i]) / n + 0.5;
-			    changed = 1;
-			}
-		    }
-		    break;
-		case TSDB_AGG_LAST:
-		    for (int i = 0; i < handler->num_values_per_entry; i++) {
-			if (aggval[i] != valuep[i]) {
-			    aggval[i] = valuep[i];
-			    changed = 1;
-			}
-		    }
-		    break;
-		case TSDB_AGG_SUM:
-		    for (int i = 0; i < handler->num_values_per_entry; i++) {
-			traceEvent(TRACE_INFO, "i=%d n=%d aggval=%" PRIu32 " val=%" PRIu32,
-			    i, n, aggval[i], valuep[i]);
-			if (n == 1)
-			    aggval[i] = valuep[i];
-			else
-			    aggval[i] += valuep[i];
-		    }
-		    changed = 1;
-		    break;
-		}
-
-		if (changed)
-		    handler->tslice[agglvl].frag_changed[frag_id] = 1;
-
-		traceEvent(TRACE_INFO, "Succesfully set value "
-		    "[agglvl=%d][frag_id=%u][offset=%" PRIu32 "][value_len=%u]",
-		    agglvl, frag_id, offset, handler->entry_size);
-
-	    } else {
-		traceEvent(TRACE_ERROR, "Missing time");
-		return -2;
-	    }
+    for (int agglvl = 1; agglvl < handler->num_agglvls; agglvl++) {
+	// Because key-to-index mapping is fixed across time and
+	// agg levels, we don't need to get_frag_offset() again.
+	if ((rc = instantiate_frag(handler, agglvl, frag_id)) != 0) {
+	    handler->readonly = 1;
+	    return rc;
 	}
 
-    } else {
-	traceEvent(TRACE_ERROR, "Missing time");
-	return -2;
+	// Aggregate *valuep into tslice[agglvl]
+	uint8_t changed = 0;
+	uint8_t failed = 0;
+	tsdb_value *aggval = valueptr(handler, agglvl, frag_id, offset);
+	// n: number of steps contributing to aggregate (XXX temp hack)
+	int n = (handler->tslice[0].time - handler->tslice[agglvl].time) /
+	    handler->agg[0].period + !was_set;
+	switch (handler->agg[agglvl].func) {
+	case TSDB_AGG_MIN:
+	    for (int i = 0; i < handler->num_values_per_entry; i++) {
+		if (was_set && valuep[i] == oldvaluep[i]) {
+		    // value did not change; no need to change agg value
+		} else if (n == 1 || valuep[i] <= aggval[i]) {
+		    aggval[i] = valuep[i];
+		    changed = 1;
+		} else if (was_set && oldvaluep[i] == aggval[i]) {
+		    // XXX TODO: Find the min value among all the steps.
+		    failed = 1;
+		}
+	    }
+	    break;
+	case TSDB_AGG_MAX:
+	    for (int i = 0; i < handler->num_values_per_entry; i++) {
+		if (was_set && valuep[i] == oldvaluep[i]) {
+		    // value did not change; no need to change agg value
+		} else if (n == 1 || valuep[i] >= aggval[i]) {
+		    aggval[i] = valuep[i];
+		    changed = 1;
+		} else if (was_set && oldvaluep[i] == aggval[i]) {
+		    // XXX TODO: Find the max value among all the steps.
+		    failed = 1;
+		}
+	    }
+	    break;
+	case TSDB_AGG_AVG:
+	    for (int i = 0; i < handler->num_values_per_entry; i++) {
+		if (was_set && valuep[i] == oldvaluep[i]) {
+		    // value did not change; no need to change agg value
+		} else if (n == 1) {
+		    aggval[i] = valuep[i];
+		    changed = 1;
+		} else if (aggval[i] != valuep[i]) {
+		    if (was_set)
+			aggval[i] -= ((/*signed*/double)oldvaluep[i] - aggval[i]) / n + 0.5;
+		    aggval[i] += ((/*signed*/double)valuep[i] - aggval[i]) / n + 0.5;
+		    changed = 1;
+		}
+	    }
+	    break;
+	case TSDB_AGG_LAST:
+	    for (int i = 0; i < handler->num_values_per_entry; i++) {
+		if (was_set && valuep[i] == oldvaluep[i]) {
+		    // value did not change; no need to change agg value
+		} else if (handler->tslice[0].time >= handler->agg[0].last_flush) {
+		    if (aggval[i] != valuep[i]) {
+			aggval[i] = valuep[i];
+			changed = 1;
+		    }
+		} else {
+		    // XXX TODO: Find the last SET value for this key.
+		    failed = 1;
+		}
+	    }
+	    break;
+	case TSDB_AGG_SUM:
+	    for (int i = 0; i < handler->num_values_per_entry; i++) {
+		if (was_set && valuep[i] == oldvaluep[i]) {
+		    // value did not change; no need to change agg value
+		} else if (n == 1) {
+		    aggval[i] = valuep[i];
+		    changed = 1;
+		} else {
+		    if (was_set)
+			aggval[i] -= oldvaluep[i];
+		    aggval[i] += valuep[i];
+		    changed = 1;
+		}
+	    }
+	    break;
+	}
+
+	if (changed) {
+	    handler->tslice[agglvl].frag_changed[frag_id] = 1;
+	    traceEvent(TRACE_INFO, "Succesfully set value "
+		"[agglvl=%d][frag_id=%u][offset=%" PRIu32 "][value_len=%u]",
+		agglvl, frag_id, offset, handler->entry_size);
+	} else if (failed) {
+	    traceEvent(TRACE_ERROR, "Failed to set value "
+		"[agglvl=%d][frag_id=%u][offset=%" PRIu32 "][value_len=%u]",
+		agglvl, frag_id, offset, handler->entry_size);
+	    handler->readonly = 1;
+	    return -1;
+	}
     }
+
+    // set value at agglvl 0
+    memcpy(oldvaluep, valuep, handler->entry_size);
+    vec_set(handler->tslice[0].frag[frag_id]->is_set, offset);
+    handler->tslice[0].frag_changed[frag_id] = 1;
+    traceEvent(TRACE_INFO, "Succesfully set value "
+	"[agglvl=%d][frag_id=%u][offset=%" PRIu32 "][value_len=%u]",
+	0, frag_id, offset, handler->entry_size);
 
     return 0;
 }
