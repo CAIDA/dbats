@@ -94,6 +94,20 @@ typedef struct {
     tsdb_agg agg[MAX_NUM_AGGLVLS];        // parameters for each aggregation level
 } tsdb_handler;
 
+typedef struct {
+    uint32_t start;
+    uint32_t end;
+} timerange_t;
+
+typedef struct {
+    const char *key;
+    uint32_t index;          // column index within timeslice
+    uint32_t frag_id;        // fragment within timeslice
+    uint32_t offset;         // index within fragment
+    uint32_t n_timeranges;   // number of timeranges
+    timerange_t *timeranges; // When did this key actually have a value?
+} tsdb_key_info_t;
+
 /* ************************************************** */
 
 extern int tsdb_open(const char *tsdb_path, tsdb_handler *handler,
@@ -110,14 +124,21 @@ extern uint32_t normalize_time(const tsdb_handler *handler, int s, uint32_t *tim
 extern int tsdb_goto_time(tsdb_handler *handler,
     uint32_t time_value, uint32_t flags);
 
-extern int tsdb_set(tsdb_handler *handler,
-    const char *key, const tsdb_value *valuep);
+extern int tsdb_get_key_info(tsdb_handler *handler, const char *key,
+    tsdb_key_info_t *tkip, uint32_t flags);
 
-extern int tsdb_get(tsdb_handler *handler,
-    const char *key, const tsdb_value **valuepp, int agglvl);
+extern int tsdb_set(tsdb_handler *handler, tsdb_key_info_t *tkip,
+    const tsdb_value *valuep);
+extern int tsdb_set_by_key (tsdb_handler *handler, const char *key,
+    const tsdb_value *valuep);
+
+extern int tsdb_get(tsdb_handler *handler, tsdb_key_info_t *tkip,
+    const tsdb_value **valuepp, int agglvl);
+extern int tsdb_get_by_key(tsdb_handler *handler, const char *key,
+    const tsdb_value **valuepp, int agglvl);
 
 extern int tsdb_keywalk_start(tsdb_handler *handler);
-extern int tsdb_keywalk_next(tsdb_handler *handler, char **key, int *len);
+extern int tsdb_keywalk_next(tsdb_handler *handler, tsdb_key_info_t *tkip);
 extern int tsdb_keywalk_end(tsdb_handler *handler);
 
 extern void tsdb_stat_print(const tsdb_handler *handler);

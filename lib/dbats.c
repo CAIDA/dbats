@@ -9,7 +9,7 @@
 #include "tsdb_api.h"
 
 
-/* *********************************************************************** */
+/*************************************************************************/
 
 // bit vector
 #define vec_size(N)        (((N)+7)/8)                    // size for N bits
@@ -258,7 +258,7 @@ int tsdb_aggregate(tsdb_handler *handler, int func, int steps)
     return(0);
 }
 
-/* *********************************************************************** */
+/*************************************************************************/
 
 // Writes tslice to db (unless db is readonly).
 // Also cleans up in-memory tslice, even if db is readonly.
@@ -307,9 +307,11 @@ static void tsdb_flush_tslice(tsdb_handler *handler, int agglvl)
 
     memset(&handler->tslice[agglvl], 0, sizeof(tsdb_tslice));
     free(buf);
+
+    // XXX write dirty key_infos
 }
 
-/* *********************************************************************** */
+/*************************************************************************/
 
 void tsdb_close(tsdb_handler *handler)
 {
@@ -331,7 +333,7 @@ void tsdb_close(tsdb_handler *handler)
     handler->is_open = 0;
 }
 
-/* *********************************************************************** */
+/*************************************************************************/
 
 static const time_t time_base = 259200; // 00:00 on first sunday of 1970, UTC
 
@@ -341,26 +343,62 @@ uint32_t normalize_time(const tsdb_handler *handler, int agglvl, uint32_t *t)
     return *t;
 }
 
-/* *********************************************************************** */
+/*************************************************************************/
 
-static int get_key_index(const tsdb_handler *handler,
-    const char *key, uint32_t *key_idx)
+// key_info as stored in db
+typedef struct {
+    uint32_t index;
+    timerange_t timeranges[]; // flexible array member
+} raw_key_info_t;
+
+// convert a raw_key_info_t to a tsdb_key_info_t
+static int rki_to_tki(const tsdb_handler *handler, tsdb_key_info_t *tkip,
+    const char *key, int keylen, raw_key_info_t *rki, int len)
 {
-    void *ptr;
-    uint32_t len;
-    if (raw_db_get(handler, handler->dbKey, key, strlen(key), &ptr, &len) == 0) {
-	memcpy(key_idx, ptr, sizeof(*key_idx));
-	return 0;
+    size_t timeranges_size = len - sizeof(raw_key_info_t);
+    char *keycopy = malloc(keylen+1);
+    if (!keycopy) {
+	traceEvent(TRACE_ERROR, "Out of memory");
+	return -2;
     }
-    return -1;
+    strncpy(keycopy, key, keylen)[keylen] = 0; // copy and nul-terminate
+    tkip->key = keycopy;
+    tkip->index = rki->index;
+    tkip->frag_id = tkip->index / ENTRIES_PER_FRAG;
+    tkip->offset = tkip->index % ENTRIES_PER_FRAG;
+    tkip->n_timeranges = timeranges_size / sizeof(timerange_t);
+    tkip->timeranges = malloc(timeranges_size); // XXX this will leak
+    if (!tkip->timeranges) {
+	traceEvent(TRACE_ERROR, "Out of memory");
+	return -2;
+    }
+    memcpy(tkip->timeranges, rki->timeranges, timeranges_size);
+    return 0;
 }
 
-/* *********************************************************************** */
-
-static void set_key_index(const tsdb_handler *handler, const char *key, uint32_t key_idx)
+// read a key_info from the db
+static int get_key_info(const tsdb_handler *handler,
+    const char *key, tsdb_key_info_t *tkip)
 {
-    raw_db_set(handler, handler->dbKey, key, strlen(key), &key_idx, sizeof(key_idx));
-    traceEvent(TRACE_INFO, "[SET] Mapping %s -> %u", key, key_idx);
+    void *ptr;
+    uint32_t keylen = strlen(key);
+    uint32_t len;
+    int rc;
+
+    if ((rc = raw_db_get(handler, handler->dbKey, key, keylen, &ptr, &len)) != 0)
+	return rc;
+    return rki_to_tki(handler, tkip, key, keylen, ptr, len);
+}
+
+static void set_key_info(const tsdb_handler *handler, tsdb_key_info_t *tkip)
+{
+    size_t timeranges_size = tkip->n_timeranges * sizeof(timerange_t);
+    size_t rki_size = sizeof(raw_key_info_t) + timeranges_size;
+    raw_key_info_t *rki = malloc(rki_size);
+    rki->index = tkip->index;
+    memcpy(rki->timeranges, tkip->timeranges, timeranges_size);
+    raw_db_set(handler, handler->dbKey, tkip->key, strlen(tkip->key), rki, rki_size);
+    traceEvent(TRACE_INFO, "[SET] Mapping %s -> %u", tkip->key, rki->index);
 }
 
 /* *********************************************************************** */
@@ -459,35 +497,36 @@ int tsdb_goto_time(tsdb_handler *handler, uint32_t time_value, uint32_t flags)
     return 0;
 }
 
-/* *********************************************************************** */
+/*************************************************************************/
 
-static int get_frag_offset(tsdb_handler *handler, const char *key,
-    uint32_t *frag_id, uint32_t *offset, uint8_t create_idx_if_needed)
+int tsdb_get_key_info(tsdb_handler *handler, const char *key,
+    tsdb_key_info_t *tkip, uint32_t flags)
 {
-    uint32_t key_idx;
+    if (get_key_info(handler, key, tkip) == 0) {
+	traceEvent(TRACE_INFO, "Found key %s = index %u", key, tkip->index);
 
-    if (get_key_index(handler, key, &key_idx) == 0) {
-	traceEvent(TRACE_INFO, "Found key %s = index %u", key, key_idx);
-
-    } else if (!create_idx_if_needed) {
+    } else if (!(flags & TSDB_CREATE)) {
 	traceEvent(TRACE_INFO, "Key not found: %s", key);
 	return -1;
 
     } else if (handler->lowest_free_index < MAX_NUM_FRAGS * ENTRIES_PER_FRAG) {
-	key_idx = handler->lowest_free_index++;
-	set_key_index(handler, key, key_idx);
-	traceEvent(TRACE_INFO, "Assigned key %s = index %u", key, key_idx);
+	tkip->key = strdup(key);
+	tkip->index = handler->lowest_free_index++;
+	tkip->frag_id = tkip->index / ENTRIES_PER_FRAG;
+	tkip->offset = tkip->index % ENTRIES_PER_FRAG;
+	tkip->n_timeranges = 0;
+	tkip->timeranges = NULL;
+	set_key_info(handler, tkip);
+	traceEvent(TRACE_INFO, "Assigned key %s = index %u", key, tkip->index);
 	raw_db_set(handler, handler->dbMeta,
 	    "lowest_free_index", strlen("lowest_free_index"),
 	    &handler->lowest_free_index, sizeof(handler->lowest_free_index));
 
     } else {
 	traceEvent(TRACE_ERROR, "Out of indexes for key %s", key);
-	return -1;
+	return -2;
     }
 
-    *frag_id = key_idx / ENTRIES_PER_FRAG;
-    *offset = key_idx % ENTRIES_PER_FRAG;
     return 0;
 }
 
@@ -533,32 +572,26 @@ static int instantiate_frag(tsdb_handler *handler, int agglvl, uint32_t frag_id)
     return 0;
 }
 
-/* *********************************************************************** */
+/*************************************************************************/
 
-int tsdb_set(tsdb_handler *handler, const char *key, const tsdb_value *valuep)
+int tsdb_set(tsdb_handler *handler, tsdb_key_info_t *tkip, const tsdb_value *valuep)
 {
-    uint32_t frag_id;
-    uint32_t offset; // index of value within frag
     int rc;
 
     if (!handler->is_open || handler->readonly)
 	return -1;
-    if ((rc = get_frag_offset(handler, key, &frag_id, &offset, 1)) != 0) {
-	handler->readonly = 1;
-	return rc;
-    }
-    if ((rc = instantiate_frag(handler, 0, frag_id)) != 0) {
+    if ((rc = instantiate_frag(handler, 0, tkip->frag_id)) != 0) {
 	handler->readonly = 1;
 	return rc;
     }
 
-    uint8_t was_set = vec_test(handler->tslice[0].frag[frag_id]->is_set, offset);
-    tsdb_value *oldvaluep = valueptr(handler, 0, frag_id, offset);
+    uint8_t was_set = vec_test(handler->tslice[0].frag[tkip->frag_id]->is_set, tkip->offset);
+    tsdb_value *oldvaluep = valueptr(handler, 0, tkip->frag_id, tkip->offset);
+
+    // XXX check tkip->timeranges
 
     for (int agglvl = 1; agglvl < handler->num_agglvls; agglvl++) {
-	// Because key-to-index mapping is fixed across time and
-	// agg levels, we don't need to get_frag_offset() again.
-	if ((rc = instantiate_frag(handler, agglvl, frag_id)) != 0) {
+	if ((rc = instantiate_frag(handler, agglvl, tkip->frag_id)) != 0) {
 	    handler->readonly = 1;
 	    return rc;
 	}
@@ -566,7 +599,7 @@ int tsdb_set(tsdb_handler *handler, const char *key, const tsdb_value *valuep)
 	// Aggregate *valuep into tslice[agglvl]
 	uint8_t changed = 0;
 	uint8_t failed = 0;
-	tsdb_value *aggval = valueptr(handler, agglvl, frag_id, offset);
+	tsdb_value *aggval = valueptr(handler, agglvl, tkip->frag_id, tkip->offset);
 	// n: number of steps contributing to aggregate (XXX temp hack)
 	int n = (handler->tslice[0].time - handler->tslice[agglvl].time) /
 	    handler->agg[0].period + !was_set;
@@ -645,14 +678,14 @@ int tsdb_set(tsdb_handler *handler, const char *key, const tsdb_value *valuep)
 	}
 
 	if (changed) {
-	    handler->tslice[agglvl].frag_changed[frag_id] = 1;
+	    handler->tslice[agglvl].frag_changed[tkip->frag_id] = 1;
 	    traceEvent(TRACE_INFO, "Succesfully set value "
 		"[agglvl=%d][frag_id=%u][offset=%" PRIu32 "][value_len=%u]",
-		agglvl, frag_id, offset, handler->entry_size);
+		agglvl, tkip->frag_id, tkip->offset, handler->entry_size);
 	} else if (failed) {
 	    traceEvent(TRACE_ERROR, "Failed to set value "
 		"[agglvl=%d][frag_id=%u][offset=%" PRIu32 "][value_len=%u]",
-		agglvl, frag_id, offset, handler->entry_size);
+		agglvl, tkip->frag_id, tkip->offset, handler->entry_size);
 	    handler->readonly = 1;
 	    return -1;
 	}
@@ -660,35 +693,42 @@ int tsdb_set(tsdb_handler *handler, const char *key, const tsdb_value *valuep)
 
     // set value at agglvl 0
     memcpy(oldvaluep, valuep, handler->entry_size);
-    vec_set(handler->tslice[0].frag[frag_id]->is_set, offset);
-    handler->tslice[0].frag_changed[frag_id] = 1;
+    vec_set(handler->tslice[0].frag[tkip->frag_id]->is_set, tkip->offset);
+    handler->tslice[0].frag_changed[tkip->frag_id] = 1;
     traceEvent(TRACE_INFO, "Succesfully set value "
 	"[agglvl=%d][frag_id=%u][offset=%" PRIu32 "][value_len=%u]",
-	0, frag_id, offset, handler->entry_size);
+	0, tkip->frag_id, tkip->offset, handler->entry_size);
 
     return 0;
 }
 
+int tsdb_set_by_key(tsdb_handler *handler, const char *key,
+    const tsdb_value *valuep)
+{
+    int rc;
+    tsdb_key_info_t tki;
+
+    if ((rc = tsdb_get_key_info(handler, key, &tki, TSDB_CREATE)) != 0) {
+	handler->readonly = 1;
+	return rc;
+    }
+    return tsdb_set(handler, &tki, valuep);
+}
+
 /* *********************************************************************** */
 
-int tsdb_get(tsdb_handler *handler, const char *key, const tsdb_value **valuepp,
-    int agglvl)
+int tsdb_get(tsdb_handler *handler, tsdb_key_info_t *tkip,
+    const tsdb_value **valuepp, int agglvl)
 {
-    uint32_t offset;
-    uint32_t frag_id;
-
     if (!handler->is_open) {
 	*valuepp = NULL;
 	return -1;
     }
 
-    if (get_frag_offset(handler, key, &frag_id, &offset, 0) == 0 &&
-	instantiate_frag(handler, agglvl, frag_id) == 0)
-    {
-	*valuepp = valueptr(handler, agglvl, frag_id, offset);
-
+    if (instantiate_frag(handler, agglvl, tkip->frag_id) == 0) {
+	*valuepp = valueptr(handler, agglvl, tkip->frag_id, tkip->offset);
 	traceEvent(TRACE_INFO, "Succesfully read value [offset=%" PRIu32 "][value_len=%u]",
-	    offset, handler->entry_size);
+	    tkip->offset, handler->entry_size);
 
     } else {
 	traceEvent(TRACE_ERROR, "Missing time");
@@ -699,43 +739,54 @@ int tsdb_get(tsdb_handler *handler, const char *key, const tsdb_value **valuepp,
     return 0;
 }
 
+int tsdb_get_by_key(tsdb_handler *handler, const char *key,
+    const tsdb_value **valuepp, int agglvl)
+{
+    int rc;
+    tsdb_key_info_t tki;
+
+    if ((rc = tsdb_get_key_info(handler, key, &tki, 0)) != 0) {
+	return rc;
+    }
+    return tsdb_get(handler, &tki, valuepp, agglvl);
+}
+
+/* *********************************************************************** */
+
 int tsdb_keywalk_start(tsdb_handler *handler)
 {
-    int ret;
+    int rc;
 
-    if ((ret = handler->dbKey->cursor(handler->dbKey, NULL, &handler->keywalk, 0)) != 0) {
-	traceEvent(TRACE_ERROR, "Error in tsdb_keywalk_start: %s", db_strerror(ret));
+    if ((rc = handler->dbKey->cursor(handler->dbKey, NULL, &handler->keywalk, 0)) != 0) {
+	traceEvent(TRACE_ERROR, "Error in tsdb_keywalk_start: %s", db_strerror(rc));
 	return -1;
     }
     return 0;
 }
 
-int tsdb_keywalk_next(tsdb_handler *handler, char **key, int *len)
+int tsdb_keywalk_next(tsdb_handler *handler, tsdb_key_info_t *tkip)
 {
-    int ret;
+    int rc;
     DBT dbkey, dbdata;
 
     memset(&dbkey, 0, sizeof(dbkey));
     memset(&dbdata, 0, sizeof(dbdata));
-    if ((ret = handler->keywalk->get(handler->keywalk, &dbkey, &dbdata, DB_NEXT)) == 0) {
-	*key = dbkey.data;
-	*len = dbkey.size;
-	return 0;
-    } else {
-	if (ret != DB_NOTFOUND)
-	    traceEvent(TRACE_ERROR, "Error in tsdb_keywalk_next: %s", db_strerror(ret));
-	*key = 0;
-	*len = 0;
+    if ((rc = handler->keywalk->get(handler->keywalk, &dbkey, &dbdata, DB_NEXT)) != 0) {
+	if (rc != DB_NOTFOUND)
+	    traceEvent(TRACE_ERROR, "Error in tsdb_keywalk_next: %s", db_strerror(rc));
+	memset(tkip, 0, sizeof(*tkip));
 	return -1;
     }
+
+    return rki_to_tki(handler, tkip, dbkey.data, dbkey.size, dbdata.data, dbdata.size);
 }
 
 int tsdb_keywalk_end(tsdb_handler *handler)
 {
-    int ret;
+    int rc;
 
-    if ((ret = handler->keywalk->close(handler->keywalk)) != 0) {
-	traceEvent(TRACE_ERROR, "Error in tsdb_keywalk_end: %s", db_strerror(ret));
+    if ((rc = handler->keywalk->close(handler->keywalk)) != 0) {
+	traceEvent(TRACE_ERROR, "Error in tsdb_keywalk_end: %s", db_strerror(rc));
 	return -1;
     }
     return 0;
@@ -744,13 +795,13 @@ int tsdb_keywalk_end(tsdb_handler *handler)
 /* *********************************************************************** */
 
 void tsdb_stat_print(const tsdb_handler *handler) {
-    int ret;
+    int rc;
     
-    if ((ret = handler->dbMeta->stat_print(handler->dbMeta, DB_FAST_STAT)) != 0)
-	traceEvent(TRACE_ERROR, "Error while dumping DB stats for Meta [%s]", db_strerror(ret));
-    if ((ret = handler->dbKey->stat_print(handler->dbKey, DB_FAST_STAT)) != 0)
-	traceEvent(TRACE_ERROR, "Error while dumping DB stats for Key [%s]", db_strerror(ret));
-    if ((ret = handler->dbData->stat_print(handler->dbData, DB_FAST_STAT)) != 0)
-	traceEvent(TRACE_ERROR, "Error while dumping DB stats for Data [%s]", db_strerror(ret));
+    if ((rc = handler->dbMeta->stat_print(handler->dbMeta, DB_FAST_STAT)) != 0)
+	traceEvent(TRACE_ERROR, "Error while dumping DB stats for Meta [%s]", db_strerror(rc));
+    if ((rc = handler->dbKey->stat_print(handler->dbKey, DB_FAST_STAT)) != 0)
+	traceEvent(TRACE_ERROR, "Error while dumping DB stats for Key [%s]", db_strerror(rc));
+    if ((rc = handler->dbData->stat_print(handler->dbData, DB_FAST_STAT)) != 0)
+	traceEvent(TRACE_ERROR, "Error while dumping DB stats for Data [%s]", db_strerror(rc));
 }
 
