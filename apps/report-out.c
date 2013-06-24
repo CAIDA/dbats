@@ -58,6 +58,7 @@ int main(int argc, char *argv[]) {
     char *keyfile_path = NULL;
     FILE *out;
     progname = argv[0];
+    traceLevel = 1;
 
     int c;
     while ((c = getopt(argc, argv, "v:k:")) != -1) {
@@ -113,9 +114,9 @@ int main(int argc, char *argv[]) {
 
 	    for (int k = 0; k < n_keys; k++) {
 		rc = tsdb_get(&handler, keys[k], &values, agglvl);
-		if (rc < 0) {
+		if (rc != 0) {
 		    fprintf(stdout, "error in tsdb_get(%s)\n", keys[k]);
-		    continue;
+		    break;
 		}
 		fprintf(out, "%s ", keys[k]);
 		for (int j = 0; j < handler.num_values_per_entry; j++) {

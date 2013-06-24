@@ -66,7 +66,7 @@ int main(int argc, char *argv[]) {
 	}
 	last_t = t;
 
-	if (tsdb_set(&handler, key, &value) < 0)
+	if (tsdb_set(&handler, key, &value) != 0)
 	    return -1;
     }
 
