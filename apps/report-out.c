@@ -16,10 +16,10 @@ static void help(void) {
 /* ***************************************************************** */
 
 #define MAX_KEYS 262144
-static char *keys[MAX_KEYS];
+static tsdb_key_info_t *keys[MAX_KEYS];
 static int n_keys = 0;
 
-static void load_keys(const char *path)
+static void load_keys(tsdb_handler *handler, const char *path)
 {
     char line[128];
     FILE *keyfile = fopen(path, "r");
@@ -30,7 +30,9 @@ static void load_keys(const char *path)
     while (fgets(line, sizeof(line), keyfile)) {
 	char *p = strchr(line, '\n');
 	if (p) *p = 0;
-	keys[n_keys++] = strdup(line);
+	keys[n_keys] = malloc(sizeof(tsdb_key_info_t));
+	tsdb_get_key_info(handler, line, keys[n_keys], 0);
+	n_keys++;
     }
     if (ferror(keyfile)) {
 	fprintf(stderr, "%s: %s\n", path, strerror(errno));
@@ -40,12 +42,12 @@ static void load_keys(const char *path)
 
 static void get_keys(tsdb_handler *handler)
 {
-    char *key;
-    int len;
     tsdb_keywalk_start(handler);
-    while (tsdb_keywalk_next(handler, &key, &len) == 0) {
-	(keys[n_keys++] = strncpy(malloc(len+1), key, len))[len] = 0;
+    keys[n_keys] = malloc(sizeof(tsdb_key_info_t));
+    while (tsdb_keywalk_next(handler, keys[n_keys]) == 0) {
+	n_keys++;
     }
+    free(keys[n_keys]);
     tsdb_keywalk_end(handler);
 }
 
@@ -95,7 +97,7 @@ int main(int argc, char *argv[]) {
 	return(-1);
 
     if (keyfile_path)
-	load_keys(keyfile_path);
+	load_keys(&handler, keyfile_path);
     else
 	get_keys(&handler);
 
@@ -115,10 +117,10 @@ int main(int argc, char *argv[]) {
 	    for (int k = 0; k < n_keys; k++) {
 		rc = tsdb_get(&handler, keys[k], &values, agglvl);
 		if (rc != 0) {
-		    fprintf(stdout, "error in tsdb_get(%s)\n", keys[k]);
+		    fprintf(stdout, "error in tsdb_get(%s)\n", keys[k]->key);
 		    break;
 		}
-		fprintf(out, "%s ", keys[k]);
+		fprintf(out, "%s ", keys[k]->key);
 		for (int j = 0; j < handler.num_values_per_entry; j++) {
 		    fprintf(out, "%u ", values ? values[j] : 0);
 		}

@@ -66,7 +66,8 @@ int main(int argc, char *argv[]) {
 	}
 	last_t = t;
 
-	if (tsdb_set(&handler, key, &value) != 0)
+	// XXX TODO: use tsdb_set() instead of tsdb_set_by_key()
+	if (tsdb_set_by_key(&handler, key, &value) != 0)
 	    return -1;
     }
 
