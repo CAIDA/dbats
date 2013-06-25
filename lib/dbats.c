@@ -33,6 +33,12 @@ typedef struct {
 
 #define fragsize(handler) (sizeof(tsdb_frag) + ENTRIES_PER_FRAG * (handler)->entry_size)
 
+// key_info as stored in db
+typedef struct {
+    uint32_t index;
+    timerange_t timeranges[]; // flexible array member
+} raw_key_info_t;
+
 
 /************************************************************************
  * DB wrappers
@@ -157,6 +163,19 @@ static int raw_db_key_exists(const tsdb_handler *handler, DB *db,
 
 /*************************************************************************/
 
+// allocate a key_info block if needed
+static int alloc_key_info_block(tsdb_handler *handler, uint32_t block)
+{
+    if (!handler->key_info_block[block]) {
+	handler->key_info_block[block] = malloc(sizeof(tsdb_key_info_t) * INFOS_PER_BLOCK);
+	if (!handler->key_info_block[block]) {
+	    traceEvent(TRACE_ERROR, "Out of memory");
+	    return -1;
+	}
+    }
+    return 0;
+}
+
 int tsdb_open(const char *path, tsdb_handler *handler,
     uint16_t num_values_per_entry,
     uint32_t rrd_slot_time_duration,
@@ -230,6 +249,59 @@ int tsdb_open(const char *path, tsdb_handler *handler,
 	memcpy(handler->agg, value, value_len);
     }
 
+    // load key_info for every key
+    int rc;
+    DBC *cursor;
+    if ((rc = handler->dbKey->cursor(handler->dbKey, NULL, &cursor, 0)) != 0) {
+	traceEvent(TRACE_ERROR, "Error in keywalk_start: %s", db_strerror(rc));
+	return -1;
+    }
+
+    while (1) {
+	DBT dbkey, dbdata;
+
+	memset(&dbkey, 0, sizeof(dbkey));
+	memset(&dbdata, 0, sizeof(dbdata));
+	if ((rc = cursor->get(cursor, &dbkey, &dbdata, DB_NEXT)) != 0) {
+	    if (rc == DB_NOTFOUND)
+		break;
+	    traceEvent(TRACE_ERROR, "Error in cursor->get: %s", db_strerror(rc));
+	    return -1;
+	}
+	uint32_t idx = ((raw_key_info_t*)dbdata.data)->index;
+	uint32_t block = idx / INFOS_PER_BLOCK;
+	uint32_t offset = idx % INFOS_PER_BLOCK;
+	if (alloc_key_info_block(handler, block) != 0)
+	    return -1;
+
+	tsdb_key_info_t *tkip = &handler->key_info_block[block][offset];
+	raw_key_info_t *rki = dbdata.data;
+	char *keycopy = malloc(dbkey.size+1);
+	if (!keycopy) {
+	    traceEvent(TRACE_ERROR, "Out of memory");
+	    return -2;
+	}
+	memcpy(keycopy, dbkey.data, dbkey.size);
+	keycopy[dbkey.size] = 0; // nul-terminate
+	tkip->key = keycopy;
+	tkip->index = rki->index;
+	tkip->frag_id = tkip->index / INFOS_PER_BLOCK;
+	tkip->offset = tkip->index % INFOS_PER_BLOCK;
+	size_t timeranges_size = dbdata.size - sizeof(raw_key_info_t);
+	tkip->n_timeranges = timeranges_size / sizeof(timerange_t);
+	tkip->timeranges = malloc(timeranges_size);
+	if (!tkip->timeranges) {
+	    traceEvent(TRACE_ERROR, "Out of memory");
+	    return -2;
+	}
+	memcpy(tkip->timeranges, rki->timeranges, timeranges_size);
+    }
+
+    if ((rc = cursor->close(cursor)) != 0) {
+	traceEvent(TRACE_ERROR, "Error in cursor->close: %s", db_strerror(rc));
+	return -1;
+    }
+
     handler->is_open = 1;
 
     return(0);
@@ -264,7 +336,7 @@ int tsdb_aggregate(tsdb_handler *handler, int func, int steps)
 // Also cleans up in-memory tslice, even if db is readonly.
 static void tsdb_flush_tslice(tsdb_handler *handler, int agglvl)
 {
-    traceEvent(TRACE_INFO, "flush %u agglvl=%d", handler->tslice[agglvl].time, agglvl);
+    traceEvent(TRACE_INFO, "Flush %u agglvl=%d", handler->tslice[agglvl].time, agglvl);
     uint32_t frag_size = fragsize(handler);
     fragkey_t dbkey;
     uint32_t buf_len = frag_size + QLZ_OVERHEAD;
@@ -273,9 +345,11 @@ static void tsdb_flush_tslice(tsdb_handler *handler, int agglvl)
     /* Write fragments to the DB */
     dbkey.time = handler->tslice[agglvl].time;
     dbkey.agglvl = agglvl;
-    for (int f=0; f < handler->tslice[agglvl].num_frags; f++) {
+    for (int f = 0; f < handler->tslice[agglvl].num_frags; f++) {
 	if (!handler->tslice[agglvl].frag[f]) continue;
-	if (!handler->readonly && handler->tslice[agglvl].frag_changed[f]) {
+	if (handler->readonly) {
+	    // do nothing
+	} else if (handler->tslice[agglvl].frag_changed[f]) {
 	    if (!buf)
 		buf = (char*)malloc(buf_len);
 	    if (!buf) {
@@ -284,13 +358,12 @@ static void tsdb_flush_tslice(tsdb_handler *handler, int agglvl)
 	    }
 	    size_t compressed_len = qlz_compress(handler->tslice[agglvl].frag[f],
 		buf, frag_size, &handler->state_compress);
-	    traceEvent(TRACE_INFO, "Compression %u -> %u [frag %u] [%.1f %%]",
-		frag_size, compressed_len, f,
-		compressed_len*100.0/frag_size);
+	    traceEvent(TRACE_INFO, "Frag %d compression: %u -> %u (%.1f %%)",
+		f, frag_size, compressed_len, compressed_len*100.0/frag_size);
 	    dbkey.frag_id = f;
 	    raw_db_set(handler, handler->dbData, &dbkey, sizeof(dbkey), buf, compressed_len);
 	} else {
-	    traceEvent(TRACE_INFO, "Skipping agglvl %d frag %d (unchanged)", agglvl, f);
+	    traceEvent(TRACE_INFO, "Skipping frag %d (unchanged)", f);
 	}
 
 	handler->tslice[agglvl].frag_changed[f] = 0;
@@ -345,51 +418,6 @@ uint32_t normalize_time(const tsdb_handler *handler, int agglvl, uint32_t *t)
 
 /*************************************************************************/
 
-// key_info as stored in db
-typedef struct {
-    uint32_t index;
-    timerange_t timeranges[]; // flexible array member
-} raw_key_info_t;
-
-// convert a raw_key_info_t to a tsdb_key_info_t
-static int rki_to_tki(const tsdb_handler *handler, tsdb_key_info_t *tkip,
-    const char *key, int keylen, raw_key_info_t *rki, int len)
-{
-    size_t timeranges_size = len - sizeof(raw_key_info_t);
-    char *keycopy = malloc(keylen+1);
-    if (!keycopy) {
-	traceEvent(TRACE_ERROR, "Out of memory");
-	return -2;
-    }
-    strncpy(keycopy, key, keylen)[keylen] = 0; // copy and nul-terminate
-    tkip->key = keycopy;
-    tkip->index = rki->index;
-    tkip->frag_id = tkip->index / ENTRIES_PER_FRAG;
-    tkip->offset = tkip->index % ENTRIES_PER_FRAG;
-    tkip->n_timeranges = timeranges_size / sizeof(timerange_t);
-    tkip->timeranges = malloc(timeranges_size); // XXX this will leak
-    if (!tkip->timeranges) {
-	traceEvent(TRACE_ERROR, "Out of memory");
-	return -2;
-    }
-    memcpy(tkip->timeranges, rki->timeranges, timeranges_size);
-    return 0;
-}
-
-// read a key_info from the db
-static int get_key_info(const tsdb_handler *handler,
-    const char *key, tsdb_key_info_t *tkip)
-{
-    void *ptr;
-    uint32_t keylen = strlen(key);
-    uint32_t len;
-    int rc;
-
-    if ((rc = raw_db_get(handler, handler->dbKey, key, keylen, &ptr, &len)) != 0)
-	return rc;
-    return rki_to_tki(handler, tkip, key, keylen, ptr, len);
-}
-
 static void set_key_info(const tsdb_handler *handler, tsdb_key_info_t *tkip)
 {
     size_t timeranges_size = tkip->n_timeranges * sizeof(timerange_t);
@@ -401,7 +429,7 @@ static void set_key_info(const tsdb_handler *handler, tsdb_key_info_t *tkip)
     traceEvent(TRACE_INFO, "[SET] Mapping %s -> %u", tkip->key, rki->index);
 }
 
-/* *********************************************************************** */
+/*************************************************************************/
 
 static int load_frag(tsdb_handler *handler, uint32_t t, int agglvl,
     uint32_t frag_id)
@@ -459,7 +487,7 @@ int tsdb_goto_time(tsdb_handler *handler, uint32_t time_value, uint32_t flags)
 	    continue;
 	}
 
-	/* Flush tslice if loaded */
+	// Flush tslice if loaded
 	tsdb_flush_tslice(handler, agglvl);
 
 	tslice->load_on_demand = !!(flags & TSDB_LOAD_ON_DEMAND);
@@ -500,24 +528,39 @@ int tsdb_goto_time(tsdb_handler *handler, uint32_t time_value, uint32_t flags)
 /*************************************************************************/
 
 int tsdb_get_key_info(tsdb_handler *handler, const char *key,
-    tsdb_key_info_t *tkip, uint32_t flags)
+    tsdb_key_info_t **tkipp, uint32_t flags)
 {
-    if (get_key_info(handler, key, tkip) == 0) {
-	traceEvent(TRACE_INFO, "Found key %s = index %u", key, tkip->index);
+    void *ptr;
+    uint32_t keylen = strlen(key);
+    uint32_t len;
+
+    if (raw_db_get(handler, handler->dbKey, key, keylen, &ptr, &len) == 0) {
+	uint32_t idx = ((raw_key_info_t*)ptr)->index;
+	uint32_t block = idx / INFOS_PER_BLOCK;
+	uint32_t offset = idx % INFOS_PER_BLOCK;
+	*tkipp = &handler->key_info_block[block][offset];
+	// assert(strcmp((*tkipp)->key, key) == 0);
+	traceEvent(TRACE_INFO, "Found key %s = index %u", key, idx);
 
     } else if (!(flags & TSDB_CREATE)) {
 	traceEvent(TRACE_INFO, "Key not found: %s", key);
 	return -1;
 
     } else if (handler->lowest_free_index < MAX_NUM_FRAGS * ENTRIES_PER_FRAG) {
-	tkip->key = strdup(key);
-	tkip->index = handler->lowest_free_index++;
-	tkip->frag_id = tkip->index / ENTRIES_PER_FRAG;
-	tkip->offset = tkip->index % ENTRIES_PER_FRAG;
-	tkip->n_timeranges = 0;
-	tkip->timeranges = NULL;
-	set_key_info(handler, tkip);
-	traceEvent(TRACE_INFO, "Assigned key %s = index %u", key, tkip->index);
+	uint32_t idx = handler->lowest_free_index++;
+	uint32_t block = idx / INFOS_PER_BLOCK;
+	uint32_t offset = idx % INFOS_PER_BLOCK;
+	if (alloc_key_info_block(handler, block) != 0)
+	    return -1;
+	*tkipp = &handler->key_info_block[block][offset];
+	(*tkipp)->key = strdup(key);
+	(*tkipp)->index = idx;
+	(*tkipp)->frag_id = (*tkipp)->index / INFOS_PER_BLOCK;
+	(*tkipp)->offset = (*tkipp)->index % INFOS_PER_BLOCK;
+	(*tkipp)->n_timeranges = 0;
+	(*tkipp)->timeranges = NULL;
+	set_key_info(handler, *tkipp);
+	traceEvent(TRACE_INFO, "Assigned key %s = index %u", key, (*tkipp)->index);
 	raw_db_set(handler, handler->dbMeta,
 	    "lowest_free_index", strlen("lowest_free_index"),
 	    &handler->lowest_free_index, sizeof(handler->lowest_free_index));
@@ -706,16 +749,16 @@ int tsdb_set_by_key(tsdb_handler *handler, const char *key,
     const tsdb_value *valuep)
 {
     int rc;
-    tsdb_key_info_t tki;
+    tsdb_key_info_t *tkip;
 
-    if ((rc = tsdb_get_key_info(handler, key, &tki, TSDB_CREATE)) != 0) {
+    if ((rc = tsdb_get_key_info(handler, key, &tkip, TSDB_CREATE)) != 0) {
 	handler->readonly = 1;
 	return rc;
     }
-    return tsdb_set(handler, &tki, valuep);
+    return tsdb_set(handler, tkip, valuep);
 }
 
-/* *********************************************************************** */
+/*************************************************************************/
 
 int tsdb_get(tsdb_handler *handler, tsdb_key_info_t *tkip,
     const tsdb_value **valuepp, int agglvl)
@@ -743,15 +786,15 @@ int tsdb_get_by_key(tsdb_handler *handler, const char *key,
     const tsdb_value **valuepp, int agglvl)
 {
     int rc;
-    tsdb_key_info_t tki;
+    tsdb_key_info_t *tkip;
 
-    if ((rc = tsdb_get_key_info(handler, key, &tki, 0)) != 0) {
+    if ((rc = tsdb_get_key_info(handler, key, &tkip, 0)) != 0) {
 	return rc;
     }
-    return tsdb_get(handler, &tki, valuepp, agglvl);
+    return tsdb_get(handler, tkip, valuepp, agglvl);
 }
 
-/* *********************************************************************** */
+/*************************************************************************/
 
 int tsdb_keywalk_start(tsdb_handler *handler)
 {
@@ -764,7 +807,7 @@ int tsdb_keywalk_start(tsdb_handler *handler)
     return 0;
 }
 
-int tsdb_keywalk_next(tsdb_handler *handler, tsdb_key_info_t *tkip)
+int tsdb_keywalk_next(tsdb_handler *handler, tsdb_key_info_t **tkipp)
 {
     int rc;
     DBT dbkey, dbdata;
@@ -774,11 +817,16 @@ int tsdb_keywalk_next(tsdb_handler *handler, tsdb_key_info_t *tkip)
     if ((rc = handler->keywalk->get(handler->keywalk, &dbkey, &dbdata, DB_NEXT)) != 0) {
 	if (rc != DB_NOTFOUND)
 	    traceEvent(TRACE_ERROR, "Error in tsdb_keywalk_next: %s", db_strerror(rc));
-	memset(tkip, 0, sizeof(*tkip));
+	*tkipp = NULL;
 	return -1;
     }
 
-    return rki_to_tki(handler, tkip, dbkey.data, dbkey.size, dbdata.data, dbdata.size);
+    uint32_t idx = ((raw_key_info_t*)dbdata.data)->index;
+    uint32_t block = idx / INFOS_PER_BLOCK;
+    uint32_t offset = idx % INFOS_PER_BLOCK;
+    *tkipp = &handler->key_info_block[block][offset];
+
+    return 0;
 }
 
 int tsdb_keywalk_end(tsdb_handler *handler)
@@ -792,7 +840,7 @@ int tsdb_keywalk_end(tsdb_handler *handler)
     return 0;
 }
 
-/* *********************************************************************** */
+/*************************************************************************/
 
 void tsdb_stat_print(const tsdb_handler *handler) {
     int rc;
