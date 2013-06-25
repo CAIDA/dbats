@@ -30,8 +30,7 @@ static void load_keys(tsdb_handler *handler, const char *path)
     while (fgets(line, sizeof(line), keyfile)) {
 	char *p = strchr(line, '\n');
 	if (p) *p = 0;
-	keys[n_keys] = malloc(sizeof(tsdb_key_info_t));
-	tsdb_get_key_info(handler, line, keys[n_keys], 0);
+	tsdb_get_key_info(handler, line, &keys[n_keys], 0);
 	n_keys++;
     }
     if (ferror(keyfile)) {
@@ -43,11 +42,9 @@ static void load_keys(tsdb_handler *handler, const char *path)
 static void get_keys(tsdb_handler *handler)
 {
     tsdb_keywalk_start(handler);
-    keys[n_keys] = malloc(sizeof(tsdb_key_info_t));
-    while (tsdb_keywalk_next(handler, keys[n_keys]) == 0) {
+    while (tsdb_keywalk_next(handler, &keys[n_keys]) == 0) {
 	n_keys++;
     }
-    free(keys[n_keys]);
     tsdb_keywalk_end(handler);
 }
 
