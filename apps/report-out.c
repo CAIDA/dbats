@@ -90,7 +90,7 @@ int main(int argc, char *argv[]) {
 
     traceEvent(TRACE_INFO, "Opening %s", tsdb_path);
 
-    if (tsdb_open(tsdb_path, &handler, 0, 0, 1) != 0)
+    if (tsdb_open(&handler, tsdb_path, 0, 0, TSDB_READONLY) != 0)
 	return(-1);
 
     if (keyfile_path)
@@ -102,8 +102,8 @@ int main(int argc, char *argv[]) {
     out = stdout;
     run_start = time(NULL);
 
-    for (int agglvl = 0; agglvl < handler.num_agglvls; agglvl++) {
-	for (uint32_t t = begin; t <= end; t += handler.agg[agglvl].period) {
+    for (int agg_id = 0; agg_id < handler.num_aggs; agg_id++) {
+	for (uint32_t t = begin; t <= end; t += handler.agg[agg_id].period) {
 	    int rc;
 
 	    if ((rc = tsdb_goto_time(&handler, t, TSDB_LOAD_ON_DEMAND)) == -1) {
@@ -112,7 +112,7 @@ int main(int argc, char *argv[]) {
 	    }
 
 	    for (int k = 0; k < n_keys; k++) {
-		rc = tsdb_get(&handler, keys[k], &values, agglvl);
+		rc = tsdb_get(&handler, keys[k], &values, agg_id);
 		if (rc != 0) {
 		    fprintf(stdout, "error in tsdb_get(%s)\n", keys[k]->key);
 		    break;
@@ -121,7 +121,7 @@ int main(int argc, char *argv[]) {
 		for (int j = 0; j < handler.num_values_per_entry; j++) {
 		    fprintf(out, "%u ", values ? values[j] : 0);
 		}
-		fprintf(out, "%u %d\n", t, agglvl);
+		fprintf(out, "%u %d\n", t, agg_id);
 	    }
 	}
     }

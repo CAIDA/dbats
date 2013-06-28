@@ -43,7 +43,7 @@ int main(int argc, char *argv[]) {
 	help();
     tsdb_path = argv[0];
 
-    if (tsdb_open(tsdb_path, &handler, num_values_per_entry, period, 0) != 0)
+    if (tsdb_open(&handler, tsdb_path, num_values_per_entry, period, TSDB_CREATE) != 0)
         return -1;
     if (tsdb_aggregate(&handler, TSDB_AGG_MIN, 10) != 0)
 	return -1;
