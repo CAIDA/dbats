@@ -14,7 +14,7 @@
 // bit vector
 #define vec_size(N)        (((N)+7)/8)                    // size for N bits
 #define vec_set(vec, i)    (vec[(i)/8] |= (1<<((i)%8)))   // set the ith bit
-#define vec_reset(vec, i)  (vec[(i)/8] &= ~(1<<((i)%8)))  // clear the ith bit
+#define vec_reset(vec, i)  (vec[(i)/8] &= ~(1<<((i)%8)))  // reset the ith bit
 #define vec_test(vec, i)   (vec[(i)/8] & (1<<((i)%8)))    // test the ith bit
 
 #define valueptr(handler, agg_id, frag_id, offset) \
@@ -455,28 +455,27 @@ static int update_key_info(tsdb_handler *handler, int next_is_far)
 	uint32_t block = idx / INFOS_PER_BLOCK;
 	uint32_t offset = idx % INFOS_PER_BLOCK;
 	tsdb_key_info_t *tkip = &handler->key_info_block[block][offset];
+	timerange_t *tr = tkip->timeranges; // shorthand
 	int value_is_set = tslice->frag[tkip->frag_id] &&
 	    vec_test(tslice->frag[tkip->frag_id]->is_set, tkip->offset);
 
 	int i = tkip->n_timeranges - 1;
 	int changed = 0;
 
-	if (next_is_far && i >= 0 && tkip->timeranges[i].end == 0) {
+	if (next_is_far && i >= 0 && tr[i].end == 0) {
 	    // next time > active time + 1 step (uncommon)
 	    traceEvent(TRACE_INFO,
 		"update_key_info: idx=%u, t=%u, [%u..%u] terminate",
-		idx, tslice->time, tkip->timeranges[i].start, tkip->timeranges[i].end); // XXX
-	    tkip->timeranges[i].end = agg0->last_flush;
+		idx, tslice->time, tr[i].start, tr[i].end); // XXX
+	    tr[i].end = agg0->last_flush;
 	    changed = 1;
 	    traceEvent(TRACE_INFO,
 		"             --> idx=%u, t=%u, [%u..%u] terminate",
-		idx, tslice->time, tkip->timeranges[i].start, tkip->timeranges[i].end); // XXX
+		idx, tslice->time, tr[i].start, tr[i].end); // XXX
 	}
 
 	if (value_is_set) {
-	    if (i >= 0 && tkip->timeranges[i].end == 0 &&
-		tslice->time >= tkip->timeranges[i].start)
-	    {
+	    if (i >= 0 && tr[i].end == 0 && tslice->time >= tr[i].start) {
 		// active time is within or after current range
 		if (tslice->time <= agg0->last_flush + agg0->period)
 		{
@@ -490,72 +489,72 @@ static int update_key_info(tsdb_handler *handler, int next_is_far)
 		    // past last flush
 		    traceEvent(TRACE_INFO,
 			"update_key_info: idx=%u, t=%u, [%u..%u] post-current",
-			idx, tslice->time, tkip->timeranges[i].start, tkip->timeranges[i].end); // XXX
-		    tkip->timeranges[i].end = agg0->last_flush;
+			idx, tslice->time, tr[i].start, tr[i].end); // XXX
+		    tr[i].end = agg0->last_flush;
 		    traceEvent(TRACE_INFO,
 			"             --> idx=%u, t=%u, [%u..%u] post-current",
-			idx, tslice->time, tkip->timeranges[i].start, tkip->timeranges[i].end); // XXX
+			idx, tslice->time, tr[i].start, tr[i].end); // XXX
 		    int n = ++tkip->n_timeranges;
 		    i++;
 		    timerange_t *newtr = emalloc(n * sizeof(timerange_t), "timeranges");
 		    if (!newtr) return -1;
-		    memcpy(&newtr[0], &tkip->timeranges[0], i * sizeof(timerange_t));
-		    free(tkip->timeranges);
-		    tkip->timeranges = newtr;
-		    tkip->timeranges[i].start = tslice->time;
-		    tkip->timeranges[i].end = 0;
+		    memcpy(&newtr[0], &tr[0], i * sizeof(timerange_t));
+		    free(tr);
+		    tr = tkip->timeranges = newtr;
+		    tr[i].start = tslice->time;
+		    tr[i].end = 0;
 		    traceEvent(TRACE_INFO,
 			"             --> idx=%u, t=%u, [%u..%u] post-current",
-			idx, tslice->time, tkip->timeranges[i].start, tkip->timeranges[i].end); // XXX
+			idx, tslice->time, tr[i].start, tr[i].end); // XXX
 		}
 
 	    } else {
 		// search for historic timerange
-		while (i >= 0 && tkip->timeranges[i].start > tslice->time) i--;
-		if (i >= 0 && tslice->time <= tkip->timeranges[i].end) {
+		while (i >= 0 && tr[i].start > tslice->time) i--;
+		if (i >= 0 && tslice->time <= tr[i].end) {
 		    // historic timerange matches
 		    /* traceEvent(TRACE_INFO,
 			"update_key_info: idx=%u, t=%u, [%u..%u] historic",
-			idx, tslice->time, tkip->timeranges[i].start, tkip->timeranges[i].end); // XXX */
+			idx, tslice->time, tr[i].start, tr[i].end); // XXX */
 		    if (!changed) continue; // no change, no write
-		} else if (i >= 0 && tslice->time == tkip->timeranges[i].end + agg0->period) {
+		} else if (i >= 0 && tslice->time == tr[i].end + agg0->period) {
 		    // time abuts end of historic timerange; extend it
 		    traceEvent(TRACE_INFO,
 			"update_key_info: idx=%u, t=%u, [%u..%u] abut end",
-			idx, tslice->time, tkip->timeranges[i].start, tkip->timeranges[i].end); // XXX
-		    tkip->timeranges[i].end = tslice->time;
+			idx, tslice->time, tr[i].start, tr[i].end); // XXX
+		    tr[i].end = tslice->time;
 		    traceEvent(TRACE_INFO,
 			"             --> idx=%u, t=%u, [%u..%u] abut end %d/%d",
-			idx, tslice->time, tkip->timeranges[i].start, tkip->timeranges[i].end, i, tkip->n_timeranges); // XXX
+			idx, tslice->time, tr[i].start, tr[i].end, i, tkip->n_timeranges); // XXX
 		    if (i+1 < tkip->n_timeranges &&
-			tkip->timeranges[i].end + agg0->period == tkip->timeranges[i+1].start)
+			tr[i].end + agg0->period == tr[i+1].start)
 		    {
 			// extended range i now abuts range i+1; merge them
 			int n = --tkip->n_timeranges;
 			size_t size = n * sizeof(timerange_t);
 			timerange_t *newtr = emalloc(size, "timeranges");
 			if (!newtr) return -1;
-			memcpy(&newtr[0], &tkip->timeranges[0], (i+1) * sizeof(timerange_t));
-			memcpy(&newtr[i+1], &tkip->timeranges[i+2], (n-i-1) * sizeof(timerange_t));
-			newtr[i].end = tkip->timeranges[i+1].end;
-			free(tkip->timeranges);
-			tkip->timeranges = newtr;
+			memcpy(&newtr[0], &tr[0], (i+1) * sizeof(timerange_t));
+			memcpy(&newtr[i+1], &tr[i+2], (n-i-1) * sizeof(timerange_t));
+			newtr[i].end = tr[i+1].end;
+			free(tr);
+			tr = tkip->timeranges = newtr;
 			traceEvent(TRACE_INFO,
 			    "             --> idx=%u, t=%u, [%u..%u] merge %d/%d",
-			    idx, tslice->time, tkip->timeranges[i].start, tkip->timeranges[i].end, i, n);// XXX
+			    idx, tslice->time, tr[i].start, tr[i].end, i, n);// XXX
 		    }
 		} else if (i+1 < tkip->n_timeranges &&
-		    tslice->time + agg0->period == tkip->timeranges[i+1].start)
+		    tslice->time + agg0->period == tr[i+1].start)
 		{
 		    // time abuts start of historic timerange; extend it
 		    i++;
 		    traceEvent(TRACE_INFO,
 			"update_key_info: idx=%u, t=%u, [%u..%u] abut start",
-			idx, tslice->time, tkip->timeranges[i].start, tkip->timeranges[i].end); // XXX
-		    tkip->timeranges[i].start = tslice->time;
+			idx, tslice->time, tr[i].start, tr[i].end); // XXX
+		    tr[i].start = tslice->time;
 		    traceEvent(TRACE_INFO,
 			"             --> idx=%u, t=%u, [%u..%u] abut start %d/%d",
-			idx, tslice->time, tkip->timeranges[i].start, tkip->timeranges[i].end, i, tkip->n_timeranges); // XXX
+			idx, tslice->time, tr[i].start, tr[i].end, i, tkip->n_timeranges); // XXX
 		} else {
 		    // no match found; create a new timerange
 		    int n = ++tkip->n_timeranges;
@@ -563,17 +562,16 @@ static int update_key_info(tsdb_handler *handler, int next_is_far)
 		    timerange_t *newtr = emalloc(n * sizeof(timerange_t), "timeranges");
 		    if (!newtr) return -1;
 		    if (n > 1) {
-			memcpy(&newtr[0], &tkip->timeranges[0], i * sizeof(timerange_t));
-			memcpy(&newtr[i+1], &tkip->timeranges[i], (n-i-1) * sizeof(timerange_t));
-			free(tkip->timeranges);
+			memcpy(&newtr[0], &tr[0], i * sizeof(timerange_t));
+			memcpy(&newtr[i+1], &tr[i], (n-i-1) * sizeof(timerange_t));
+			free(tr);
 		    }
-		    tkip->timeranges = newtr;
-		    tkip->timeranges[i].start = tslice->time;
-		    tkip->timeranges[i].end = (!is_last || next_is_far) ?
-			tslice->time : 0;
+		    tr = tkip->timeranges = newtr;
+		    tr[i].start = tslice->time;
+		    tr[i].end = (!is_last || next_is_far) ? tslice->time : 0;
 		    traceEvent(TRACE_INFO,
 			"update_key_info: idx=%u, t=%u, [%u..%u] create %d/%d",
-			idx, tslice->time, tkip->timeranges[i].start, tkip->timeranges[i].end, i, n); // XXX
+			idx, tslice->time, tr[i].start, tr[i].end, i, n); // XXX
 		}
 	    }
 
@@ -583,74 +581,71 @@ static int update_key_info(tsdb_handler *handler, int next_is_far)
 		    "update_key_info: idx=%u, t=%u, unset, no timeranges",
 		    idx, tslice->time); // XXX */
 		if (!changed) continue; // no change, no write
-	    } else if (tkip->timeranges[i].end == 0 &&
-		tslice->time >= tkip->timeranges[i].start)
-	    {
+	    } else if (tr[i].end == 0 && tslice->time >= tr[i].start) {
 		// current timerange matches; terminate it
 		traceEvent(TRACE_INFO,
 		    "update_key_info: idx=%u, t=%u, [%u..%u] unset current",
-		    idx, tslice->time, tkip->timeranges[i].start, tkip->timeranges[i].end); // XXX
-		tkip->timeranges[i].end = agg0->last_flush;
+		    idx, tslice->time, tr[i].start, tr[i].end); // XXX
+		tr[i].end = agg0->last_flush;
 		traceEvent(TRACE_INFO,
 		    "             --> idx=%u, t=%u, [%u..%u] unset current",
-		    idx, tslice->time, tkip->timeranges[i].start, tkip->timeranges[i].end); // XXX
+		    idx, tslice->time, tr[i].start, tr[i].end); // XXX
 	    } else {
 		// search for historic timerange (possible only if we allow
 		// deleting historic values)
-		while (i >= 0 && tkip->timeranges[i].start > tslice->time) i--;
-		if (i < 0 || tslice->time > tkip->timeranges[i].end) { // no match found
+		while (i >= 0 && tr[i].start > tslice->time) i--;
+		if (i < 0 || tslice->time > tr[i].end) { // no match found
 		    if (!changed) continue; // no change, no write
-		} else if (tkip->timeranges[i].start == tslice->time &&
-		    tkip->timeranges[i].end == tslice->time)
+		} else if (tr[i].start == tslice->time &&
+		    tr[i].end == tslice->time)
 		{
 		    // timerange would become empty; delete it
 		    traceEvent(TRACE_INFO,
 			"update_key_info: idx=%u, t=%u, [%u..%u] unset historic clear",
-			idx, tslice->time, tkip->timeranges[i].start, tkip->timeranges[i].end); // XXX
+			idx, tslice->time, tr[i].start, tr[i].end); // XXX
 		    int n = --tkip->n_timeranges;
-		    memmove(&tkip->timeranges[i], &tkip->timeranges[i+1],
-			(n - i) * sizeof(timerange_t));
-		} else if (tkip->timeranges[i].start == tslice->time) {
+		    memmove(&tr[i], &tr[i+1], (n - i) * sizeof(timerange_t));
+		} else if (tr[i].start == tslice->time) {
 		    // delete first step of timerange
 		    traceEvent(TRACE_INFO,
 			"update_key_info: idx=%u, t=%u, [%u..%u] unset historic start",
-			idx, tslice->time, tkip->timeranges[i].start, tkip->timeranges[i].end); // XXX
-		    tkip->timeranges[i].start += agg0->period;
+			idx, tslice->time, tr[i].start, tr[i].end); // XXX
+		    tr[i].start += agg0->period;
 		    traceEvent(TRACE_INFO,
 			"             --> idx=%u, t=%u, [%u..%u] unset historic start",
-			idx, tslice->time, tkip->timeranges[i].start, tkip->timeranges[i].end); // XXX
-		} else if (tkip->timeranges[i].end == tslice->time) {
+			idx, tslice->time, tr[i].start, tr[i].end); // XXX
+		} else if (tr[i].end == tslice->time) {
 		    // delete last step of timerange
 		    traceEvent(TRACE_INFO,
 			"update_key_info: idx=%u, t=%u, [%u..%u] unset historic end",
-			idx, tslice->time, tkip->timeranges[i].start, tkip->timeranges[i].end); // XXX
-		    tkip->timeranges[i].end -= agg0->period;
+			idx, tslice->time, tr[i].start, tr[i].end); // XXX
+		    tr[i].end -= agg0->period;
 		    traceEvent(TRACE_INFO,
 			"             --> idx=%u, t=%u, [%u..%u] unset historic end",
-			idx, tslice->time, tkip->timeranges[i].start, tkip->timeranges[i].end); // XXX
+			idx, tslice->time, tr[i].start, tr[i].end); // XXX
 		} else {
 		    // split time range
 		    traceEvent(TRACE_INFO,
 			"update_key_info: idx=%u, t=%u, [%u..%u] unset historic split",
-			idx, tslice->time, tkip->timeranges[i].start, tkip->timeranges[i].end); // XXX
+			idx, tslice->time, tr[i].start, tr[i].end); // XXX
 		    int n = ++tkip->n_timeranges;
 		    // Push every item after i forward one slot, and put a
 		    // copy of item i in slot i+1.
 		    timerange_t *newtr = emalloc(n * sizeof(timerange_t), "timeranges");
 		    if (!newtr) return -1;
-		    memcpy(&newtr[0], &tkip->timeranges[0], (i+1) * sizeof(timerange_t));
-		    memcpy(&newtr[i+1], &tkip->timeranges[i], (n-i-1) * sizeof(timerange_t));
-		    free(tkip->timeranges);
-		    tkip->timeranges = newtr;
+		    memcpy(&newtr[0], &tr[0], (i+1) * sizeof(timerange_t));
+		    memcpy(&newtr[i+1], &tr[i], (n-i-1) * sizeof(timerange_t));
+		    free(tr);
+		    tr = tkip->timeranges = newtr;
                     // update items i and i+1
-		    tkip->timeranges[i].end = tslice->time - agg0->period;
-		    tkip->timeranges[i+1].start = tslice->time + agg0->period;
+		    tr[i].end = tslice->time - agg0->period;
+		    tr[i+1].start = tslice->time + agg0->period;
 		    traceEvent(TRACE_INFO,
 			"             --> idx=%u, t=%u, [%u..%u] unset historic split %d/%d",
-			idx, tslice->time, tkip->timeranges[i].start, tkip->timeranges[i].end, i, n); // XXX
+			idx, tslice->time, tr[i].start, tr[i].end, i, n); // XXX
 		    traceEvent(TRACE_INFO,
 			"             --> idx=%u, t=%u, [%u..%u] unset historic split %d/%d",
-			idx, tslice->time, tkip->timeranges[i+1].start, tkip->timeranges[i+1].end, i+1, n); // XXX
+			idx, tslice->time, tr[i+1].start, tr[i+1].end, i+1, n); // XXX
 		}
 	    }
 	}
