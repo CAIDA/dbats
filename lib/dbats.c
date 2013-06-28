@@ -21,8 +21,8 @@
     ((tsdb_value*)(&handler->tslice[agglvl].frag[frag_id]->data[offset * handler->entry_size]))
 
 struct tsdb_frag {
-    uint8_t is_set[vec_size(ENTRIES_PER_FRAG)];
-    uint8_t data[]; // flexible array member
+    uint8_t is_set[vec_size(ENTRIES_PER_FRAG)]; // which indexes have values
+    uint8_t data[]; // values (C99 flexible array member)
 };
 
 typedef struct {
@@ -36,9 +36,21 @@ typedef struct {
 // key_info as stored in db
 typedef struct {
     uint32_t index;
-    timerange_t timeranges[]; // flexible array member
+    timerange_t timeranges[]; // When did this key have a value? (C99 flexible array member)
 } raw_key_info_t;
 
+
+/************************************************************************
+ * utilities
+ ************************************************************************/
+
+static void *emalloc(size_t size, const char *msg)
+{
+    void *ptr = malloc(size);
+    if (!ptr)
+	traceEvent(TRACE_ERROR, "Can't allocate %u bytes for %s", size, msg);
+    return ptr;
+}
 
 /************************************************************************
  * DB wrappers
@@ -54,7 +66,7 @@ static int raw_db_open(tsdb_handler *handler, DB **dbp, const char *path,
 	return -1;
     }
 
-    int mode = (readonly ? 00444 : 00777);
+    int mode = (readonly ? 00444 : 00666);
     if ((ret = (*dbp)->open(*dbp, NULL, path, dbname,
 	DB_BTREE, (readonly ? 0 : DB_CREATE), mode)) != 0)
     {
@@ -106,7 +118,8 @@ static int raw_db_get(const tsdb_handler *handler, DB* db,
     if (db_get_buf_len < ENTRIES_PER_FRAG * handler->entry_size + QLZ_OVERHEAD) {
 	db_get_buf_len = ENTRIES_PER_FRAG * handler->entry_size + QLZ_OVERHEAD;
 	if (db_get_buf) free(db_get_buf);
-	db_get_buf = malloc(db_get_buf_len);
+	db_get_buf = emalloc(db_get_buf_len, "decompression buffer");
+	if (!db_get_buf) return -2;
     }
 
     memset(&key_data, 0, sizeof(key_data));
@@ -125,7 +138,7 @@ static int raw_db_get(const tsdb_handler *handler, DB* db,
     } else {
 	//int len = key_len;
 	//traceEvent(TRACE_WARNING, "raw_db_get failed: key=\"%.*s\"\n", len, (char*)key);
-	return(-1);
+	return -1;
     }
 }
 
@@ -167,11 +180,10 @@ static int raw_db_key_exists(const tsdb_handler *handler, DB *db,
 static int alloc_key_info_block(tsdb_handler *handler, uint32_t block)
 {
     if (!handler->key_info_block[block]) {
-	handler->key_info_block[block] = malloc(sizeof(tsdb_key_info_t) * INFOS_PER_BLOCK);
-	if (!handler->key_info_block[block]) {
-	    traceEvent(TRACE_ERROR, "Out of memory");
+	handler->key_info_block[block] =
+	    emalloc(sizeof(tsdb_key_info_t) * INFOS_PER_BLOCK, "key_info_block");
+	if (!handler->key_info_block[block])
 	    return -1;
-	}
     }
     return 0;
 }
@@ -276,25 +288,19 @@ int tsdb_open(const char *path, tsdb_handler *handler,
 
 	tsdb_key_info_t *tkip = &handler->key_info_block[block][offset];
 	raw_key_info_t *rki = dbdata.data;
-	char *keycopy = malloc(dbkey.size+1);
-	if (!keycopy) {
-	    traceEvent(TRACE_ERROR, "Out of memory");
-	    return -2;
-	}
+	char *keycopy = emalloc(dbkey.size+1, "copy of key");
+	if (!keycopy) return -2;
 	memcpy(keycopy, dbkey.data, dbkey.size);
 	keycopy[dbkey.size] = 0; // nul-terminate
 	tkip->key = keycopy;
 	tkip->index = rki->index;
-	tkip->frag_id = tkip->index / INFOS_PER_BLOCK;
-	tkip->offset = tkip->index % INFOS_PER_BLOCK;
-	size_t timeranges_size = dbdata.size - sizeof(raw_key_info_t);
-	tkip->n_timeranges = timeranges_size / sizeof(timerange_t);
-	tkip->timeranges = malloc(timeranges_size);
-	if (!tkip->timeranges) {
-	    traceEvent(TRACE_ERROR, "Out of memory");
-	    return -2;
-	}
-	memcpy(tkip->timeranges, rki->timeranges, timeranges_size);
+	tkip->frag_id = tkip->index / ENTRIES_PER_FRAG;
+	tkip->offset = tkip->index % ENTRIES_PER_FRAG;
+	size_t tr_size = dbdata.size - sizeof(raw_key_info_t);
+	tkip->n_timeranges = tr_size / sizeof(timerange_t);
+	tkip->timeranges = emalloc(tr_size, "timeranges");
+	if (!tkip->timeranges) return -2;
+	memcpy(tkip->timeranges, rki->timeranges, tr_size);
     }
 
     if ((rc = cursor->close(cursor)) != 0) {
@@ -342,7 +348,8 @@ static void tsdb_flush_tslice(tsdb_handler *handler, int agglvl)
     uint32_t buf_len = frag_size + QLZ_OVERHEAD;
     char *buf = NULL;
 
-    /* Write fragments to the DB */
+
+    // Write fragments to the DB
     dbkey.time = handler->tslice[agglvl].time;
     dbkey.agglvl = agglvl;
     for (int f = 0; f < handler->tslice[agglvl].num_frags; f++) {
@@ -351,11 +358,8 @@ static void tsdb_flush_tslice(tsdb_handler *handler, int agglvl)
 	    // do nothing
 	} else if (handler->tslice[agglvl].frag_changed[f]) {
 	    if (!buf)
-		buf = (char*)malloc(buf_len);
-	    if (!buf) {
-		traceEvent(TRACE_WARNING, "Not enough memory (%u bytes)", buf_len);
-		return;
-	    }
+		buf = (char*)emalloc(buf_len, "compression buffer");
+	    if (!buf) return;
 	    size_t compressed_len = qlz_compress(handler->tslice[agglvl].frag[f],
 		buf, frag_size, &handler->state_compress);
 	    traceEvent(TRACE_INFO, "Frag %d compression: %u -> %u (%.1f %%)",
@@ -380,8 +384,256 @@ static void tsdb_flush_tslice(tsdb_handler *handler, int agglvl)
 
     memset(&handler->tslice[agglvl], 0, sizeof(tsdb_tslice));
     free(buf);
+}
 
-    // XXX write dirty key_infos
+/*************************************************************************/
+
+static int set_key_info(const tsdb_handler *handler, tsdb_key_info_t *tkip)
+{
+    size_t tr_size = tkip->n_timeranges * sizeof(timerange_t);
+    size_t rki_size = sizeof(raw_key_info_t) + tr_size;
+    raw_key_info_t *rki = emalloc(rki_size, tkip->key);
+    if (!rki) return -1;
+    rki->index = tkip->index;
+    memcpy(rki->timeranges, tkip->timeranges, tr_size);
+    raw_db_set(handler, handler->dbKey, tkip->key, strlen(tkip->key), rki, rki_size);
+    traceEvent(TRACE_INFO, "Write key %s -> %u, %d timeranges",
+	tkip->key, tkip->index, tkip->n_timeranges);
+    /*
+    int totalsteps = 0; // XXX
+    for (int i = 0; i < tkip->n_timeranges; i++) { // XXX
+	int steps = (tkip->timeranges[i].end + handler->agg[0].period - tkip->timeranges[i].start) /
+	    handler->agg[0].period;
+	traceEvent(TRACE_INFO, "     %3d: %10u %10u (%3d)",
+	    i, tkip->timeranges[i].start, tkip->timeranges[i].end, steps);
+	totalsteps += steps;
+    }
+    traceEvent(TRACE_INFO, "                              %6d", totalsteps); // XXX
+    */
+    return 0;
+}
+
+// Update the timeranges associated with each key, according to the is_set
+// vector.
+static int update_key_info(tsdb_handler *handler, int next_is_far)
+{
+    tsdb_agg *agg0 = &handler->agg[0];
+    tsdb_tslice *tslice = &handler->tslice[0];
+    if (handler->readonly || tslice->time == 0) return 0;
+    int is_last = tslice->time >= agg0->last_flush;
+    traceEvent(TRACE_INFO,
+	"update_key_info: t=%u, last_flush=%u, is_last=%d, next_is_far=%d",
+	tslice->time, agg0->last_flush, is_last, next_is_far); // XXX
+
+    for (uint32_t idx = 0; idx < handler->lowest_free_index; idx++) {
+	uint32_t block = idx / INFOS_PER_BLOCK;
+	uint32_t offset = idx % INFOS_PER_BLOCK;
+	tsdb_key_info_t *tkip = &handler->key_info_block[block][offset];
+	int value_is_set = tslice->frag[tkip->frag_id] &&
+	    vec_test(tslice->frag[tkip->frag_id]->is_set, tkip->offset);
+
+	int i = tkip->n_timeranges - 1;
+	int changed = 0;
+
+	if (next_is_far && i >= 0 && tkip->timeranges[i].end == 0) {
+	    // next time > active time + 1 step (uncommon)
+	    traceEvent(TRACE_INFO,
+		"update_key_info: idx=%u, t=%u, [%u..%u] terminate",
+		idx, tslice->time, tkip->timeranges[i].start, tkip->timeranges[i].end); // XXX
+	    tkip->timeranges[i].end = agg0->last_flush;
+	    changed = 1;
+	    traceEvent(TRACE_INFO,
+		"             --> idx=%u, t=%u, [%u..%u] terminate",
+		idx, tslice->time, tkip->timeranges[i].start, tkip->timeranges[i].end); // XXX
+	}
+
+	if (value_is_set) {
+	    if (i >= 0 && tkip->timeranges[i].end == 0 &&
+		tslice->time >= tkip->timeranges[i].start)
+	    {
+		// active time is within or after current range
+		if (tslice->time <= agg0->last_flush + agg0->period)
+		{
+		    // Common case: active time is within current (unterminated)
+		    // range and is no more than 1 step past the last flush.
+		    // assert(!changed);
+		    continue; // no change, no write
+
+		} else {
+		    // active time is after current range, ie more than 1 step
+		    // past last flush
+		    traceEvent(TRACE_INFO,
+			"update_key_info: idx=%u, t=%u, [%u..%u] post-current",
+			idx, tslice->time, tkip->timeranges[i].start, tkip->timeranges[i].end); // XXX
+		    tkip->timeranges[i].end = agg0->last_flush;
+		    traceEvent(TRACE_INFO,
+			"             --> idx=%u, t=%u, [%u..%u] post-current",
+			idx, tslice->time, tkip->timeranges[i].start, tkip->timeranges[i].end); // XXX
+		    int n = ++tkip->n_timeranges;
+		    i++;
+		    timerange_t *newtr = emalloc(n * sizeof(timerange_t), "timeranges");
+		    if (!newtr) return -1;
+		    memcpy(&newtr[0], &tkip->timeranges[0], i * sizeof(timerange_t));
+		    free(tkip->timeranges);
+		    tkip->timeranges = newtr;
+		    tkip->timeranges[i].start = tslice->time;
+		    tkip->timeranges[i].end = 0;
+		    traceEvent(TRACE_INFO,
+			"             --> idx=%u, t=%u, [%u..%u] post-current",
+			idx, tslice->time, tkip->timeranges[i].start, tkip->timeranges[i].end); // XXX
+		}
+
+	    } else {
+		// search for historic timerange
+		while (i >= 0 && tkip->timeranges[i].start > tslice->time) i--;
+		if (i >= 0 && tslice->time <= tkip->timeranges[i].end) {
+		    // historic timerange matches
+		    /* traceEvent(TRACE_INFO,
+			"update_key_info: idx=%u, t=%u, [%u..%u] historic",
+			idx, tslice->time, tkip->timeranges[i].start, tkip->timeranges[i].end); // XXX */
+		    if (!changed) continue; // no change, no write
+		} else if (i >= 0 && tslice->time == tkip->timeranges[i].end + agg0->period) {
+		    // time abuts end of historic timerange; extend it
+		    traceEvent(TRACE_INFO,
+			"update_key_info: idx=%u, t=%u, [%u..%u] abut end",
+			idx, tslice->time, tkip->timeranges[i].start, tkip->timeranges[i].end); // XXX
+		    tkip->timeranges[i].end = tslice->time;
+		    traceEvent(TRACE_INFO,
+			"             --> idx=%u, t=%u, [%u..%u] abut end %d/%d",
+			idx, tslice->time, tkip->timeranges[i].start, tkip->timeranges[i].end, i, tkip->n_timeranges); // XXX
+		    if (i+1 < tkip->n_timeranges &&
+			tkip->timeranges[i].end + agg0->period == tkip->timeranges[i+1].start)
+		    {
+			// extended range i now abuts range i+1; merge them
+			int n = --tkip->n_timeranges;
+			size_t size = n * sizeof(timerange_t);
+			timerange_t *newtr = emalloc(size, "timeranges");
+			if (!newtr) return -1;
+			memcpy(&newtr[0], &tkip->timeranges[0], (i+1) * sizeof(timerange_t));
+			memcpy(&newtr[i+1], &tkip->timeranges[i+2], (n-i-1) * sizeof(timerange_t));
+			newtr[i].end = tkip->timeranges[i+1].end;
+			free(tkip->timeranges);
+			tkip->timeranges = newtr;
+			traceEvent(TRACE_INFO,
+			    "             --> idx=%u, t=%u, [%u..%u] merge %d/%d",
+			    idx, tslice->time, tkip->timeranges[i].start, tkip->timeranges[i].end, i, n);// XXX
+		    }
+		} else if (i+1 < tkip->n_timeranges &&
+		    tslice->time + agg0->period == tkip->timeranges[i+1].start)
+		{
+		    // time abuts start of historic timerange; extend it
+		    i++;
+		    traceEvent(TRACE_INFO,
+			"update_key_info: idx=%u, t=%u, [%u..%u] abut start",
+			idx, tslice->time, tkip->timeranges[i].start, tkip->timeranges[i].end); // XXX
+		    tkip->timeranges[i].start = tslice->time;
+		    traceEvent(TRACE_INFO,
+			"             --> idx=%u, t=%u, [%u..%u] abut start %d/%d",
+			idx, tslice->time, tkip->timeranges[i].start, tkip->timeranges[i].end, i, tkip->n_timeranges); // XXX
+		} else {
+		    // no match found; create a new timerange
+		    int n = ++tkip->n_timeranges;
+		    i++;
+		    timerange_t *newtr = emalloc(n * sizeof(timerange_t), "timeranges");
+		    if (!newtr) return -1;
+		    if (n > 1) {
+			memcpy(&newtr[0], &tkip->timeranges[0], i * sizeof(timerange_t));
+			memcpy(&newtr[i+1], &tkip->timeranges[i], (n-i-1) * sizeof(timerange_t));
+			free(tkip->timeranges);
+		    }
+		    tkip->timeranges = newtr;
+		    tkip->timeranges[i].start = tslice->time;
+		    tkip->timeranges[i].end = (!is_last || next_is_far) ?
+			tslice->time : 0;
+		    traceEvent(TRACE_INFO,
+			"update_key_info: idx=%u, t=%u, [%u..%u] create %d/%d",
+			idx, tslice->time, tkip->timeranges[i].start, tkip->timeranges[i].end, i, n); // XXX
+		}
+	    }
+
+	} else { // value is not set
+	    if (tkip->n_timeranges == 0) {
+		/*traceEvent(TRACE_INFO,
+		    "update_key_info: idx=%u, t=%u, unset, no timeranges",
+		    idx, tslice->time); // XXX */
+		if (!changed) continue; // no change, no write
+	    } else if (tkip->timeranges[i].end == 0 &&
+		tslice->time >= tkip->timeranges[i].start)
+	    {
+		// current timerange matches; terminate it
+		traceEvent(TRACE_INFO,
+		    "update_key_info: idx=%u, t=%u, [%u..%u] unset current",
+		    idx, tslice->time, tkip->timeranges[i].start, tkip->timeranges[i].end); // XXX
+		tkip->timeranges[i].end = agg0->last_flush;
+		traceEvent(TRACE_INFO,
+		    "             --> idx=%u, t=%u, [%u..%u] unset current",
+		    idx, tslice->time, tkip->timeranges[i].start, tkip->timeranges[i].end); // XXX
+	    } else {
+		// search for historic timerange (possible only if we allow
+		// deleting historic values)
+		while (i >= 0 && tkip->timeranges[i].start > tslice->time) i--;
+		if (i < 0 || tslice->time > tkip->timeranges[i].end) { // no match found
+		    if (!changed) continue; // no change, no write
+		} else if (tkip->timeranges[i].start == tslice->time &&
+		    tkip->timeranges[i].end == tslice->time)
+		{
+		    // timerange would become empty; delete it
+		    traceEvent(TRACE_INFO,
+			"update_key_info: idx=%u, t=%u, [%u..%u] unset historic clear",
+			idx, tslice->time, tkip->timeranges[i].start, tkip->timeranges[i].end); // XXX
+		    int n = --tkip->n_timeranges;
+		    memmove(&tkip->timeranges[i], &tkip->timeranges[i+1],
+			(n - i) * sizeof(timerange_t));
+		} else if (tkip->timeranges[i].start == tslice->time) {
+		    // delete first step of timerange
+		    traceEvent(TRACE_INFO,
+			"update_key_info: idx=%u, t=%u, [%u..%u] unset historic start",
+			idx, tslice->time, tkip->timeranges[i].start, tkip->timeranges[i].end); // XXX
+		    tkip->timeranges[i].start += agg0->period;
+		    traceEvent(TRACE_INFO,
+			"             --> idx=%u, t=%u, [%u..%u] unset historic start",
+			idx, tslice->time, tkip->timeranges[i].start, tkip->timeranges[i].end); // XXX
+		} else if (tkip->timeranges[i].end == tslice->time) {
+		    // delete last step of timerange
+		    traceEvent(TRACE_INFO,
+			"update_key_info: idx=%u, t=%u, [%u..%u] unset historic end",
+			idx, tslice->time, tkip->timeranges[i].start, tkip->timeranges[i].end); // XXX
+		    tkip->timeranges[i].end -= agg0->period;
+		    traceEvent(TRACE_INFO,
+			"             --> idx=%u, t=%u, [%u..%u] unset historic end",
+			idx, tslice->time, tkip->timeranges[i].start, tkip->timeranges[i].end); // XXX
+		} else {
+		    // split time range
+		    traceEvent(TRACE_INFO,
+			"update_key_info: idx=%u, t=%u, [%u..%u] unset historic split",
+			idx, tslice->time, tkip->timeranges[i].start, tkip->timeranges[i].end); // XXX
+		    int n = ++tkip->n_timeranges;
+		    // Push every item after i forward one slot, and put a
+		    // copy of item i in slot i+1.
+		    timerange_t *newtr = emalloc(n * sizeof(timerange_t), "timeranges");
+		    if (!newtr) return -1;
+		    memcpy(&newtr[0], &tkip->timeranges[0], (i+1) * sizeof(timerange_t));
+		    memcpy(&newtr[i+1], &tkip->timeranges[i], (n-i-1) * sizeof(timerange_t));
+		    free(tkip->timeranges);
+		    tkip->timeranges = newtr;
+                    // update items i and i+1
+		    tkip->timeranges[i].end = tslice->time - agg0->period;
+		    tkip->timeranges[i+1].start = tslice->time + agg0->period;
+		    traceEvent(TRACE_INFO,
+			"             --> idx=%u, t=%u, [%u..%u] unset historic split %d/%d",
+			idx, tslice->time, tkip->timeranges[i].start, tkip->timeranges[i].end, i, n); // XXX
+		    traceEvent(TRACE_INFO,
+			"             --> idx=%u, t=%u, [%u..%u] unset historic split %d/%d",
+			idx, tslice->time, tkip->timeranges[i+1].start, tkip->timeranges[i+1].end, i+1, n); // XXX
+		}
+	    }
+	}
+
+	// write modified key info to db
+	if (set_key_info(handler, tkip) != 0)
+	    return -1;
+    }
+    return 0;
 }
 
 /*************************************************************************/
@@ -395,6 +647,7 @@ void tsdb_close(tsdb_handler *handler)
     if (!handler->readonly)
 	traceEvent(TRACE_INFO, "Flushing database changes...");
 
+    update_key_info(handler, 0);
     for (int agglvl = 0; agglvl < handler->num_agglvls; agglvl++) {
 	tsdb_flush_tslice(handler, agglvl);
     }
@@ -418,19 +671,6 @@ uint32_t normalize_time(const tsdb_handler *handler, int agglvl, uint32_t *t)
 
 /*************************************************************************/
 
-static void set_key_info(const tsdb_handler *handler, tsdb_key_info_t *tkip)
-{
-    size_t timeranges_size = tkip->n_timeranges * sizeof(timerange_t);
-    size_t rki_size = sizeof(raw_key_info_t) + timeranges_size;
-    raw_key_info_t *rki = malloc(rki_size);
-    rki->index = tkip->index;
-    memcpy(rki->timeranges, tkip->timeranges, timeranges_size);
-    raw_db_set(handler, handler->dbKey, tkip->key, strlen(tkip->key), rki, rki_size);
-    traceEvent(TRACE_INFO, "[SET] Mapping %s -> %u", tkip->key, rki->index);
-}
-
-/*************************************************************************/
-
 static int load_frag(tsdb_handler *handler, uint32_t t, int agglvl,
     uint32_t frag_id)
 {
@@ -446,7 +686,7 @@ static int load_frag(tsdb_handler *handler, uint32_t t, int agglvl,
     traceEvent(TRACE_INFO, "load_frag t=%u, agglvl=%u, frag_id=%u: "
 	"raw_db_get = %d", t, agglvl, frag_id, rc);
     if (rc != 0)
-	return -1; // no match
+	return 0; // no match
 
     // decompress fragment
     size_t len = qlz_size_decompressed(value);
@@ -487,6 +727,12 @@ int tsdb_goto_time(tsdb_handler *handler, uint32_t time_value, uint32_t flags)
 	    continue;
 	}
 
+	if (agglvl == 0) {
+	    int next_is_far = t > tslice->time + handler->agg[0].period;
+	    if (update_key_info(handler, next_is_far) != 0)
+		return -1;
+	}
+
 	// Flush tslice if loaded
 	tsdb_flush_tslice(handler, agglvl);
 
@@ -496,29 +742,17 @@ int tsdb_goto_time(tsdb_handler *handler, uint32_t time_value, uint32_t flags)
 	if (tslice->load_on_demand)
 	    continue;
 
-	// load first frag
-	rc = load_frag(handler, t, agglvl, tslice->num_frags);
-
-	// XXX FIXME: During writing, if a frag existed but contained no set
-	// values, it would not have been flushed to db, and this code would
-	// think it doesn't exist and won't load frags following it.
-	if (rc == 0) {
-	    // found a first frag; load remaining frags
-	    while (load_frag(handler, t, agglvl, tslice->num_frags) == 0) {}
-	    traceEvent(TRACE_INFO, "Moved to time %u", time_value);
-
-	} else if (rc == -1) {
-	    // no first frag; create a new tslice if allowed
-	    if (!(flags & TSDB_CREATE)) {
-		traceEvent(TRACE_INFO, "Unable to goto time %u", time_value);
-		return -1;
-	    }
-	    traceEvent(TRACE_INFO, "empty tslice t=%u agglvl=%d", time_value, agglvl);
-	    tslice->num_frags = 0;
-
-	} else {
-	    return rc;
+	int loaded = 0;
+	tslice->num_frags = (handler->lowest_free_index + ENTRIES_PER_FRAG - 1) /
+	    ENTRIES_PER_FRAG;
+	for (uint32_t frag_id = 0; frag_id < tslice->num_frags; frag_id++) {
+	    if ((rc = load_frag(handler, t, agglvl, frag_id)) != 0)
+		return rc;
+	    if (tslice->frag[frag_id])
+		loaded++;
 	}
+	traceEvent(TRACE_INFO, "goto_time %u: agglvl=%d, loaded %u/%u fragments",
+	    time_value, agglvl, loaded, tslice->num_frags);
 
 	tslice->growable = !!(flags & TSDB_GROWABLE);
     }
@@ -555,11 +789,12 @@ int tsdb_get_key_info(tsdb_handler *handler, const char *key,
 	*tkipp = &handler->key_info_block[block][offset];
 	(*tkipp)->key = strdup(key);
 	(*tkipp)->index = idx;
-	(*tkipp)->frag_id = (*tkipp)->index / INFOS_PER_BLOCK;
-	(*tkipp)->offset = (*tkipp)->index % INFOS_PER_BLOCK;
+	(*tkipp)->frag_id = (*tkipp)->index / ENTRIES_PER_FRAG;
+	(*tkipp)->offset = (*tkipp)->index % ENTRIES_PER_FRAG;
 	(*tkipp)->n_timeranges = 0;
 	(*tkipp)->timeranges = NULL;
-	set_key_info(handler, *tkipp);
+	if (set_key_info(handler, *tkipp) != 0)
+	    return -1;
 	traceEvent(TRACE_INFO, "Assigned key %s = index %u", key, (*tkipp)->index);
 	raw_db_set(handler, handler->dbMeta,
 	    "lowest_free_index", strlen("lowest_free_index"),
@@ -592,19 +827,22 @@ static int instantiate_frag(tsdb_handler *handler, int agglvl, uint32_t frag_id)
 	int rc = load_frag(handler, tslice->time, agglvl, frag_id);
 	if (rc != 0)
 	    return rc;
+	if (!tslice->frag[frag_id])
+	    return 1; // fragment not found
 
     } else if (tslice->growable) {
 	// We should allocate a new fragment.
-	traceEvent(TRACE_NORMAL, "grow table for time %u, agglvl %d, frag_id %u",
+	traceEvent(TRACE_NORMAL, "grow tslice for time %u, agglvl %d, frag_id %u",
 	    tslice->time, agglvl, frag_id);
 	tslice->frag[frag_id] = calloc(1, fragsize(handler));
 	if (!tslice->frag[frag_id]) {
-	    traceEvent(TRACE_WARNING, "Not enough memory to grow table for "
-		"time %u, agglvl %d, frag_id %u", tslice->time, agglvl, frag_id);
+	    traceEvent(TRACE_WARNING, "Can't allocate %u bytes to grow tslice "
+		"for time %u, agglvl %d, frag_id %u",
+		fragsize(handler), tslice->time, agglvl, frag_id);
 	    return -2;
 	}
 	tslice->num_frags = frag_id + 1;
-	traceEvent(TRACE_INFO, "Grew table to %u elements",
+	traceEvent(TRACE_INFO, "Grew tslice to %u elements",
 	    tslice->num_frags * ENTRIES_PER_FRAG);
 
     } else {
@@ -617,6 +855,10 @@ static int instantiate_frag(tsdb_handler *handler, int agglvl, uint32_t frag_id)
 
 /*************************************************************************/
 
+static inline uint32_t min(uint32_t a, uint32_t b) { return a < b ? a : b; }
+
+static inline uint32_t max(uint32_t a, uint32_t b) { return a > b ? a : b; }
+
 int tsdb_set(tsdb_handler *handler, tsdb_key_info_t *tkip, const tsdb_value *valuep)
 {
     int rc;
@@ -628,10 +870,10 @@ int tsdb_set(tsdb_handler *handler, tsdb_key_info_t *tkip, const tsdb_value *val
 	return rc;
     }
 
+    traceEvent(TRACE_INFO, "tsdb_set %u %u", handler->tslice[0].time, valuep[0]); // XXX
+
     uint8_t was_set = vec_test(handler->tslice[0].frag[tkip->frag_id]->is_set, tkip->offset);
     tsdb_value *oldvaluep = valueptr(handler, 0, tkip->frag_id, tkip->offset);
-
-    // XXX check tkip->timeranges
 
     for (int agglvl = 1; agglvl < handler->num_agglvls; agglvl++) {
 	if ((rc = instantiate_frag(handler, agglvl, tkip->frag_id)) != 0) {
@@ -643,9 +885,39 @@ int tsdb_set(tsdb_handler *handler, tsdb_key_info_t *tkip, const tsdb_value *val
 	uint8_t changed = 0;
 	uint8_t failed = 0;
 	tsdb_value *aggval = valueptr(handler, agglvl, tkip->frag_id, tkip->offset);
-	// n: number of steps contributing to aggregate (XXX temp hack)
-	int n = (handler->tslice[0].time - handler->tslice[agglvl].time) /
-	    handler->agg[0].period + !was_set;
+
+	uint32_t aggstart = handler->tslice[agglvl].time;
+	uint32_t aggend = aggstart + (handler->agg[agglvl].steps - 1) * handler->agg[0].period;
+
+	int n = 0; // number of steps contributing to aggregate
+	int active_included = 0;
+	timerange_t *tr = tkip->timeranges; // shorthand
+	int ntr = tkip->n_timeranges; // number of time ranges
+	for (int tri = ntr - 1;
+	    tri >= 0 && (tr[tri].end == 0 || tr[tri].end >= aggstart);
+	    tri--)
+	{
+	    if (tr[tri].start > aggend) // no overlap
+		continue; 
+	    // timerange overlaps aggregate; count overlapping steps
+	    uint32_t overlap_start = max(aggstart, tr[tri].start);
+	    uint32_t tr_end = tr[tri].end != 0 ?
+		tr[tri].end : handler->agg[0].last_flush;
+	    uint32_t overlap_end = min(aggend, tr_end);
+	    // Note:  Usually (overlap_end >= overlap_start), but in the first
+	    // tslice of agg period, (overlap_end == overlap_start - period),
+	    // so be careful with unsigned underflow.
+	    n += (overlap_end + handler->agg[0].period - overlap_start) / handler->agg[0].period;
+	    if (handler->tslice[0].time >= overlap_start &&
+		handler->tslice[0].time <= overlap_end)
+		    active_included = 1;
+	}
+	if (!active_included)
+	    n++;
+
+	traceEvent(TRACE_INFO, "agg %d: [%u..%u] aggval=%u n=%d",
+	    agglvl, aggstart, aggend, aggval[0], n); // XXX
+
 	switch (handler->agg[agglvl].func) {
 	case TSDB_AGG_MIN:
 	    for (int i = 0; i < handler->num_values_per_entry; i++) {
@@ -693,13 +965,22 @@ int tsdb_set(tsdb_handler *handler, tsdb_key_info_t *tkip, const tsdb_value *val
 		if (was_set && valuep[i] == oldvaluep[i]) {
 		    // value did not change; no need to change agg value
 		} else if (handler->tslice[0].time >= handler->agg[0].last_flush) {
-		    if (aggval[i] != valuep[i]) {
+		    // common case: value is latest ever seen
+		    aggval[i] = valuep[i];
+		    changed = 1;
+		} else {
+		    // find last timerange that overlaps this agg
+                    int tri = tkip->n_timeranges - 1;
+		    while (tri >= 0 && tkip->timeranges[tri].start > aggend)
+			tri--;
+		    uint32_t tr_end = tr[tri].end != 0 ?
+			tr[tri].end : handler->agg[0].last_flush;
+		    uint32_t overlap_end = min(aggend, tr_end);
+		    if (tri < 0 || handler->tslice[0].time >= overlap_end) {
+			// no timerange overlaps agg, or active time >= overlap_end
 			aggval[i] = valuep[i];
 			changed = 1;
 		    }
-		} else {
-		    // XXX TODO: Find the last SET value for this key.
-		    failed = 1;
 		}
 	    }
 	    break;
@@ -721,6 +1002,8 @@ int tsdb_set(tsdb_handler *handler, tsdb_key_info_t *tkip, const tsdb_value *val
 	}
 
 	if (changed) {
+	    // XXX if (n >= xff * steps)
+	    vec_set(handler->tslice[agglvl].frag[tkip->frag_id]->is_set, tkip->offset);
 	    handler->tslice[agglvl].frag_changed[tkip->frag_id] = 1;
 	    traceEvent(TRACE_INFO, "Succesfully set value "
 		"[agglvl=%d][frag_id=%u][offset=%" PRIu32 "][value_len=%u]",
@@ -734,7 +1017,8 @@ int tsdb_set(tsdb_handler *handler, tsdb_key_info_t *tkip, const tsdb_value *val
 	}
     }
 
-    // set value at agglvl 0
+    // Set value at agglvl 0 (after aggregations because aggregations need
+    // both old and new values)
     memcpy(oldvaluep, valuep, handler->entry_size);
     vec_set(handler->tslice[0].frag[tkip->frag_id]->is_set, tkip->offset);
     handler->tslice[0].frag_changed[tkip->frag_id] = 1;
@@ -763,20 +1047,31 @@ int tsdb_set_by_key(tsdb_handler *handler, const char *key,
 int tsdb_get(tsdb_handler *handler, tsdb_key_info_t *tkip,
     const tsdb_value **valuepp, int agglvl)
 {
+    int rc;
+    tsdb_tslice *tslice = &handler->tslice[agglvl];
+
     if (!handler->is_open) {
 	*valuepp = NULL;
 	return -1;
     }
 
-    if (instantiate_frag(handler, agglvl, tkip->frag_id) == 0) {
+    if ((rc = instantiate_frag(handler, agglvl, tkip->frag_id)) == 0) {
+	if (!vec_test(tslice->frag[tkip->frag_id]->is_set, tkip->offset)) {
+	    traceEvent(TRACE_WARNING, "Value unset (v): %u %d %s",
+		tslice->time, agglvl, tkip->key);
+	    *valuepp = NULL;
+	    return 1;
+	}
 	*valuepp = valueptr(handler, agglvl, tkip->frag_id, tkip->offset);
 	traceEvent(TRACE_INFO, "Succesfully read value [offset=%" PRIu32 "][value_len=%u]",
 	    tkip->offset, handler->entry_size);
 
     } else {
-	traceEvent(TRACE_ERROR, "Missing time");
+	if (rc == 1)
+	    traceEvent(TRACE_WARNING, "Value unset (f): %u %d %s",
+		tslice->time, agglvl, tkip->key);
 	*valuepp = NULL;
-	return -2;
+	return rc;
     }
 
     return 0;
