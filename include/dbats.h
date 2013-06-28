@@ -41,7 +41,7 @@
 #define INFOS_PER_BLOCK     10000 // number of key_info in a block
 #define MAX_NUM_INFOBLOCKS  16384 // max number of key_info blocks
 
-#define MAX_NUM_AGGLVLS        16 // max number of aggregation levels
+#define MAX_NUM_AGGS        16 // max number of aggregation levels
 
 // Flags
 #define TSDB_CREATE          0x01
@@ -96,7 +96,7 @@ typedef struct {
 typedef struct {
     uint8_t  is_open;
     uint8_t  readonly;                   // Mode used to open the db file
-    uint16_t num_agglvls;                // Number of aggregation levels
+    uint16_t num_aggs;                   // Number of aggregations
     uint16_t num_values_per_entry;       // Number of tsdb_values in an entry
     uint16_t entry_size;                 // Size of an entry (bytes)
     uint32_t lowest_free_index;          // Hint to speed finding a free index
@@ -107,10 +107,10 @@ typedef struct {
     DB *dbMeta;                           // config parameters
     DB *dbKeys;                           // metric key -> index
     DB *dbIndex;                          // index -> metric key
-    DB *dbData;                           // {time, agglvl, frag_id} -> data
+    DB *dbData;                           // {time, agg_id, frag_id} -> data
     DBC *keywalk;                         // cursor for iterating over keys
-    tsdb_tslice tslice[MAX_NUM_AGGLVLS];  // a tslice for each aggregation level
-    tsdb_agg agg[MAX_NUM_AGGLVLS];        // parameters for each aggregation level
+    tsdb_tslice tslice[MAX_NUM_AGGS];     // a tslice for each aggregation level
+    tsdb_agg agg[MAX_NUM_AGGS];           // parameters for each aggregation level
     tsdb_key_info_t *key_info_block[MAX_NUM_INFOBLOCKS];
 } tsdb_handler;
 
@@ -139,9 +139,9 @@ extern int tsdb_set_by_key (tsdb_handler *handler, const char *key,
     const tsdb_value *valuep);
 
 extern int tsdb_get(tsdb_handler *handler, tsdb_key_info_t *tkip,
-    const tsdb_value **valuepp, int agglvl);
+    const tsdb_value **valuepp, int agg_id);
 extern int tsdb_get_by_key(tsdb_handler *handler, const char *key,
-    const tsdb_value **valuepp, int agglvl);
+    const tsdb_value **valuepp, int agg_id);
 
 extern int tsdb_keywalk_start(tsdb_handler *handler);
 extern int tsdb_keywalk_next(tsdb_handler *handler, tsdb_key_info_t **tkipp);

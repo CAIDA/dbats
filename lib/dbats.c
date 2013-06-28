@@ -17,8 +17,8 @@
 #define vec_reset(vec, i)  (vec[(i)/8] &= ~(1<<((i)%8)))  // clear the ith bit
 #define vec_test(vec, i)   (vec[(i)/8] & (1<<((i)%8)))    // test the ith bit
 
-#define valueptr(handler, agglvl, frag_id, offset) \
-    ((tsdb_value*)(&handler->tslice[agglvl].frag[frag_id]->data[offset * handler->entry_size]))
+#define valueptr(handler, agg_id, frag_id, offset) \
+    ((tsdb_value*)(&handler->tslice[agg_id].frag[frag_id]->data[offset * handler->entry_size]))
 
 struct tsdb_frag {
     uint8_t is_set[vec_size(ENTRIES_PER_FRAG)]; // which indexes have values
@@ -27,7 +27,7 @@ struct tsdb_frag {
 
 typedef struct {
     uint32_t time;
-    int agglvl;
+    int agg_id;
     uint32_t frag_id;
 } fragkey_t;
 
@@ -250,11 +250,11 @@ int tsdb_open(tsdb_handler *handler, const char *path,
     initcfg(handler, uint32_t, lowest_free_index,      0);
     initcfg(handler, uint32_t, period,                 period);
     initcfg(handler, uint16_t, num_values_per_entry,   num_values_per_entry);
-    initcfg(handler, uint16_t, num_agglvls,            1);
+    initcfg(handler, uint16_t, num_aggs,            1);
 
-    if (handler->num_agglvls > MAX_NUM_AGGLVLS) {
-	traceEvent(TRACE_ERROR, "num_agglvls %d > %d", handler->num_agglvls,
-	    MAX_NUM_AGGLVLS);
+    if (handler->num_aggs > MAX_NUM_AGGS) {
+	traceEvent(TRACE_ERROR, "num_aggs %d > %d", handler->num_aggs,
+	    MAX_NUM_AGGS);
 	handler->readonly = 1;
 	return -1;
     }
@@ -269,13 +269,13 @@ int tsdb_open(tsdb_handler *handler, const char *path,
     handler->agg[0].period = handler->period;
 
     // load metadata for aggregates
-    if (handler->num_agglvls > 1) {
+    if (handler->num_aggs > 1) {
 	void *value;
 	uint32_t value_len;
 	if (raw_db_get(handler, handler->dbMeta, "agg", strlen("agg"), &value, &value_len) == 0) {
-	    if (value_len != handler->num_agglvls * sizeof(tsdb_agg)) {
+	    if (value_len != handler->num_aggs * sizeof(tsdb_agg)) {
 		traceEvent(TRACE_ERROR, "corrupt aggregation config %d != %d",
-		    value_len, handler->num_agglvls * sizeof(tsdb_agg));
+		    value_len, handler->num_aggs * sizeof(tsdb_agg));
 		handler->readonly = 1;
 		return -1;
 	    }
@@ -344,20 +344,20 @@ int tsdb_aggregate(tsdb_handler *handler, int func, int steps)
 	return -1;
     }
 
-    if (handler->num_agglvls >= MAX_NUM_AGGLVLS) {
-	traceEvent(TRACE_ERROR, "Too many aggregations (%d)", MAX_NUM_AGGLVLS);
+    if (handler->num_aggs >= MAX_NUM_AGGS) {
+	traceEvent(TRACE_ERROR, "Too many aggregations (%d)", MAX_NUM_AGGS);
 	return -1;
     }
 
-    int agglvl = handler->num_agglvls++;
-    handler->agg[agglvl].func = func;
-    handler->agg[agglvl].steps = steps;
-    handler->agg[agglvl].period = handler->agg[0].period * steps;
+    int agg_id = handler->num_aggs++;
+    handler->agg[agg_id].func = func;
+    handler->agg[agg_id].steps = steps;
+    handler->agg[agg_id].period = handler->agg[0].period * steps;
 
     raw_db_set(handler, handler->dbMeta, "agg", strlen("agg"),
-	handler->agg, sizeof(tsdb_agg) * handler->num_agglvls);
-    raw_db_set(handler, handler->dbMeta, "num_agglvls", strlen("num_agglvls"),
-	&handler->num_agglvls, sizeof(handler->num_agglvls));
+	handler->agg, sizeof(tsdb_agg) * handler->num_aggs);
+    raw_db_set(handler, handler->dbMeta, "num_aggs", strlen("num_aggs"),
+	&handler->num_aggs, sizeof(handler->num_aggs));
 
     return(0);
 }
@@ -366,9 +366,9 @@ int tsdb_aggregate(tsdb_handler *handler, int func, int steps)
 
 // Writes tslice to db (unless db is readonly).
 // Also cleans up in-memory tslice, even if db is readonly.
-static void tsdb_flush_tslice(tsdb_handler *handler, int agglvl)
+static void tsdb_flush_tslice(tsdb_handler *handler, int agg_id)
 {
-    traceEvent(TRACE_INFO, "Flush %u agglvl=%d", handler->tslice[agglvl].time, agglvl);
+    traceEvent(TRACE_INFO, "Flush %u agg_id=%d", handler->tslice[agg_id].time, agg_id);
     uint32_t frag_size = fragsize(handler);
     fragkey_t dbkey;
     uint32_t buf_len = frag_size + QLZ_OVERHEAD;
@@ -376,17 +376,17 @@ static void tsdb_flush_tslice(tsdb_handler *handler, int agglvl)
 
 
     // Write fragments to the DB
-    dbkey.time = handler->tslice[agglvl].time;
-    dbkey.agglvl = agglvl;
-    for (int f = 0; f < handler->tslice[agglvl].num_frags; f++) {
-	if (!handler->tslice[agglvl].frag[f]) continue;
+    dbkey.time = handler->tslice[agg_id].time;
+    dbkey.agg_id = agg_id;
+    for (int f = 0; f < handler->tslice[agg_id].num_frags; f++) {
+	if (!handler->tslice[agg_id].frag[f]) continue;
 	if (handler->readonly) {
 	    // do nothing
-	} else if (handler->tslice[agglvl].frag_changed[f]) {
+	} else if (handler->tslice[agg_id].frag_changed[f]) {
 	    if (!buf)
 		buf = (char*)emalloc(buf_len, "compression buffer");
 	    if (!buf) return;
-	    size_t compressed_len = qlz_compress(handler->tslice[agglvl].frag[f],
+	    size_t compressed_len = qlz_compress(handler->tslice[agg_id].frag[f],
 		buf, frag_size, &handler->state_compress);
 	    traceEvent(TRACE_INFO, "Frag %d compression: %u -> %u (%.1f %%)",
 		f, frag_size, compressed_len, compressed_len*100.0/frag_size);
@@ -396,19 +396,19 @@ static void tsdb_flush_tslice(tsdb_handler *handler, int agglvl)
 	    traceEvent(TRACE_INFO, "Skipping frag %d (unchanged)", f);
 	}
 
-	handler->tslice[agglvl].frag_changed[f] = 0;
-	free(handler->tslice[agglvl].frag[f]);
-	handler->tslice[agglvl].frag[f] = 0;
+	handler->tslice[agg_id].frag_changed[f] = 0;
+	free(handler->tslice[agg_id].frag[f]);
+	handler->tslice[agg_id].frag[f] = 0;
     }
 
     if (!handler->readonly) {
-	if (handler->agg[agglvl].last_flush < handler->tslice[agglvl].time)
-	    handler->agg[agglvl].last_flush = handler->tslice[agglvl].time;
+	if (handler->agg[agg_id].last_flush < handler->tslice[agg_id].time)
+	    handler->agg[agg_id].last_flush = handler->tslice[agg_id].time;
 	raw_db_set(handler, handler->dbMeta, "agg", strlen("agg"),
-	    handler->agg, sizeof(tsdb_agg) * handler->num_agglvls);
+	    handler->agg, sizeof(tsdb_agg) * handler->num_aggs);
     }
 
-    memset(&handler->tslice[agglvl], 0, sizeof(tsdb_tslice));
+    memset(&handler->tslice[agg_id], 0, sizeof(tsdb_tslice));
     free(buf);
 }
 
@@ -674,8 +674,8 @@ void tsdb_close(tsdb_handler *handler)
 	traceEvent(TRACE_INFO, "Flushing database changes...");
 
     update_key_info(handler, 0);
-    for (int agglvl = 0; agglvl < handler->num_agglvls; agglvl++) {
-	tsdb_flush_tslice(handler, agglvl);
+    for (int agg_id = 0; agg_id < handler->num_aggs; agg_id++) {
+	tsdb_flush_tslice(handler, agg_id);
     }
 
     //handler->dbMeta->close(handler->dbMeta, 0);
@@ -689,15 +689,15 @@ void tsdb_close(tsdb_handler *handler)
 
 static const time_t time_base = 259200; // 00:00 on first sunday of 1970, UTC
 
-uint32_t normalize_time(const tsdb_handler *handler, int agglvl, uint32_t *t)
+uint32_t normalize_time(const tsdb_handler *handler, int agg_id, uint32_t *t)
 {
-    *t -= (*t - time_base) % handler->agg[agglvl].period;
+    *t -= (*t - time_base) % handler->agg[agg_id].period;
     return *t;
 }
 
 /*************************************************************************/
 
-static int load_frag(tsdb_handler *handler, uint32_t t, int agglvl,
+static int load_frag(tsdb_handler *handler, uint32_t t, int agg_id,
     uint32_t frag_id)
 {
     // load fragment
@@ -705,12 +705,12 @@ static int load_frag(tsdb_handler *handler, uint32_t t, int agglvl,
     void *value;
     uint32_t value_len;
     dbkey.time = t;
-    dbkey.agglvl = agglvl;
+    dbkey.agg_id = agg_id;
     dbkey.frag_id = frag_id;
     int rc = raw_db_get(handler, handler->dbData, &dbkey, sizeof(dbkey),
 	&value, &value_len);
-    traceEvent(TRACE_INFO, "load_frag t=%u, agglvl=%u, frag_id=%u: "
-	"raw_db_get = %d", t, agglvl, frag_id, rc);
+    traceEvent(TRACE_INFO, "load_frag t=%u, agg_id=%u, frag_id=%u: "
+	"raw_db_get = %d", t, agg_id, frag_id, rc);
     if (rc != 0)
 	return 0; // no match
 
@@ -720,17 +720,17 @@ static int load_frag(tsdb_handler *handler, uint32_t t, int agglvl,
     void *ptr = malloc(len);
     if (!ptr) {
 	traceEvent(TRACE_ERROR, "Can't allocate %u bytes for frag "
-	    "t=%u, agglvl=%u, frag_id=%u", len, t, agglvl, frag_id);
+	    "t=%u, agg_id=%u, frag_id=%u", len, t, agg_id, frag_id);
 	return -2; // error
     }
     len = qlz_decompress(value, ptr, &handler->state_decompress);
-    traceEvent(TRACE_INFO, "decompressed frag t=%u, agglvl=%u, frag_id=%u: "
+    traceEvent(TRACE_INFO, "decompressed frag t=%u, agg_id=%u, frag_id=%u: "
 	"%u -> %u (%.1f%%)",
-	t, agglvl, frag_id, value_len, len, len*100.0/value_len);
+	t, agg_id, frag_id, value_len, len, len*100.0/value_len);
 
-    handler->tslice[agglvl].frag[frag_id] = ptr;
+    handler->tslice[agg_id].frag[frag_id] = ptr;
 
-    tsdb_tslice *tslice = &handler->tslice[agglvl];
+    tsdb_tslice *tslice = &handler->tslice[agg_id];
     if (tslice->num_frags <= frag_id)
 	tslice->num_frags = frag_id + 1;
 
@@ -743,24 +743,24 @@ int tsdb_goto_time(tsdb_handler *handler, uint32_t time_value, uint32_t flags)
 
     traceEvent(TRACE_INFO, "goto_time %u", time_value);
 
-    for (int agglvl = 0; agglvl < handler->num_agglvls; agglvl++) {
-	tsdb_tslice *tslice = &handler->tslice[agglvl];
+    for (int agg_id = 0; agg_id < handler->num_aggs; agg_id++) {
+	tsdb_tslice *tslice = &handler->tslice[agg_id];
 	uint32_t t = time_value;
 
-	normalize_time(handler, agglvl, &t);
+	normalize_time(handler, agg_id, &t);
 	if (tslice->time == t) {
-	    traceEvent(TRACE_INFO, "goto_time %u, agglvl=%d: already loaded", t, agglvl);
+	    traceEvent(TRACE_INFO, "goto_time %u, agg_id=%d: already loaded", t, agg_id);
 	    continue;
 	}
 
-	if (agglvl == 0) {
+	if (agg_id == 0) {
 	    int next_is_far = t > tslice->time + handler->agg[0].period;
 	    if (update_key_info(handler, next_is_far) != 0)
 		return -1;
 	}
 
 	// Flush tslice if loaded
-	tsdb_flush_tslice(handler, agglvl);
+	tsdb_flush_tslice(handler, agg_id);
 
 	tslice->load_on_demand = !!(flags & TSDB_LOAD_ON_DEMAND);
 	tslice->time = t;
@@ -772,13 +772,13 @@ int tsdb_goto_time(tsdb_handler *handler, uint32_t time_value, uint32_t flags)
 	tslice->num_frags = (handler->lowest_free_index + ENTRIES_PER_FRAG - 1) /
 	    ENTRIES_PER_FRAG;
 	for (uint32_t frag_id = 0; frag_id < tslice->num_frags; frag_id++) {
-	    if ((rc = load_frag(handler, t, agglvl, frag_id)) != 0)
+	    if ((rc = load_frag(handler, t, agg_id, frag_id)) != 0)
 		return rc;
 	    if (tslice->frag[frag_id])
 		loaded++;
 	}
-	traceEvent(TRACE_INFO, "goto_time %u: agglvl=%d, loaded %u/%u fragments",
-	    time_value, agglvl, loaded, tslice->num_frags);
+	traceEvent(TRACE_INFO, "goto_time %u: agg_id=%d, loaded %u/%u fragments",
+	    time_value, agg_id, loaded, tslice->num_frags);
 
 	tslice->growable = !!(flags & TSDB_GROWABLE);
     }
@@ -834,9 +834,9 @@ int tsdb_get_key_info(tsdb_handler *handler, const char *key,
     return 0;
 }
 
-static int instantiate_frag(tsdb_handler *handler, int agglvl, uint32_t frag_id)
+static int instantiate_frag(tsdb_handler *handler, int agg_id, uint32_t frag_id)
 {
-    tsdb_tslice *tslice = &handler->tslice[agglvl];
+    tsdb_tslice *tslice = &handler->tslice[agg_id];
 
     if (frag_id > MAX_NUM_FRAGS) {
 	traceEvent(TRACE_ERROR, "Internal error: frag_id %u > %u",
@@ -850,7 +850,7 @@ static int instantiate_frag(tsdb_handler *handler, int agglvl, uint32_t frag_id)
     } else if (tslice->load_on_demand || handler->readonly) {
 	// We should load the fragment.
 	// TODO: optionally, unload other fragments?
-	int rc = load_frag(handler, tslice->time, agglvl, frag_id);
+	int rc = load_frag(handler, tslice->time, agg_id, frag_id);
 	if (rc != 0)
 	    return rc;
 	if (!tslice->frag[frag_id])
@@ -858,13 +858,13 @@ static int instantiate_frag(tsdb_handler *handler, int agglvl, uint32_t frag_id)
 
     } else if (tslice->growable) {
 	// We should allocate a new fragment.
-	traceEvent(TRACE_NORMAL, "grow tslice for time %u, agglvl %d, frag_id %u",
-	    tslice->time, agglvl, frag_id);
+	traceEvent(TRACE_NORMAL, "grow tslice for time %u, agg_id %d, frag_id %u",
+	    tslice->time, agg_id, frag_id);
 	tslice->frag[frag_id] = calloc(1, fragsize(handler));
 	if (!tslice->frag[frag_id]) {
 	    traceEvent(TRACE_WARNING, "Can't allocate %u bytes to grow tslice "
-		"for time %u, agglvl %d, frag_id %u",
-		fragsize(handler), tslice->time, agglvl, frag_id);
+		"for time %u, agg_id %d, frag_id %u",
+		fragsize(handler), tslice->time, agg_id, frag_id);
 	    return -2;
 	}
 	tslice->num_frags = frag_id + 1;
@@ -901,19 +901,19 @@ int tsdb_set(tsdb_handler *handler, tsdb_key_info_t *tkip, const tsdb_value *val
     uint8_t was_set = vec_test(handler->tslice[0].frag[tkip->frag_id]->is_set, tkip->offset);
     tsdb_value *oldvaluep = valueptr(handler, 0, tkip->frag_id, tkip->offset);
 
-    for (int agglvl = 1; agglvl < handler->num_agglvls; agglvl++) {
-	if ((rc = instantiate_frag(handler, agglvl, tkip->frag_id)) != 0) {
+    for (int agg_id = 1; agg_id < handler->num_aggs; agg_id++) {
+	if ((rc = instantiate_frag(handler, agg_id, tkip->frag_id)) != 0) {
 	    handler->readonly = 1;
 	    return rc;
 	}
 
-	// Aggregate *valuep into tslice[agglvl]
+	// Aggregate *valuep into tslice[agg_id]
 	uint8_t changed = 0;
 	uint8_t failed = 0;
-	tsdb_value *aggval = valueptr(handler, agglvl, tkip->frag_id, tkip->offset);
+	tsdb_value *aggval = valueptr(handler, agg_id, tkip->frag_id, tkip->offset);
 
-	uint32_t aggstart = handler->tslice[agglvl].time;
-	uint32_t aggend = aggstart + (handler->agg[agglvl].steps - 1) * handler->agg[0].period;
+	uint32_t aggstart = handler->tslice[agg_id].time;
+	uint32_t aggend = aggstart + (handler->agg[agg_id].steps - 1) * handler->agg[0].period;
 
 	int n = 0; // number of steps contributing to aggregate
 	int active_included = 0;
@@ -942,9 +942,9 @@ int tsdb_set(tsdb_handler *handler, tsdb_key_info_t *tkip, const tsdb_value *val
 	    n++;
 
 	traceEvent(TRACE_INFO, "agg %d: [%u..%u] aggval=%u n=%d",
-	    agglvl, aggstart, aggend, aggval[0], n); // XXX
+	    agg_id, aggstart, aggend, aggval[0], n); // XXX
 
-	switch (handler->agg[agglvl].func) {
+	switch (handler->agg[agg_id].func) {
 	case TSDB_AGG_MIN:
 	    for (int i = 0; i < handler->num_values_per_entry; i++) {
 		if (was_set && valuep[i] == oldvaluep[i]) {
@@ -1029,27 +1029,27 @@ int tsdb_set(tsdb_handler *handler, tsdb_key_info_t *tkip, const tsdb_value *val
 
 	if (changed) {
 	    // XXX if (n >= xff * steps)
-	    vec_set(handler->tslice[agglvl].frag[tkip->frag_id]->is_set, tkip->offset);
-	    handler->tslice[agglvl].frag_changed[tkip->frag_id] = 1;
+	    vec_set(handler->tslice[agg_id].frag[tkip->frag_id]->is_set, tkip->offset);
+	    handler->tslice[agg_id].frag_changed[tkip->frag_id] = 1;
 	    traceEvent(TRACE_INFO, "Succesfully set value "
-		"[agglvl=%d][frag_id=%u][offset=%" PRIu32 "][value_len=%u]",
-		agglvl, tkip->frag_id, tkip->offset, handler->entry_size);
+		"[agg_id=%d][frag_id=%u][offset=%" PRIu32 "][value_len=%u]",
+		agg_id, tkip->frag_id, tkip->offset, handler->entry_size);
 	} else if (failed) {
 	    traceEvent(TRACE_ERROR, "Failed to set value "
-		"[agglvl=%d][frag_id=%u][offset=%" PRIu32 "][value_len=%u]",
-		agglvl, tkip->frag_id, tkip->offset, handler->entry_size);
+		"[agg_id=%d][frag_id=%u][offset=%" PRIu32 "][value_len=%u]",
+		agg_id, tkip->frag_id, tkip->offset, handler->entry_size);
 	    handler->readonly = 1;
 	    return -1;
 	}
     }
 
-    // Set value at agglvl 0 (after aggregations because aggregations need
+    // Set value at agg_id 0 (after aggregations because aggregations need
     // both old and new values)
     memcpy(oldvaluep, valuep, handler->entry_size);
     vec_set(handler->tslice[0].frag[tkip->frag_id]->is_set, tkip->offset);
     handler->tslice[0].frag_changed[tkip->frag_id] = 1;
     traceEvent(TRACE_INFO, "Succesfully set value "
-	"[agglvl=%d][frag_id=%u][offset=%" PRIu32 "][value_len=%u]",
+	"[agg_id=%d][frag_id=%u][offset=%" PRIu32 "][value_len=%u]",
 	0, tkip->frag_id, tkip->offset, handler->entry_size);
 
     return 0;
@@ -1071,31 +1071,31 @@ int tsdb_set_by_key(tsdb_handler *handler, const char *key,
 /*************************************************************************/
 
 int tsdb_get(tsdb_handler *handler, tsdb_key_info_t *tkip,
-    const tsdb_value **valuepp, int agglvl)
+    const tsdb_value **valuepp, int agg_id)
 {
     int rc;
-    tsdb_tslice *tslice = &handler->tslice[agglvl];
+    tsdb_tslice *tslice = &handler->tslice[agg_id];
 
     if (!handler->is_open) {
 	*valuepp = NULL;
 	return -1;
     }
 
-    if ((rc = instantiate_frag(handler, agglvl, tkip->frag_id)) == 0) {
+    if ((rc = instantiate_frag(handler, agg_id, tkip->frag_id)) == 0) {
 	if (!vec_test(tslice->frag[tkip->frag_id]->is_set, tkip->offset)) {
 	    traceEvent(TRACE_WARNING, "Value unset (v): %u %d %s",
-		tslice->time, agglvl, tkip->key);
+		tslice->time, agg_id, tkip->key);
 	    *valuepp = NULL;
 	    return 1;
 	}
-	*valuepp = valueptr(handler, agglvl, tkip->frag_id, tkip->offset);
+	*valuepp = valueptr(handler, agg_id, tkip->frag_id, tkip->offset);
 	traceEvent(TRACE_INFO, "Succesfully read value [offset=%" PRIu32 "][value_len=%u]",
 	    tkip->offset, handler->entry_size);
 
     } else {
 	if (rc == 1)
 	    traceEvent(TRACE_WARNING, "Value unset (f): %u %d %s",
-		tslice->time, agglvl, tkip->key);
+		tslice->time, agg_id, tkip->key);
 	*valuepp = NULL;
 	return rc;
     }
@@ -1104,7 +1104,7 @@ int tsdb_get(tsdb_handler *handler, tsdb_key_info_t *tkip,
 }
 
 int tsdb_get_by_key(tsdb_handler *handler, const char *key,
-    const tsdb_value **valuepp, int agglvl)
+    const tsdb_value **valuepp, int agg_id)
 {
     int rc;
     tsdb_key_info_t *tkip;
@@ -1112,7 +1112,7 @@ int tsdb_get_by_key(tsdb_handler *handler, const char *key,
     if ((rc = tsdb_get_key_info(handler, key, &tkip, 0)) != 0) {
 	return rc;
     }
-    return tsdb_get(handler, tkip, valuepp, agglvl);
+    return tsdb_get(handler, tkip, valuepp, agg_id);
 }
 
 /*************************************************************************/
