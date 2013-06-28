@@ -47,6 +47,7 @@
 #define TSDB_CREATE          0x01
 #define TSDB_GROWABLE        0x02
 #define TSDB_LOAD_ON_DEMAND  0x04
+#define TSDB_READONLY        0x08
 
 typedef struct tsdb_frag tsdb_frag;
 
@@ -99,12 +100,12 @@ typedef struct {
     uint16_t num_values_per_entry;       // Number of tsdb_values in an entry
     uint16_t entry_size;                 // Size of an entry (bytes)
     uint32_t lowest_free_index;          // Hint to speed finding a free index
-    uint32_t rrd_slot_time_duration;     // length of raw time slice (sec)
+    uint32_t period;                     // length of raw time slice (sec)
     qlz_state_compress state_compress;
     qlz_state_decompress state_decompress;
     DB_ENV *dbenv;                        // DB environment
     DB *dbMeta;                           // config parameters
-    DB *dbKey;                            // metric key -> index
+    DB *dbKeys;                           // metric key -> index
     DB *dbIndex;                          // index -> metric key
     DB *dbData;                           // {time, agglvl, frag_id} -> data
     DBC *keywalk;                         // cursor for iterating over keys
@@ -115,10 +116,10 @@ typedef struct {
 
 /* ************************************************** */
 
-extern int tsdb_open(const char *tsdb_path, tsdb_handler *handler,
+extern int tsdb_open(tsdb_handler *handler, const char *tsdb_path,
     uint16_t num_values_per_entry,
-    uint32_t rrd_slot_time_duration,
-    uint8_t readonly);
+    uint32_t period,
+    uint32_t flags);
 
 extern int tsdb_aggregate(tsdb_handler *handler, int func, int steps);
 

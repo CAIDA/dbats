@@ -56,22 +56,27 @@ static void *emalloc(size_t size, const char *msg)
  * DB wrappers
  ************************************************************************/
 
-static int raw_db_open(tsdb_handler *handler, DB **dbp, const char *path,
-    const char *dbname, uint8_t readonly)
+static int raw_db_open(tsdb_handler *handler, DB **dbp, const char *envpath,
+    const char *dbname, uint32_t flags, int mode)
 {
     int ret;
+
     if ((ret = db_create(dbp, handler->dbenv, 0)) != 0) {
 	traceEvent(TRACE_ERROR, "Error creating DB handler %s: %s",
 	    dbname, db_strerror(ret));
 	return -1;
     }
 
-    int mode = (readonly ? 00444 : 00666);
-    if ((ret = (*dbp)->open(*dbp, NULL, path, dbname,
-	DB_BTREE, (readonly ? 0 : DB_CREATE), mode)) != 0)
-    {
-	traceEvent(TRACE_ERROR, "Error opening DB %s %s (mode=%o): %s",
-	    path, dbname, mode, db_strerror(ret));
+    uint32_t dbflags = 0;
+    if (flags & TSDB_CREATE)
+	dbflags |= DB_CREATE;
+    if (flags & TSDB_READONLY)
+	dbflags |= DB_RDONLY;
+
+    ret = (*dbp)->open(*dbp, NULL, dbname, NULL, DB_BTREE, dbflags, mode);
+    if (ret != 0) {
+	traceEvent(TRACE_ERROR, "Error opening DB %s/%s (mode=%o): %s",
+	    envpath, dbname, mode, db_strerror(ret));
 	return -1;
     }
     return 0;
@@ -188,16 +193,17 @@ static int alloc_key_info_block(tsdb_handler *handler, uint32_t block)
     return 0;
 }
 
-int tsdb_open(const char *path, tsdb_handler *handler,
+int tsdb_open(tsdb_handler *handler, const char *path,
     uint16_t num_values_per_entry,
-    uint32_t rrd_slot_time_duration,
-    uint8_t readonly)
+    uint32_t period,
+    uint32_t flags)
 {
     int ret;
-    const char *dbhome = "."; // XXX should be configurable
+    int dbmode = 00666;
+    uint32_t dbflags = DB_INIT_MPOOL;
 
     memset(handler, 0, sizeof(tsdb_handler));
-    handler->readonly = readonly;
+    handler->readonly = !!(flags & TSDB_READONLY);
     handler->num_values_per_entry = 1;
 
     if ((ret = db_env_create(&handler->dbenv, 0)) != 0) {
@@ -206,16 +212,24 @@ int tsdb_open(const char *path, tsdb_handler *handler,
 	return -1;
     }
 
-    int mode = (readonly ? 00444 : 00777);
-    if ((ret = handler->dbenv->open(handler->dbenv, dbhome, DB_CREATE | DB_INIT_MPOOL, mode)) != 0) {
-	traceEvent(TRACE_ERROR, "Error opening DB env: %s",
+    if (flags & TSDB_CREATE) {
+	if (mkdir(path, 0777) < 0 && errno != EEXIST) {
+	    traceEvent(TRACE_ERROR, "Error creating %s: %s",
+		path, strerror(errno));
+	    return -1;
+	}
+	dbflags |= DB_CREATE;
+    }
+
+    if ((ret = handler->dbenv->open(handler->dbenv, path, dbflags, dbmode)) != 0) {
+	traceEvent(TRACE_ERROR, "Error opening DB environment: %s",
 	    db_strerror(ret));
 	return -1;
     }
 
-    if (raw_db_open(handler, &handler->dbMeta,  path, "meta",  readonly) != 0) return -1;
-    if (raw_db_open(handler, &handler->dbKey,   path, "key",   readonly) != 0) return -1;
-    if (raw_db_open(handler, &handler->dbData,  path, "data",  readonly) != 0) return -1;
+    if (raw_db_open(handler, &handler->dbMeta, path, "meta", flags, dbmode) != 0) return -1;
+    if (raw_db_open(handler, &handler->dbKeys, path, "keys", flags, dbmode) != 0) return -1;
+    if (raw_db_open(handler, &handler->dbData, path, "data", flags, dbmode) != 0) return -1;
 
     handler->entry_size = sizeof(tsdb_value); // for db_get_buf_len
 
@@ -234,9 +248,16 @@ int tsdb_open(const char *path, tsdb_handler *handler,
     } while (0)
 
     initcfg(handler, uint32_t, lowest_free_index,      0);
-    initcfg(handler, uint32_t, rrd_slot_time_duration, rrd_slot_time_duration);
+    initcfg(handler, uint32_t, period,                 period);
     initcfg(handler, uint16_t, num_values_per_entry,   num_values_per_entry);
     initcfg(handler, uint16_t, num_agglvls,            1);
+
+    if (handler->num_agglvls > MAX_NUM_AGGLVLS) {
+	traceEvent(TRACE_ERROR, "num_agglvls %d > %d", handler->num_agglvls,
+	    MAX_NUM_AGGLVLS);
+	handler->readonly = 1;
+	return -1;
+    }
 
     handler->entry_size = handler->num_values_per_entry * sizeof(tsdb_value);
 
@@ -245,8 +266,9 @@ int tsdb_open(const char *path, tsdb_handler *handler,
 
     handler->agg[0].func = TSDB_AGG_NONE;
     handler->agg[0].steps = 1;
-    handler->agg[0].period = handler->rrd_slot_time_duration; // XXX
+    handler->agg[0].period = handler->period;
 
+    // load metadata for aggregates
     if (handler->num_agglvls > 1) {
 	void *value;
 	uint32_t value_len;
@@ -264,7 +286,7 @@ int tsdb_open(const char *path, tsdb_handler *handler,
     // load key_info for every key
     int rc;
     DBC *cursor;
-    if ((rc = handler->dbKey->cursor(handler->dbKey, NULL, &cursor, 0)) != 0) {
+    if ((rc = handler->dbKeys->cursor(handler->dbKeys, NULL, &cursor, 0)) != 0) {
 	traceEvent(TRACE_ERROR, "Error in keywalk_start: %s", db_strerror(rc));
 	return -1;
     }
@@ -315,11 +337,15 @@ int tsdb_open(const char *path, tsdb_handler *handler,
 
 int tsdb_aggregate(tsdb_handler *handler, int func, int steps)
 {
-    // XXX TODO: if new agg is not on an agg period boundary, disallow it or
-    // go back and calculate it from historic values
+    if (handler->tslice[0].time > 0) {
+	// XXX fix this?
+	traceEvent(TRACE_ERROR,
+	    "Adding a new aggregation to existing data is not yet supported.");
+	return -1;
+    }
 
     if (handler->num_agglvls >= MAX_NUM_AGGLVLS) {
-	traceEvent(TRACE_ERROR, "Too many aggregation levels");
+	traceEvent(TRACE_ERROR, "Too many aggregations (%d)", MAX_NUM_AGGLVLS);
 	return -1;
     }
 
@@ -396,7 +422,7 @@ static int set_key_info(const tsdb_handler *handler, tsdb_key_info_t *tkip)
     if (!rki) return -1;
     rki->index = tkip->index;
     memcpy(rki->timeranges, tkip->timeranges, tr_size);
-    raw_db_set(handler, handler->dbKey, tkip->key, strlen(tkip->key), rki, rki_size);
+    raw_db_set(handler, handler->dbKeys, tkip->key, strlen(tkip->key), rki, rki_size);
     traceEvent(TRACE_INFO, "Write key %s -> %u, %d timeranges",
 	tkip->key, tkip->index, tkip->n_timeranges);
     /*
@@ -653,7 +679,7 @@ void tsdb_close(tsdb_handler *handler)
     }
 
     //handler->dbMeta->close(handler->dbMeta, 0);
-    //handler->dbKey->close(handler->dbKey, 0);
+    //handler->dbKeys->close(handler->dbKeys, 0);
     //handler->dbData->close(handler->dbData, 0);
     handler->dbenv->close(handler->dbenv, 0);
     handler->is_open = 0;
@@ -768,7 +794,7 @@ int tsdb_get_key_info(tsdb_handler *handler, const char *key,
     uint32_t keylen = strlen(key);
     uint32_t len;
 
-    if (raw_db_get(handler, handler->dbKey, key, keylen, &ptr, &len) == 0) {
+    if (raw_db_get(handler, handler->dbKeys, key, keylen, &ptr, &len) == 0) {
 	uint32_t idx = ((raw_key_info_t*)ptr)->index;
 	uint32_t block = idx / INFOS_PER_BLOCK;
 	uint32_t offset = idx % INFOS_PER_BLOCK;
@@ -1095,7 +1121,7 @@ int tsdb_keywalk_start(tsdb_handler *handler)
 {
     int rc;
 
-    if ((rc = handler->dbKey->cursor(handler->dbKey, NULL, &handler->keywalk, 0)) != 0) {
+    if ((rc = handler->dbKeys->cursor(handler->dbKeys, NULL, &handler->keywalk, 0)) != 0) {
 	traceEvent(TRACE_ERROR, "Error in tsdb_keywalk_start: %s", db_strerror(rc));
 	return -1;
     }
@@ -1142,7 +1168,7 @@ void tsdb_stat_print(const tsdb_handler *handler) {
     
     if ((rc = handler->dbMeta->stat_print(handler->dbMeta, DB_FAST_STAT)) != 0)
 	traceEvent(TRACE_ERROR, "Error while dumping DB stats for Meta [%s]", db_strerror(rc));
-    if ((rc = handler->dbKey->stat_print(handler->dbKey, DB_FAST_STAT)) != 0)
+    if ((rc = handler->dbKeys->stat_print(handler->dbKeys, DB_FAST_STAT)) != 0)
 	traceEvent(TRACE_ERROR, "Error while dumping DB stats for Key [%s]", db_strerror(rc));
     if ((rc = handler->dbData->stat_print(handler->dbData, DB_FAST_STAT)) != 0)
 	traceEvent(TRACE_ERROR, "Error while dumping DB stats for Data [%s]", db_strerror(rc));
