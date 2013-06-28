@@ -439,6 +439,24 @@ static int set_key_info(const tsdb_handler *handler, tsdb_key_info_t *tkip)
     return 0;
 }
 
+// Insert a new timerange into tkip->timeranges at position i, and initialize it
+static timerange_t *timerange_insert(tsdb_key_info_t *tkip, int i,
+    uint32_t start, uint32_t end)
+{
+    int n = ++tkip->n_timeranges;
+    timerange_t *tr = tkip->timeranges;
+    timerange_t *newtr = emalloc(n * sizeof(timerange_t), "timeranges");
+    if (!newtr) return NULL;
+    if (tr) {
+	memcpy(&newtr[0], &tr[0], i * sizeof(timerange_t));
+	memcpy(&newtr[i+1], &tr[i], (n-1-i) * sizeof(timerange_t));
+	free(tr);
+    }
+    newtr[i].start = start;
+    newtr[i].end = end;
+    return tkip->timeranges = newtr;
+}
+
 // Update the timeranges associated with each key, according to the is_set
 // vector.
 static int update_key_info(tsdb_handler *handler, int next_is_far)
@@ -494,15 +512,8 @@ static int update_key_info(tsdb_handler *handler, int next_is_far)
 		    traceEvent(TRACE_INFO,
 			"             --> idx=%u, t=%u, [%u..%u] post-current",
 			idx, tslice->time, tr[i].start, tr[i].end); // XXX
-		    int n = ++tkip->n_timeranges;
-		    i++;
-		    timerange_t *newtr = emalloc(n * sizeof(timerange_t), "timeranges");
-		    if (!newtr) return -1;
-		    memcpy(&newtr[0], &tr[0], i * sizeof(timerange_t));
-		    free(tr);
-		    tr = tkip->timeranges = newtr;
-		    tr[i].start = tslice->time;
-		    tr[i].end = 0;
+		    if (!(tr = timerange_insert(tkip, ++i, tslice->time, 0)))
+			return -1;
 		    traceEvent(TRACE_INFO,
 			"             --> idx=%u, t=%u, [%u..%u] post-current",
 			idx, tslice->time, tr[i].start, tr[i].end); // XXX
@@ -557,21 +568,12 @@ static int update_key_info(tsdb_handler *handler, int next_is_far)
 			idx, tslice->time, tr[i].start, tr[i].end, i, tkip->n_timeranges); // XXX
 		} else {
 		    // no match found; create a new timerange
-		    int n = ++tkip->n_timeranges;
-		    i++;
-		    timerange_t *newtr = emalloc(n * sizeof(timerange_t), "timeranges");
-		    if (!newtr) return -1;
-		    if (n > 1) {
-			memcpy(&newtr[0], &tr[0], i * sizeof(timerange_t));
-			memcpy(&newtr[i+1], &tr[i], (n-i-1) * sizeof(timerange_t));
-			free(tr);
-		    }
-		    tr = tkip->timeranges = newtr;
-		    tr[i].start = tslice->time;
-		    tr[i].end = (!is_last || next_is_far) ? tslice->time : 0;
+		    if (!(tr = timerange_insert(tkip, ++i, tslice->time,
+			(!is_last || next_is_far) ? tslice->time : 0)))
+			    return -1;
 		    traceEvent(TRACE_INFO,
 			"update_key_info: idx=%u, t=%u, [%u..%u] create %d/%d",
-			idx, tslice->time, tr[i].start, tr[i].end, i, n); // XXX
+			idx, tslice->time, tr[i].start, tr[i].end, i, tkip->n_timeranges); // XXX
 		}
 	    }
 
@@ -628,24 +630,16 @@ static int update_key_info(tsdb_handler *handler, int next_is_far)
 		    traceEvent(TRACE_INFO,
 			"update_key_info: idx=%u, t=%u, [%u..%u] unset historic split",
 			idx, tslice->time, tr[i].start, tr[i].end); // XXX
-		    int n = ++tkip->n_timeranges;
-		    // Push every item after i forward one slot, and put a
-		    // copy of item i in slot i+1.
-		    timerange_t *newtr = emalloc(n * sizeof(timerange_t), "timeranges");
-		    if (!newtr) return -1;
-		    memcpy(&newtr[0], &tr[0], (i+1) * sizeof(timerange_t));
-		    memcpy(&newtr[i+1], &tr[i], (n-i-1) * sizeof(timerange_t));
-		    free(tr);
-		    tr = tkip->timeranges = newtr;
-                    // update items i and i+1
-		    tr[i].end = tslice->time - agg0->period;
+		    if (!(tr = timerange_insert(tkip, i,
+			tr[i].start, tslice->time - agg0->period)))
+			    return -1;
 		    tr[i+1].start = tslice->time + agg0->period;
 		    traceEvent(TRACE_INFO,
 			"             --> idx=%u, t=%u, [%u..%u] unset historic split %d/%d",
-			idx, tslice->time, tr[i].start, tr[i].end, i, n); // XXX
+			idx, tslice->time, tr[i].start, tr[i].end, i, tkip->n_timeranges); // XXX
 		    traceEvent(TRACE_INFO,
 			"             --> idx=%u, t=%u, [%u..%u] unset historic split %d/%d",
-			idx, tslice->time, tr[i+1].start, tr[i+1].end, i+1, n); // XXX
+			idx, tslice->time, tr[i+1].start, tr[i+1].end, i+1, tkip->n_timeranges); // XXX
 		}
 	    }
 	}
@@ -994,13 +988,19 @@ int tsdb_set(tsdb_handler *handler, tsdb_key_info_t *tkip, const tsdb_value *val
                     int tri = tkip->n_timeranges - 1;
 		    while (tri >= 0 && tkip->timeranges[tri].start > aggend)
 			tri--;
-		    uint32_t tr_end = tr[tri].end != 0 ?
-			tr[tri].end : handler->agg[0].last_flush;
-		    uint32_t overlap_end = min(aggend, tr_end);
-		    if (tri < 0 || handler->tslice[0].time >= overlap_end) {
-			// no timerange overlaps agg, or active time >= overlap_end
+		    if (tri < 0) {
+			// no timerange overlaps agg
 			aggval[i] = valuep[i];
 			changed = 1;
+		    } else {
+			uint32_t tr_end = tr[tri].end != 0 ?
+			    tr[tri].end : handler->agg[0].last_flush;
+			uint32_t overlap_end = min(aggend, tr_end);
+			if (handler->tslice[0].time >= overlap_end) {
+			    // no timerange overlaps agg, or active time >= overlap_end
+			    aggval[i] = valuep[i];
+			    changed = 1;
+			}
 		    }
 		}
 	    }
