@@ -41,13 +41,12 @@
 #define INFOS_PER_BLOCK     10000 // number of key_info in a block
 #define MAX_NUM_INFOBLOCKS  16384 // max number of key_info blocks
 
-#define MAX_NUM_AGGS        16 // max number of aggregation levels
+#define MAX_NUM_AGGS           16 // max number of aggregation levels
 
 // Flags
-#define TSDB_CREATE          0x01
-#define TSDB_GROWABLE        0x02
-#define TSDB_LOAD_ON_DEMAND  0x04
-#define TSDB_READONLY        0x08
+#define TSDB_CREATE          0x01 // create database if it doesn't exist
+#define TSDB_LOAD_ON_DEMAND  0x04 // don't load fragment until necessary
+#define TSDB_READONLY        0x08 // don't allow writing
 
 typedef struct tsdb_frag tsdb_frag;
 
@@ -56,7 +55,6 @@ typedef struct tsdb_frag tsdb_frag;
 typedef struct {
     uint32_t time;                        // start time (unix seconds)
     uint32_t num_frags;                   // number of fragments
-    uint8_t growable;                     // new fragments can be appended
     uint8_t load_on_demand;               // don't load fragment until needed
     tsdb_frag *frag[MAX_NUM_FRAGS];
     uint8_t frag_changed[MAX_NUM_FRAGS];

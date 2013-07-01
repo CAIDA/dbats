@@ -368,7 +368,7 @@ int tsdb_aggregate(tsdb_handler *handler, int func, int steps)
 // Also cleans up in-memory tslice, even if db is readonly.
 static void tsdb_flush_tslice(tsdb_handler *handler, int agg_id)
 {
-    traceEvent(TRACE_INFO, "Flush %u agg_id=%d", handler->tslice[agg_id].time, agg_id);
+    traceEvent(TRACE_INFO, "Flush t=%u agg_id=%d", handler->tslice[agg_id].time, agg_id);
     uint32_t frag_size = fragsize(handler);
     fragkey_t dbkey;
     uint32_t buf_len = frag_size + QLZ_OVERHEAD;
@@ -768,8 +768,6 @@ int tsdb_goto_time(tsdb_handler *handler, uint32_t time_value, uint32_t flags)
 	}
 	traceEvent(TRACE_INFO, "goto_time %u: agg_id=%d, loaded %u/%u fragments",
 	    time_value, agg_id, loaded, tslice->num_frags);
-
-	tslice->growable = !!(flags & TSDB_GROWABLE);
     }
     return 0;
 }
@@ -835,35 +833,35 @@ static int instantiate_frag(tsdb_handler *handler, int agg_id, uint32_t frag_id)
 
     if (tslice->frag[frag_id]) {
 	// We already have the right fragment.  Do nothing.
+	return 0;
+    }
 
-    } else if (tslice->load_on_demand || handler->readonly) {
-	// We should load the fragment.
+    if (tslice->load_on_demand || handler->readonly) {
+	// Try to load the fragment.
 	// TODO: optionally, unload other fragments?
 	int rc = load_frag(handler, tslice->time, agg_id, frag_id);
-	if (rc != 0)
+	if (rc != 0) // error
 	    return rc;
-	if (!tslice->frag[frag_id])
+	if (tslice->frag[frag_id]) // found it
+	    return 0;
+	if (handler->readonly) // didn't find it and can't create it
 	    return 1; // fragment not found
-
-    } else if (tslice->growable) {
-	// We should allocate a new fragment.
-	traceEvent(TRACE_NORMAL, "grow tslice for time %u, agg_id %d, frag_id %u",
-	    tslice->time, agg_id, frag_id);
-	tslice->frag[frag_id] = calloc(1, fragsize(handler));
-	if (!tslice->frag[frag_id]) {
-	    traceEvent(TRACE_WARNING, "Can't allocate %u bytes to grow tslice "
-		"for time %u, agg_id %d, frag_id %u",
-		fragsize(handler), tslice->time, agg_id, frag_id);
-	    return -2;
-	}
-	tslice->num_frags = frag_id + 1;
-	traceEvent(TRACE_INFO, "Grew tslice to %u elements",
-	    tslice->num_frags * ENTRIES_PER_FRAG);
-
-    } else {
-	traceEvent(TRACE_ERROR, "Bad frag_id %u", frag_id);
-	return -1;
     }
+
+    // Allocate a new fragment.
+    traceEvent(TRACE_NORMAL, "grow tslice for time %u, agg_id %d, frag_id %u",
+	tslice->time, agg_id, frag_id);
+    tslice->frag[frag_id] = calloc(1, fragsize(handler));
+    if (!tslice->frag[frag_id]) {
+	traceEvent(TRACE_WARNING, "Can't allocate %u bytes to grow tslice "
+	    "for time %u, agg_id %d, frag_id %u",
+	    fragsize(handler), tslice->time, agg_id, frag_id);
+	return -2;
+    }
+    if (tslice->num_frags <= frag_id)
+	tslice->num_frags = frag_id + 1;
+    traceEvent(TRACE_INFO, "Grew tslice to %u elements",
+	tslice->num_frags * ENTRIES_PER_FRAG);
 
     return 0;
 }
