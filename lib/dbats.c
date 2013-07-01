@@ -112,13 +112,13 @@ static void raw_db_set(const tsdb_handler *handler, DB *db,
 
 #define QLZ_OVERHEAD 400
 
+static uint8_t *db_get_buf = 0;
+static uint16_t db_get_buf_len = 0;
+
 static int raw_db_get(const tsdb_handler *handler, DB* db,
     const void *key, uint32_t key_len, void **value, uint32_t *value_len)
 {
     DBT key_data, data;
-
-    static uint8_t *db_get_buf = 0;
-    static uint16_t db_get_buf_len = 0;
 
     if (db_get_buf_len < ENTRIES_PER_FRAG * handler->entry_size + QLZ_OVERHEAD) {
 	db_get_buf_len = ENTRIES_PER_FRAG * handler->entry_size + QLZ_OVERHEAD;
@@ -409,7 +409,7 @@ static void tsdb_flush_tslice(tsdb_handler *handler, int agg_id)
     }
 
     memset(&handler->tslice[agg_id], 0, sizeof(tsdb_tslice));
-    free(buf);
+    if (buf) free(buf);
 }
 
 /*************************************************************************/
@@ -423,6 +423,7 @@ static int set_key_info(const tsdb_handler *handler, tsdb_key_info_t *tkip)
     rki->index = tkip->index;
     memcpy(rki->timeranges, tkip->timeranges, tr_size);
     raw_db_set(handler, handler->dbKeys, tkip->key, strlen(tkip->key), rki, rki_size);
+    free(rki);
     traceEvent(TRACE_INFO, "Write key %s -> %u, %d timeranges",
 	tkip->key, tkip->index, tkip->n_timeranges);
     /*
@@ -658,6 +659,7 @@ void tsdb_close(tsdb_handler *handler)
     if (!handler->is_open) {
 	return;
     }
+    handler->is_open = 0;
 
     if (!handler->readonly)
 	traceEvent(TRACE_INFO, "Flushing database changes...");
@@ -667,11 +669,27 @@ void tsdb_close(tsdb_handler *handler)
 	tsdb_flush_tslice(handler, agg_id);
     }
 
+    for (uint32_t idx = 0; idx < handler->lowest_free_index; idx++) {
+	uint32_t block = idx / INFOS_PER_BLOCK;
+	uint32_t offset = idx % INFOS_PER_BLOCK;
+	tsdb_key_info_t *tkip = &handler->key_info_block[block][offset];
+	free(tkip->key);
+	tkip->key = NULL;
+	free(tkip->timeranges);
+	tkip->timeranges = NULL;
+    }
+    for (uint32_t block = 0; block < (handler->lowest_free_index + INFOS_PER_BLOCK - 1) / INFOS_PER_BLOCK; block++) {
+	free(handler->key_info_block[block]);
+	handler->key_info_block[block] = NULL;
+    }
+    free(db_get_buf);
+    db_get_buf = NULL;
+    db_get_buf_len = 0;
+
     //handler->dbMeta->close(handler->dbMeta, 0);
     //handler->dbKeys->close(handler->dbKeys, 0);
     //handler->dbData->close(handler->dbData, 0);
     handler->dbenv->close(handler->dbenv, 0);
-    handler->is_open = 0;
 }
 
 /*************************************************************************/
