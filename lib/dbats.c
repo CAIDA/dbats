@@ -44,6 +44,7 @@ typedef struct {
  * utilities
  ************************************************************************/
 
+#if 1
 static void *emalloc(size_t size, const char *msg)
 {
     void *ptr = malloc(size);
@@ -51,6 +52,9 @@ static void *emalloc(size_t size, const char *msg)
 	traceEvent(TRACE_ERROR, "Can't allocate %u bytes for %s", size, msg);
     return ptr;
 }
+#else
+# define emalloc(size, msg) xmalloc(size)
+#endif
 
 /************************************************************************
  * DB wrappers
@@ -657,7 +661,7 @@ void tsdb_close(tsdb_handler *handler)
 	uint32_t block = idx / INFOS_PER_BLOCK;
 	uint32_t offset = idx % INFOS_PER_BLOCK;
 	tsdb_key_info_t *tkip = &handler->key_info_block[block][offset];
-	free(tkip->key);
+	free((void*)tkip->key);
 	tkip->key = NULL;
 	free(tkip->timeranges);
 	tkip->timeranges = NULL;
