@@ -458,8 +458,7 @@ static timerange_t *timerange_insert(tsdb_key_info_t *tkip, int i,
     return tkip->timeranges = newtr;
 }
 
-// Update the timeranges associated with each key, according to the is_set
-// vector.
+// Update the timeranges associated with each key.
 static int update_key_info(tsdb_handler *handler, int next_is_far)
 {
     tsdb_agg *agg0 = &handler->agg[0];
@@ -470,54 +469,68 @@ static int update_key_info(tsdb_handler *handler, int next_is_far)
 	"update_key_info: t=%u, last_flush=%u, is_last=%d, next_is_far=%d",
 	tslice->time, agg0->last_flush, is_last, next_is_far); // XXX
 
+#define debugUKI(first, label, i) \
+    traceEvent(TRACE_INFO, \
+	"%s idx=%u, t=%u, [%u..%u] %s %d/%d", \
+	(first ? "update_key_info:" : "             -->"), \
+	idx, tslice->time, tr[i].start, tr[i].end, label, i, tkip->n_timeranges)
+
     for (uint32_t idx = 0; idx < handler->lowest_free_index; idx++) {
 	uint32_t block = idx / INFOS_PER_BLOCK;
 	uint32_t offset = idx % INFOS_PER_BLOCK;
 	tsdb_key_info_t *tkip = &handler->key_info_block[block][offset];
 	timerange_t *tr = tkip->timeranges; // shorthand
-	int value_is_set = tslice->frag[tkip->frag_id] &&
-	    vec_test(tslice->frag[tkip->frag_id]->is_set, tkip->offset);
 
 	int i = tkip->n_timeranges - 1;
-	int changed = 0;
+	int tr_changed = 0; // timerange changed?
+
+	// Should timerange change due to next_is_far?
 
 	if (next_is_far && i >= 0 && tr[i].end == 0) {
-	    // next time > active time + 1 step (uncommon)
-	    traceEvent(TRACE_INFO,
-		"update_key_info: idx=%u, t=%u, [%u..%u] terminate",
-		idx, tslice->time, tr[i].start, tr[i].end); // XXX
+	    // next time > active time + 1 step (uncommon).
+	    // Terminate the current (unterminated) timerange.
+	    tr_changed++;
+	    debugUKI(1, "next_is_far", i); // XXX
 	    tr[i].end = agg0->last_flush;
-	    changed = 1;
-	    traceEvent(TRACE_INFO,
-		"             --> idx=%u, t=%u, [%u..%u] terminate",
-		idx, tslice->time, tr[i].start, tr[i].end); // XXX
+	    debugUKI(0, "next_is_far", i); // XXX
 	}
 
-	if (value_is_set) {
+	// Should timerange change because value's set/unset state changed?
+
+	if (!tslice->frag[tkip->frag_id]) {
+	    // Fragment wasn't loaded, so value's state could not have changed.
+	    if (tslice->time > agg0->last_flush) {
+		// This is the first visit to the current timeslice, so the
+		// value in this timeslice could never have been set before.
+		if (i >= 0 && tr[i].end == 0) {
+		    // Key has a current timerange; we must terminate it.
+		    tr_changed++;
+		    debugUKI(1, "terminate", i);
+		    tr[i].end = agg0->last_flush;
+		    debugUKI(0, "terminate", i);
+		}
+	    }
+
+	} else if (vec_test(tslice->frag[tkip->frag_id]->is_set, tkip->offset)) {
+	    // Value is set.
 	    if (i >= 0 && tr[i].end == 0 && tslice->time >= tr[i].start) {
 		// active time is within or after current range
-		if (tslice->time <= agg0->last_flush + agg0->period)
-		{
+		if (tslice->time <= agg0->last_flush + agg0->period) {
 		    // Common case: active time is within current (unterminated)
 		    // range and is no more than 1 step past the last flush.
-		    // assert(!changed);
-		    continue; // no change, no write
+		    // No change to timerange.
 
 		} else {
-		    // active time is after current range, ie more than 1 step
-		    // past last flush
-		    traceEvent(TRACE_INFO,
-			"update_key_info: idx=%u, t=%u, [%u..%u] post-current",
-			idx, tslice->time, tr[i].start, tr[i].end); // XXX
+		    // Active time is more than 1 step past last flush.
+		    // We must terminate the old current range and add a new
+		    // current range.
+		    tr_changed++;
+		    debugUKI(1, "post-current", i); // XXX
 		    tr[i].end = agg0->last_flush;
-		    traceEvent(TRACE_INFO,
-			"             --> idx=%u, t=%u, [%u..%u] post-current",
-			idx, tslice->time, tr[i].start, tr[i].end); // XXX
+		    debugUKI(0, "post-current", i); // XXX
 		    if (!(tr = timerange_insert(tkip, ++i, tslice->time, 0)))
 			return -1;
-		    traceEvent(TRACE_INFO,
-			"             --> idx=%u, t=%u, [%u..%u] post-current",
-			idx, tslice->time, tr[i].start, tr[i].end); // XXX
+		    debugUKI(0, "post-current", i); // XXX
 		}
 
 	    } else {
@@ -525,19 +538,14 @@ static int update_key_info(tsdb_handler *handler, int next_is_far)
 		while (i >= 0 && tr[i].start > tslice->time) i--;
 		if (i >= 0 && tslice->time <= tr[i].end) {
 		    // historic timerange matches
-		    /* traceEvent(TRACE_INFO,
-			"update_key_info: idx=%u, t=%u, [%u..%u] historic",
-			idx, tslice->time, tr[i].start, tr[i].end); // XXX */
-		    if (!changed) continue; // no change, no write
+		    // debugUKI(1, "historic", i); // XXX
+		    // No change to timerange.
 		} else if (i >= 0 && tslice->time == tr[i].end + agg0->period) {
 		    // time abuts end of historic timerange; extend it
-		    traceEvent(TRACE_INFO,
-			"update_key_info: idx=%u, t=%u, [%u..%u] abut end",
-			idx, tslice->time, tr[i].start, tr[i].end); // XXX
+		    tr_changed++;
+		    debugUKI(1, "abut end", i); // XXX
 		    tr[i].end = tslice->time;
-		    traceEvent(TRACE_INFO,
-			"             --> idx=%u, t=%u, [%u..%u] abut end %d/%d",
-			idx, tslice->time, tr[i].start, tr[i].end, i, tkip->n_timeranges); // XXX
+		    debugUKI(0, "abut end", i); // XXX
 		    if (i+1 < tkip->n_timeranges &&
 			tr[i].end + agg0->period == tr[i+1].start)
 		    {
@@ -551,103 +559,79 @@ static int update_key_info(tsdb_handler *handler, int next_is_far)
 			newtr[i].end = tr[i+1].end;
 			free(tr);
 			tr = tkip->timeranges = newtr;
-			traceEvent(TRACE_INFO,
-			    "             --> idx=%u, t=%u, [%u..%u] merge %d/%d",
-			    idx, tslice->time, tr[i].start, tr[i].end, i, n);// XXX
+			debugUKI(0, "merge", i); // XXX
 		    }
 		} else if (i+1 < tkip->n_timeranges &&
 		    tslice->time + agg0->period == tr[i+1].start)
 		{
 		    // time abuts start of historic timerange; extend it
+		    tr_changed++;
 		    i++;
-		    traceEvent(TRACE_INFO,
-			"update_key_info: idx=%u, t=%u, [%u..%u] abut start",
-			idx, tslice->time, tr[i].start, tr[i].end); // XXX
+		    debugUKI(1, "abut start", i); // XXX
 		    tr[i].start = tslice->time;
-		    traceEvent(TRACE_INFO,
-			"             --> idx=%u, t=%u, [%u..%u] abut start %d/%d",
-			idx, tslice->time, tr[i].start, tr[i].end, i, tkip->n_timeranges); // XXX
+		    debugUKI(0, "abut start", i); // XXX
 		} else {
 		    // no match found; create a new timerange
+		    tr_changed++;
 		    if (!(tr = timerange_insert(tkip, ++i, tslice->time,
 			(!is_last || next_is_far) ? tslice->time : 0)))
 			    return -1;
-		    traceEvent(TRACE_INFO,
-			"update_key_info: idx=%u, t=%u, [%u..%u] create %d/%d",
-			idx, tslice->time, tr[i].start, tr[i].end, i, tkip->n_timeranges); // XXX
+		    debugUKI(1, "create", i); // XXX
 		}
 	    }
 
-	} else { // value is not set
+	} else {
+	    // Value is not set.
 	    if (tkip->n_timeranges == 0) {
-		/*traceEvent(TRACE_INFO,
-		    "update_key_info: idx=%u, t=%u, unset, no timeranges",
-		    idx, tslice->time); // XXX */
-		if (!changed) continue; // no change, no write
+		// No change to timeranges.
 	    } else if (tr[i].end == 0 && tslice->time >= tr[i].start) {
 		// current timerange matches; terminate it
-		traceEvent(TRACE_INFO,
-		    "update_key_info: idx=%u, t=%u, [%u..%u] unset current",
-		    idx, tslice->time, tr[i].start, tr[i].end); // XXX
+		tr_changed++;
+		debugUKI(1, "unset current", i); // XXX
 		tr[i].end = agg0->last_flush;
-		traceEvent(TRACE_INFO,
-		    "             --> idx=%u, t=%u, [%u..%u] unset current",
-		    idx, tslice->time, tr[i].start, tr[i].end); // XXX
+		debugUKI(0, "unset current", i); // XXX
 	    } else {
 		// search for historic timerange (possible only if we allow
 		// deleting historic values)
+		tr_changed++; // Assume there will be a change.
 		while (i >= 0 && tr[i].start > tslice->time) i--;
 		if (i < 0 || tslice->time > tr[i].end) { // no match found
-		    if (!changed) continue; // no change, no write
+		    tr_changed--; // No change to timeranges; undo assumption.
 		} else if (tr[i].start == tslice->time &&
 		    tr[i].end == tslice->time)
 		{
 		    // timerange would become empty; delete it
-		    traceEvent(TRACE_INFO,
-			"update_key_info: idx=%u, t=%u, [%u..%u] unset historic clear",
-			idx, tslice->time, tr[i].start, tr[i].end); // XXX
+		    debugUKI(1, "unset historic clear", i); // XXX
 		    int n = --tkip->n_timeranges;
 		    memmove(&tr[i], &tr[i+1], (n - i) * sizeof(timerange_t));
 		} else if (tr[i].start == tslice->time) {
 		    // delete first step of timerange
-		    traceEvent(TRACE_INFO,
-			"update_key_info: idx=%u, t=%u, [%u..%u] unset historic start",
-			idx, tslice->time, tr[i].start, tr[i].end); // XXX
+		    debugUKI(1, "unset historic start", i); // XXX
 		    tr[i].start += agg0->period;
-		    traceEvent(TRACE_INFO,
-			"             --> idx=%u, t=%u, [%u..%u] unset historic start",
-			idx, tslice->time, tr[i].start, tr[i].end); // XXX
+		    debugUKI(0, "unset historic start", i); // XXX
 		} else if (tr[i].end == tslice->time) {
 		    // delete last step of timerange
-		    traceEvent(TRACE_INFO,
-			"update_key_info: idx=%u, t=%u, [%u..%u] unset historic end",
-			idx, tslice->time, tr[i].start, tr[i].end); // XXX
+		    debugUKI(1, "unset historic end", i); // XXX
 		    tr[i].end -= agg0->period;
-		    traceEvent(TRACE_INFO,
-			"             --> idx=%u, t=%u, [%u..%u] unset historic end",
-			idx, tslice->time, tr[i].start, tr[i].end); // XXX
+		    debugUKI(0, "unset historic end", i); // XXX
 		} else {
 		    // split time range
-		    traceEvent(TRACE_INFO,
-			"update_key_info: idx=%u, t=%u, [%u..%u] unset historic split",
-			idx, tslice->time, tr[i].start, tr[i].end); // XXX
+		    debugUKI(1, "unset historic split", i); // XXX
 		    if (!(tr = timerange_insert(tkip, i,
 			tr[i].start, tslice->time - agg0->period)))
 			    return -1;
 		    tr[i+1].start = tslice->time + agg0->period;
-		    traceEvent(TRACE_INFO,
-			"             --> idx=%u, t=%u, [%u..%u] unset historic split %d/%d",
-			idx, tslice->time, tr[i].start, tr[i].end, i, tkip->n_timeranges); // XXX
-		    traceEvent(TRACE_INFO,
-			"             --> idx=%u, t=%u, [%u..%u] unset historic split %d/%d",
-			idx, tslice->time, tr[i+1].start, tr[i+1].end, i+1, tkip->n_timeranges); // XXX
+		    debugUKI(0, "unset historic split", i); // XXX
+		    debugUKI(0, "unset historic split", i+1); // XXX
 		}
 	    }
 	}
 
 	// write modified key info to db
-	if (set_key_info(handler, tkip) != 0)
-	    return -1;
+	if (tr_changed) {
+	    if (set_key_info(handler, tkip) != 0)
+		return -1;
+	}
     }
     return 0;
 }
@@ -892,6 +876,7 @@ static inline uint32_t max(uint32_t a, uint32_t b) { return a > b ? a : b; }
 
 int tsdb_set(tsdb_handler *handler, tsdb_key_info_t *tkip, const tsdb_value *valuep)
 {
+    traceEvent(TRACE_INFO, "tsdb_set %u %u = %u", handler->tslice[0].time, tkip->index, valuep[0]); // XXX
     int rc;
 
     if (!handler->is_open || handler->readonly)
@@ -900,8 +885,6 @@ int tsdb_set(tsdb_handler *handler, tsdb_key_info_t *tkip, const tsdb_value *val
 	handler->readonly = 1;
 	return rc;
     }
-
-    traceEvent(TRACE_INFO, "tsdb_set %u %u", handler->tslice[0].time, valuep[0]); // XXX
 
     uint8_t was_set = vec_test(handler->tslice[0].frag[tkip->frag_id]->is_set, tkip->offset);
     tsdb_value *oldvaluep = valueptr(handler, 0, tkip->frag_id, tkip->offset);
@@ -1043,12 +1026,12 @@ int tsdb_set(tsdb_handler *handler, tsdb_key_info_t *tkip, const tsdb_value *val
 	    vec_set(handler->tslice[agg_id].frag[tkip->frag_id]->is_set, tkip->offset);
 	    handler->tslice[agg_id].frag_changed[tkip->frag_id] = 1;
 	    traceEvent(TRACE_INFO, "Succesfully set value "
-		"[agg_id=%d][frag_id=%u][offset=%" PRIu32 "][value_len=%u]",
-		agg_id, tkip->frag_id, tkip->offset, handler->entry_size);
+		"[agg_id=%d][frag_id=%u][offset=%" PRIu32 "][value_len=%u] aggval=%u",
+		agg_id, tkip->frag_id, tkip->offset, handler->entry_size, aggval[0]);
 	} else if (failed) {
 	    traceEvent(TRACE_ERROR, "Failed to set value "
-		"[agg_id=%d][frag_id=%u][offset=%" PRIu32 "][value_len=%u]",
-		agg_id, tkip->frag_id, tkip->offset, handler->entry_size);
+		"[agg_id=%d][frag_id=%u][offset=%" PRIu32 "][value_len=%u] aggval=%u",
+		agg_id, tkip->frag_id, tkip->offset, handler->entry_size, aggval[0]);
 	    handler->readonly = 1;
 	    return -1;
 	}
@@ -1060,8 +1043,8 @@ int tsdb_set(tsdb_handler *handler, tsdb_key_info_t *tkip, const tsdb_value *val
     vec_set(handler->tslice[0].frag[tkip->frag_id]->is_set, tkip->offset);
     handler->tslice[0].frag_changed[tkip->frag_id] = 1;
     traceEvent(TRACE_INFO, "Succesfully set value "
-	"[agg_id=%d][frag_id=%u][offset=%" PRIu32 "][value_len=%u]",
-	0, tkip->frag_id, tkip->offset, handler->entry_size);
+	"[agg_id=%d][frag_id=%u][offset=%" PRIu32 "][value_len=%u] value=%u",
+	0, tkip->frag_id, tkip->offset, handler->entry_size, valuep[0]);
 
     return 0;
 }
