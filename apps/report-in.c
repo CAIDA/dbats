@@ -7,14 +7,16 @@ static void help(void) {
     fprintf(stderr, "%s [{options}] {tsdb_path} < report.metrics\n", progname);
     fprintf(stderr, "options:\n");
     fprintf(stderr, "-v{0|1|2|3}    verbosity level\n");
+    fprintf(stderr, "-d             load on demand\n");
     exit(-1);
 }
 
 int main(int argc, char *argv[]) {
     char *tsdb_path;
     tsdb_handler handler;
-    u_int16_t num_values_per_entry = 1;
-    u_int32_t period = 60;
+    uint16_t num_values_per_entry = 1;
+    uint32_t period = 60;
+    int goto_flags = 0;
     progname = argv[0];
 
     //traceLevel = 99;
@@ -26,10 +28,13 @@ int main(int argc, char *argv[]) {
     char key[128];
 
     int c;
-    while ((c = getopt(argc, argv, "v:")) != -1) {
+    while ((c = getopt(argc, argv, "v:d")) != -1) {
 	switch (c) {
 	case 'v':
 	    traceLevel = atoi(optarg);
+	    break;
+	case 'd':
+	    goto_flags |= TSDB_LOAD_ON_DEMAND;
 	    break;
 	default:
 	    help();
@@ -61,7 +66,7 @@ int main(int argc, char *argv[]) {
 	if (n != 3) break;
 
 	if (t != last_t) {
-	    if (tsdb_goto_time(&handler, t, TSDB_CREATE | TSDB_GROWABLE) == -1)
+	    if (tsdb_goto_time(&handler, t, goto_flags) == -1)
 		return(-1);
 	}
 	last_t = t;
