@@ -28,7 +28,7 @@ int main(int argc, char *argv[]) {
     char key[128];
 
     int c;
-    while ((c = getopt(argc, argv, "v:d")) != -1) {
+    while ((c = getopt(argc, argv, "v:p")) != -1) {
 	switch (c) {
 	case 'v':
 	    traceLevel = atoi(optarg);
