@@ -757,10 +757,10 @@ int tsdb_goto_time(tsdb_handler *handler, uint32_t time_value, uint32_t flags)
 	// Flush tslice if loaded
 	tsdb_flush_tslice(handler, agg_id);
 
-	tslice->load_on_demand = !!(flags & TSDB_LOAD_ON_DEMAND);
+	tslice->preload = !!(flags & TSDB_PRELOAD);
 	tslice->time = t;
 
-	if (tslice->load_on_demand)
+	if (!tslice->preload)
 	    continue;
 
 	int loaded = 0;
@@ -842,7 +842,7 @@ static int instantiate_frag(tsdb_handler *handler, int agg_id, uint32_t frag_id)
 	return 0;
     }
 
-    if (tslice->load_on_demand || handler->readonly) {
+    if (!tslice->preload || handler->readonly) {
 	// Try to load the fragment.
 	// TODO: optionally, unload other fragments?
 	int rc = load_frag(handler, tslice->time, agg_id, frag_id);

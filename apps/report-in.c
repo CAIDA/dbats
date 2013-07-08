@@ -7,7 +7,7 @@ static void help(void) {
     fprintf(stderr, "%s [{options}] {tsdb_path} < report.metrics\n", progname);
     fprintf(stderr, "options:\n");
     fprintf(stderr, "-v{0|1|2|3}    verbosity level\n");
-    fprintf(stderr, "-d             load on demand\n");
+    fprintf(stderr, "-p             preload timeslices\n");
     exit(-1);
 }
 
@@ -33,8 +33,8 @@ int main(int argc, char *argv[]) {
 	case 'v':
 	    traceLevel = atoi(optarg);
 	    break;
-	case 'd':
-	    goto_flags |= TSDB_LOAD_ON_DEMAND;
+	case 'p':
+	    goto_flags |= TSDB_PRELOAD;
 	    break;
 	default:
 	    help();

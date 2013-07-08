@@ -45,7 +45,7 @@
 
 // Flags
 #define TSDB_CREATE          0x01 // create database if it doesn't exist
-#define TSDB_LOAD_ON_DEMAND  0x04 // don't load fragment until necessary
+#define TSDB_PRELOAD         0x04 // load fragments when tslice is selected
 #define TSDB_READONLY        0x08 // don't allow writing
 
 typedef struct tsdb_frag tsdb_frag;
@@ -55,7 +55,7 @@ typedef struct tsdb_frag tsdb_frag;
 typedef struct {
     uint32_t time;                        // start time (unix seconds)
     uint32_t num_frags;                   // number of fragments
-    uint8_t load_on_demand;               // don't load fragment until needed
+    uint8_t preload;                      // load frags when tslice is selected
     tsdb_frag *frag[MAX_NUM_FRAGS];
     uint8_t frag_changed[MAX_NUM_FRAGS];
 } tsdb_tslice;

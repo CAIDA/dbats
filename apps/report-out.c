@@ -106,7 +106,7 @@ int main(int argc, char *argv[]) {
 	for (uint32_t t = begin; t <= end; t += handler.agg[agg_id].period) {
 	    int rc;
 
-	    if ((rc = tsdb_goto_time(&handler, t, TSDB_LOAD_ON_DEMAND)) == -1) {
+	    if ((rc = tsdb_goto_time(&handler, t, 0)) == -1) {
 		traceEvent(TRACE_INFO, "Unable to find time %u", t);
 		continue;
 	    }
