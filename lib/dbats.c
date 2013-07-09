@@ -25,13 +25,13 @@ struct tsdb_frag {
     uint8_t data[]; // values (C99 flexible array member)
 };
 
+#define fragsize(handler) (sizeof(tsdb_frag) + ENTRIES_PER_FRAG * (handler)->entry_size)
+
 typedef struct {
     uint32_t time;
     int agg_id;
     uint32_t frag_id;
 } fragkey_t;
-
-#define fragsize(handler) (sizeof(tsdb_frag) + ENTRIES_PER_FRAG * (handler)->entry_size)
 
 // key_info as stored in db
 typedef struct {
@@ -93,6 +93,12 @@ static void raw_db_set(const tsdb_handler *handler, DB *db,
     DBT key_data, data;
     int ret;
 
+    if (db == handler->dbData) {
+	fragkey_t *fragkey = (fragkey_t*)key;
+	traceEvent(TRACE_INFO, "raw_db_set Data: t=%u agg=%d frag=%u, compress=%d, len=%u",
+	    fragkey->time, fragkey->agg_id, fragkey->frag_id, *(uint8_t*)value, value_len);
+    }
+
     if (handler->readonly) {
 	const char *dbname;
 	db->get_dbname(db, NULL, &dbname);
@@ -123,10 +129,11 @@ static int raw_db_get(const tsdb_handler *handler, DB* db,
     const void *key, uint32_t key_len, void **value, uint32_t *value_len)
 {
     DBT key_data, data;
+    int rc;
 
-    if (db_get_buf_len < ENTRIES_PER_FRAG * handler->entry_size + QLZ_OVERHEAD) {
-	db_get_buf_len = ENTRIES_PER_FRAG * handler->entry_size + QLZ_OVERHEAD;
+    if (db_get_buf_len < fragsize(handler) + QLZ_OVERHEAD) {
 	if (db_get_buf) free(db_get_buf);
+	db_get_buf_len = fragsize(handler) + QLZ_OVERHEAD;
 	db_get_buf = emalloc(db_get_buf_len, "decompression buffer");
 	if (!db_get_buf) return -2;
     }
@@ -140,13 +147,12 @@ static int raw_db_get(const tsdb_handler *handler, DB* db,
     data.data = db_get_buf;
     data.ulen = db_get_buf_len;
     data.flags = DB_DBT_USERMEM;
-    if (db->get(db, NULL, &key_data, &data, 0) == 0) {
+    if ((rc = db->get(db, NULL, &key_data, &data, 0)) == 0) {
 	*value = data.data;
 	*value_len = data.size;
-	return(0);
+	return 0;
     } else {
-	//int len = key_len;
-	//traceEvent(TRACE_WARNING, "raw_db_get failed: key=\"%.*s\"\n", len, (char*)key);
+	traceEvent(TRACE_WARNING, "raw_db_get failed: %s", db_strerror(rc));
 	return -1;
     }
 }
@@ -208,6 +214,7 @@ int tsdb_open(tsdb_handler *handler, const char *path,
 
     memset(handler, 0, sizeof(tsdb_handler));
     handler->readonly = !!(flags & TSDB_READONLY);
+    handler->compress = !(flags & TSDB_UNCOMPRESSED);
     handler->num_values_per_entry = 1;
 
     if ((ret = db_env_create(&handler->dbenv, 0)) != 0) {
@@ -375,29 +382,37 @@ static void tsdb_flush_tslice(tsdb_handler *handler, int agg_id)
     traceEvent(TRACE_INFO, "Flush t=%u agg_id=%d", handler->tslice[agg_id].time, agg_id);
     uint32_t frag_size = fragsize(handler);
     fragkey_t dbkey;
-    uint32_t buf_len = frag_size + QLZ_OVERHEAD;
     char *buf = NULL;
-
 
     // Write fragments to the DB
     dbkey.time = handler->tslice[agg_id].time;
     dbkey.agg_id = agg_id;
     for (int f = 0; f < handler->tslice[agg_id].num_frags; f++) {
 	if (!handler->tslice[agg_id].frag[f]) continue;
+	dbkey.frag_id = f;
 	if (handler->readonly) {
 	    // do nothing
-	} else if (handler->tslice[agg_id].frag_changed[f]) {
+	} else if (!handler->tslice[agg_id].frag_changed[f]) {
+	    traceEvent(TRACE_INFO, "Skipping frag %d (unchanged)", f);
+	} else if (handler->compress) {
 	    if (!buf)
-		buf = (char*)emalloc(buf_len, "compression buffer");
+		buf = (char*)emalloc(frag_size + QLZ_OVERHEAD + 1, "compression buffer");
 	    if (!buf) return;
+	    buf[0] = 1; // compression flag
 	    size_t compressed_len = qlz_compress(handler->tslice[agg_id].frag[f],
-		buf, frag_size, &handler->state_compress);
+		buf+1, frag_size, &handler->state_compress);
 	    traceEvent(TRACE_INFO, "Frag %d compression: %u -> %u (%.1f %%)",
 		f, frag_size, compressed_len, compressed_len*100.0/frag_size);
-	    dbkey.frag_id = f;
-	    raw_db_set(handler, handler->dbData, &dbkey, sizeof(dbkey), buf, compressed_len);
+	    raw_db_set(handler, handler->dbData, &dbkey, sizeof(dbkey),
+		buf, compressed_len + 1);
 	} else {
-	    traceEvent(TRACE_INFO, "Skipping frag %d (unchanged)", f);
+	    if (!buf)
+		buf = (char*)emalloc(frag_size + 1, "write buffer");
+	    buf[0] = 0; // compression flag
+	    memcpy(buf+1, handler->tslice[agg_id].frag[f], frag_size);
+	    traceEvent(TRACE_INFO, "Frag %d copy: %u", f, frag_size);
+	    raw_db_set(handler, handler->dbData, &dbkey, sizeof(dbkey),
+		buf, frag_size + 1);
 	}
 
 	handler->tslice[agg_id].frag_changed[f] = 0;
@@ -709,19 +724,30 @@ static int load_frag(tsdb_handler *handler, uint32_t t, int agg_id,
     if (rc != 0)
 	return 0; // no match
 
-    // decompress fragment
-    size_t len = qlz_size_decompressed(value);
-    // assert(len == fragsize(handler));
+    int compressed = *(uint8_t*)value;
+    size_t len = !compressed ? fragsize(handler) :
+	qlz_size_decompressed((void*)((uint8_t*)value+1));
     void *ptr = malloc(len);
     if (!ptr) {
 	traceEvent(TRACE_ERROR, "Can't allocate %u bytes for frag "
 	    "t=%u, agg_id=%u, frag_id=%u", len, t, agg_id, frag_id);
 	return -2; // error
     }
-    len = qlz_decompress(value, ptr, &handler->state_decompress);
-    traceEvent(TRACE_INFO, "decompressed frag t=%u, agg_id=%u, frag_id=%u: "
-	"%u -> %u (%.1f%%)",
-	t, agg_id, frag_id, value_len, len, len*100.0/value_len);
+
+    if (compressed) {
+	// decompress fragment
+	// assert(len == fragsize(handler));
+	len = qlz_decompress((void*)((uint8_t*)value+1), ptr, &handler->state_decompress);
+	traceEvent(TRACE_INFO, "decompressed frag t=%u, agg_id=%u, frag_id=%u: "
+	    "%u -> %u (%.1f%%)",
+	    t, agg_id, frag_id, value_len, len, len*100.0/value_len);
+
+    } else {
+	// copy fragment
+	memcpy(ptr, (uint8_t*)value + 1, len);
+	traceEvent(TRACE_INFO, "copied frag t=%u, agg_id=%u, frag_id=%u",
+	    t, agg_id, frag_id);
+    }
 
     handler->tslice[agg_id].frag[frag_id] = ptr;
 

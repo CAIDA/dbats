@@ -8,6 +8,7 @@ static void help(void) {
     fprintf(stderr, "options:\n");
     fprintf(stderr, "-v{0|1|2|3}    verbosity level\n");
     fprintf(stderr, "-p             preload timeslices\n");
+    fprintf(stderr, "-Z             don't compress db\n");
     exit(-1);
 }
 
@@ -17,6 +18,7 @@ int main(int argc, char *argv[]) {
     uint16_t num_values_per_entry = 1;
     uint32_t period = 60;
     int goto_flags = 0;
+    int open_flags = TSDB_CREATE;
     progname = argv[0];
 
     //traceLevel = 99;
@@ -28,13 +30,16 @@ int main(int argc, char *argv[]) {
     char key[128];
 
     int c;
-    while ((c = getopt(argc, argv, "v:p")) != -1) {
+    while ((c = getopt(argc, argv, "v:pZ")) != -1) {
 	switch (c) {
 	case 'v':
 	    traceLevel = atoi(optarg);
 	    break;
 	case 'p':
 	    goto_flags |= TSDB_PRELOAD;
+	    break;
+	case 'Z':
+	    open_flags |= TSDB_UNCOMPRESSED;
 	    break;
 	default:
 	    help();
@@ -48,7 +53,7 @@ int main(int argc, char *argv[]) {
 	help();
     tsdb_path = argv[0];
 
-    if (tsdb_open(&handler, tsdb_path, num_values_per_entry, period, TSDB_CREATE) != 0)
+    if (tsdb_open(&handler, tsdb_path, num_values_per_entry, period, open_flags) != 0)
         return -1;
     if (tsdb_aggregate(&handler, TSDB_AGG_MIN, 10) != 0)
 	return -1;

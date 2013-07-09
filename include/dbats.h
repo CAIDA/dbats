@@ -47,6 +47,7 @@
 #define TSDB_CREATE          0x01 // create database if it doesn't exist
 #define TSDB_PRELOAD         0x04 // load fragments when tslice is selected
 #define TSDB_READONLY        0x08 // don't allow writing
+#define TSDB_UNCOMPRESSED    0x10 // don't compress data written to db
 
 typedef struct tsdb_frag tsdb_frag;
 
@@ -94,6 +95,7 @@ typedef struct {
 typedef struct {
     uint8_t  is_open;
     uint8_t  readonly;                   // Mode used to open the db file
+    uint8_t  compress;                   // Compress fragments?
     uint16_t num_aggs;                   // Number of aggregations
     uint16_t num_values_per_entry;       // Number of tsdb_values in an entry
     uint16_t entry_size;                 // Size of an entry (bytes)
