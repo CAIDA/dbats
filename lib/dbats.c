@@ -21,6 +21,7 @@
     ((tsdb_value*)(&handler->tslice[agg_id].frag[frag_id]->data[offset * handler->entry_size]))
 
 struct tsdb_frag {
+    uint8_t compressed; // is data in db compressed?
     uint8_t is_set[vec_size(ENTRIES_PER_FRAG)]; // which indexes have values
     uint8_t data[]; // values (C99 flexible array member)
 };
@@ -399,6 +400,7 @@ static void tsdb_flush_tslice(tsdb_handler *handler, int agg_id)
 		buf = (char*)emalloc(frag_size + QLZ_OVERHEAD + 1, "compression buffer");
 	    if (!buf) return;
 	    buf[0] = 1; // compression flag
+	    handler->tslice[agg_id].frag[f]->compressed = 1;
 	    size_t compressed_len = qlz_compress(handler->tslice[agg_id].frag[f],
 		buf+1, frag_size, &handler->state_compress);
 	    traceEvent(TRACE_INFO, "Frag %d compression: %u -> %u (%.1f %%)",
@@ -408,11 +410,10 @@ static void tsdb_flush_tslice(tsdb_handler *handler, int agg_id)
 	} else {
 	    if (!buf)
 		buf = (char*)emalloc(frag_size + 1, "write buffer");
-	    buf[0] = 0; // compression flag
-	    memcpy(buf+1, handler->tslice[agg_id].frag[f], frag_size);
-	    traceEvent(TRACE_INFO, "Frag %d copy: %u", f, frag_size);
+	    handler->tslice[agg_id].frag[f]->compressed = 0;
+	    traceEvent(TRACE_INFO, "Frag %d write: %u", f, frag_size);
 	    raw_db_set(handler, handler->dbData, &dbkey, sizeof(dbkey),
-		buf, frag_size + 1);
+		handler->tslice[agg_id].frag[f], frag_size);
 	}
 
 	handler->tslice[agg_id].frag_changed[f] = 0;
@@ -744,7 +745,7 @@ static int load_frag(tsdb_handler *handler, uint32_t t, int agg_id,
 
     } else {
 	// copy fragment
-	memcpy(ptr, (uint8_t*)value + 1, len);
+	memcpy(ptr, (uint8_t*)value, len);
 	traceEvent(TRACE_INFO, "copied frag t=%u, agg_id=%u, frag_id=%u",
 	    t, agg_id, frag_id);
     }
