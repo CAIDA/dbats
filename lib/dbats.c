@@ -5,8 +5,19 @@
  * (at your option) any later version.
  */
 
+#include <stdio.h>
 #include <db.h>
+#include <sys/stat.h>
+#include <errno.h>
+
+#include <stdlib.h>
+#include <string.h>
+#include <limits.h>
+#include <sys/types.h>
+#include <db.h>
+
 #include "tsdb_api.h"
+#include "quicklz.h"
 
 
 /*************************************************************************/
@@ -273,9 +284,6 @@ int tsdb_open(tsdb_handler *handler, const char *path,
 
     handler->entry_size = handler->num_values_per_entry * sizeof(tsdb_value);
 
-    memset(&handler->state_compress, 0, sizeof(handler->state_compress));
-    memset(&handler->state_decompress, 0, sizeof(handler->state_decompress));
-
     handler->agg[0].func = TSDB_AGG_NONE;
     handler->agg[0].steps = 1;
     handler->agg[0].period = handler->period;
@@ -396,13 +404,18 @@ static void tsdb_flush_tslice(tsdb_handler *handler, int agg_id)
 	} else if (!handler->tslice[agg_id].frag_changed[f]) {
 	    traceEvent(TRACE_INFO, "Skipping frag %d (unchanged)", f);
 	} else if (handler->compress) {
-	    if (!buf)
+	    if (!handler->state_compress) {
+		handler->state_compress = emalloc(sizeof(qlz_state_compress), "qlz_state_compress");
+		if (!handler->state_compress) return;
+	    }
+	    if (!buf) {
 		buf = (char*)emalloc(frag_size + QLZ_OVERHEAD + 1, "compression buffer");
-	    if (!buf) return;
+		if (!buf) return;
+	    }
 	    buf[0] = 1; // compression flag
 	    handler->tslice[agg_id].frag[f]->compressed = 1;
 	    size_t compressed_len = qlz_compress(handler->tslice[agg_id].frag[f],
-		buf+1, frag_size, &handler->state_compress);
+		buf+1, frag_size, handler->state_compress);
 	    traceEvent(TRACE_INFO, "Frag %d compression: %u -> %u (%.1f %%)",
 		f, frag_size, compressed_len, compressed_len*100.0/frag_size);
 	    raw_db_set(handler, handler->dbData, &dbkey, sizeof(dbkey),
@@ -694,6 +707,11 @@ void tsdb_close(tsdb_handler *handler)
     //handler->dbKeys->close(handler->dbKeys, 0);
     //handler->dbData->close(handler->dbData, 0);
     handler->dbenv->close(handler->dbenv, 0);
+
+    if (handler->state_decompress)
+	free(handler->state_decompress);
+    if (handler->state_compress)
+	free(handler->state_compress);
 }
 
 /*************************************************************************/
@@ -738,7 +756,11 @@ static int load_frag(tsdb_handler *handler, uint32_t t, int agg_id,
     if (compressed) {
 	// decompress fragment
 	// assert(len == fragsize(handler));
-	len = qlz_decompress((void*)((uint8_t*)value+1), ptr, &handler->state_decompress);
+	if (!handler->state_decompress) {
+	    handler->state_decompress = emalloc(sizeof(qlz_state_decompress), "qlz_state_decompress");
+	    if (!handler->state_decompress) return -2;
+	}
+	len = qlz_decompress((void*)((uint8_t*)value+1), ptr, handler->state_decompress);
 	traceEvent(TRACE_INFO, "decompressed frag t=%u, agg_id=%u, frag_id=%u: "
 	    "%u -> %u (%.1f%%)",
 	    t, agg_id, frag_id, value_len, len, len*100.0/value_len);

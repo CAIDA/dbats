@@ -1,5 +1,4 @@
 /*
- *
  *  This program is free software; you can redistribute it and/or modify
  *  it under the terms of the GNU General Public License as published by
  *  the Free Software Foundation; either version 2 of the License, or
@@ -15,23 +14,9 @@
  *  51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
  */
 
-#include <stdio.h>
-#include <errno.h>
-#include <stdlib.h>
-#include <string.h>
-#include <time.h>
-#include <fcntl.h>
-#include <ctype.h>
-#include <limits.h>
-#include <sys/types.h>
-#include <unistd.h>
-#include <sys/stat.h>
+#include <inttypes.h>
 #include <db.h>
-#include <errno.h>
-#include <sys/file.h>
-
 #include "tsdb_trace.h"
-#include "quicklz.h"
 
 /* ************************************************** */
 
@@ -101,8 +86,8 @@ typedef struct {
     uint16_t entry_size;                 // Size of an entry (bytes)
     uint32_t lowest_free_index;          // Hint to speed finding a free index
     uint32_t period;                     // length of raw time slice (sec)
-    qlz_state_compress state_compress;
-    qlz_state_decompress state_decompress;
+    void *state_compress;
+    void *state_decompress;
     DB_ENV *dbenv;                        // DB environment
     DB *dbMeta;                           // config parameters
     DB *dbKeys;                           // metric key -> index
