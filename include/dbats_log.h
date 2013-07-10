@@ -24,8 +24,8 @@
 extern int traceLevel;
 extern FILE *traceFile;
 
-#define traceEvent(level, ...) traceEventFunc(level, __FILE__, __LINE__, __VA_ARGS__)
+#define dbats_log(level, ...) dbats_log_func(level, __FILE__, __LINE__, __VA_ARGS__)
 
-extern void traceEventFunc(int level, const char *file, int line, const char * format, ...)
+extern void dbats_log_func(int level, const char *file, int line, const char * format, ...)
     __attribute__ ((format (printf, 4, 5)));
 

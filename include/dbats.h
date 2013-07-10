@@ -16,7 +16,7 @@
 
 #include <inttypes.h>
 #include <db.h>
-#include "tsdb_trace.h"
+#include "dbats_log.h"
 
 /* ************************************************** */
 
@@ -29,12 +29,12 @@
 #define MAX_NUM_AGGS           16 // max number of aggregation levels
 
 // Flags
-#define TSDB_CREATE          0x01 // create database if it doesn't exist
-#define TSDB_PRELOAD         0x04 // load fragments when tslice is selected
-#define TSDB_READONLY        0x08 // don't allow writing
-#define TSDB_UNCOMPRESSED    0x10 // don't compress data written to db
+#define DBATS_CREATE          0x01 // create database if it doesn't exist
+#define DBATS_PRELOAD         0x04 // load fragments when tslice is selected
+#define DBATS_READONLY        0x08 // don't allow writing
+#define DBATS_UNCOMPRESSED    0x10 // don't compress data written to db
 
-typedef struct tsdb_frag tsdb_frag;
+typedef struct dbats_frag dbats_frag;
 
 // Logical row or "time slice", containing all the entries for a given time.
 // Entries are actually batched into fragments within a tslice.
@@ -42,16 +42,16 @@ typedef struct {
     uint32_t time;                        // start time (unix seconds)
     uint32_t num_frags;                   // number of fragments
     uint8_t preload;                      // load frags when tslice is selected
-    tsdb_frag *frag[MAX_NUM_FRAGS];
+    dbats_frag *frag[MAX_NUM_FRAGS];
     uint8_t frag_changed[MAX_NUM_FRAGS];
-} tsdb_tslice;
+} dbats_tslice;
 
-#define TSDB_AGG_NONE   0
-#define TSDB_AGG_MIN    1
-#define TSDB_AGG_MAX    2
-#define TSDB_AGG_AVG    3
-#define TSDB_AGG_LAST   4
-#define TSDB_AGG_SUM    5
+#define DBATS_AGG_NONE   0
+#define DBATS_AGG_MIN    1
+#define DBATS_AGG_MAX    2
+#define DBATS_AGG_AVG    3
+#define DBATS_AGG_LAST   4
+#define DBATS_AGG_SUM    5
 
 // Aggregation parameters
 typedef struct {
@@ -59,14 +59,14 @@ typedef struct {
     int steps;              // number of primary data points in agg
     uint32_t period;        // length of slice (seconds)
     uint32_t last_flush;    // time of latest flush
-} tsdb_agg;
+} dbats_agg;
 
 #if 0
-typedef uint32_t tsdb_value;
+typedef uint32_t dbats_value;
 #define PRIval PRIu32
 #define SCNval SCNu32
 #else
-typedef uint64_t tsdb_value;
+typedef uint64_t dbats_value;
 #define PRIval PRIu64
 #define SCNval SCNu64
 #endif
@@ -83,14 +83,14 @@ typedef struct {
     uint32_t offset;         // index within fragment
     uint32_t n_timeranges;   // number of timeranges
     timerange_t *timeranges; // When did this key actually have a value?
-} tsdb_key_info_t;
+} dbats_key_info_t;
 
 typedef struct {
     uint8_t  is_open;
     uint8_t  readonly;                   // Mode used to open the db file
     uint8_t  compress;                   // Compress fragments?
     uint16_t num_aggs;                   // Number of aggregations
-    uint16_t num_values_per_entry;       // Number of tsdb_values in an entry
+    uint16_t num_values_per_entry;       // Number of dbats_values in an entry
     uint16_t entry_size;                 // Size of an entry (bytes)
     uint32_t lowest_free_index;          // Hint to speed finding a free index
     uint32_t period;                     // length of raw time slice (sec)
@@ -102,44 +102,44 @@ typedef struct {
     DB *dbIndex;                          // index -> metric key
     DB *dbData;                           // {time, agg_id, frag_id} -> data
     DBC *keywalk;                         // cursor for iterating over keys
-    tsdb_tslice tslice[MAX_NUM_AGGS];     // a tslice for each aggregation level
-    tsdb_agg agg[MAX_NUM_AGGS];           // parameters for each aggregation level
-    tsdb_key_info_t *key_info_block[MAX_NUM_INFOBLOCKS];
-} tsdb_handler;
+    dbats_tslice tslice[MAX_NUM_AGGS];     // a tslice for each aggregation level
+    dbats_agg agg[MAX_NUM_AGGS];           // parameters for each aggregation level
+    dbats_key_info_t *key_info_block[MAX_NUM_INFOBLOCKS];
+} dbats_handler;
 
 /* ************************************************** */
 
-extern int tsdb_open(tsdb_handler *handler, const char *tsdb_path,
+extern int dbats_open(dbats_handler *handler, const char *dbats_path,
     uint16_t num_values_per_entry,
     uint32_t period,
     uint32_t flags);
 
-extern int tsdb_aggregate(tsdb_handler *handler, int func, int steps);
+extern int dbats_aggregate(dbats_handler *handler, int func, int steps);
 
-extern void tsdb_close(tsdb_handler *handler);
+extern void dbats_close(dbats_handler *handler);
 
-extern uint32_t normalize_time(const tsdb_handler *handler, int s, uint32_t *time);
+extern uint32_t normalize_time(const dbats_handler *handler, int s, uint32_t *time);
 
-extern int tsdb_goto_time(tsdb_handler *handler,
+extern int dbats_goto_time(dbats_handler *handler,
     uint32_t time_value, uint32_t flags);
 
-extern int tsdb_get_key_info(tsdb_handler *handler, const char *key,
-    tsdb_key_info_t **tkipp, uint32_t flags);
+extern int dbats_get_key_info(dbats_handler *handler, const char *key,
+    dbats_key_info_t **tkipp, uint32_t flags);
 
-extern int tsdb_set(tsdb_handler *handler, tsdb_key_info_t *tkip,
-    const tsdb_value *valuep);
-extern int tsdb_set_by_key (tsdb_handler *handler, const char *key,
-    const tsdb_value *valuep);
+extern int dbats_set(dbats_handler *handler, dbats_key_info_t *tkip,
+    const dbats_value *valuep);
+extern int dbats_set_by_key (dbats_handler *handler, const char *key,
+    const dbats_value *valuep);
 
-extern int tsdb_get(tsdb_handler *handler, tsdb_key_info_t *tkip,
-    const tsdb_value **valuepp, int agg_id);
-extern int tsdb_get_double(tsdb_handler *handler, tsdb_key_info_t *tkip,
+extern int dbats_get(dbats_handler *handler, dbats_key_info_t *tkip,
+    const dbats_value **valuepp, int agg_id);
+extern int dbats_get_double(dbats_handler *handler, dbats_key_info_t *tkip,
     const double **valuepp, int agg_id);
-extern int tsdb_get_by_key(tsdb_handler *handler, const char *key,
-    const tsdb_value **valuepp, int agg_id);
+extern int dbats_get_by_key(dbats_handler *handler, const char *key,
+    const dbats_value **valuepp, int agg_id);
 
-extern int tsdb_keywalk_start(tsdb_handler *handler);
-extern int tsdb_keywalk_next(tsdb_handler *handler, tsdb_key_info_t **tkipp);
-extern int tsdb_keywalk_end(tsdb_handler *handler);
+extern int dbats_keywalk_start(dbats_handler *handler);
+extern int dbats_keywalk_next(dbats_handler *handler, dbats_key_info_t **tkipp);
+extern int dbats_keywalk_end(dbats_handler *handler);
 
-extern void tsdb_stat_print(const tsdb_handler *handler);
+extern void dbats_stat_print(const dbats_handler *handler);

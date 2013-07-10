@@ -1,4 +1,5 @@
 *.tsdb
+*.dbats
 *.out
 *.metrics
 *.keys

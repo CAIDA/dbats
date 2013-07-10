@@ -18,12 +18,12 @@
 #include <string.h>
 #include <stdio.h>
 #include <time.h>
-#include "tsdb_trace.h"
+#include "dbats_log.h"
 
 int traceLevel = TRACE_NORMAL;
 FILE *traceFile = NULL;
 
-void traceEventFunc(int level, const char *file, int line, const char *fmt, ...)
+void dbats_log_func(int level, const char *file, int line, const char *fmt, ...)
 {
     va_list va_ap;
 

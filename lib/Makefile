@@ -1,34 +1,36 @@
-CC           = gcc -g
-WARNS        =  -Wshadow -Wpointer-arith -Wmissing-prototypes -Wmissing-declarations -Wnested-externs
+#CC           = gcc -g -std=gnu99
+CC           = gcc-anal -g -std=gnu99
+#WARNS        =  -Wshadow -Wpointer-arith -Wmissing-prototypes -Wmissing-declarations -Wnested-externs
 INCLUDE      = -I. -I /opt/local/include $(WARNS)
-CFLAGS       = -Wall ${INCLUDE} # -fPIC
-LDFLAGS      = -L /opt/local/lib
-SYSLIBS      = -lrrd -ldb
+#CFLAGS       = -Wall $(INCLUDE) # -fPIC
+CFLAGS       = -O -Wall $(INCLUDE) # -fPIC
+LDFLAGS      = -L .
+#DMALLOCLIBS  = dmalloc/malloc.o dmalloc/dmalloc.o
+LDLIBS      = -ldbats $(DMALLOCLIBS) -ldb
 
-TSDB_LIB   = libtsdb2.a
-TSDB_LIB_O = tsdb_api.o tsdb_trace.o quicklz.o
+DBATS_LIB   = libdbats.a
 
-TARGETS     = $(TSDB_LIB) test tsdbExport
+TARGETS     = $(DBATS_LIB) report-in report-out
 
 all: $(TARGETS)
 
-%.o: %.c %.h
-#	@echo "=*= making object $@ =*="
-	${CC} ${CFLAGS} ${INCLUDE} -c $< -o $@
+dbats.o: dbats.c dbats.h Makefile
 
+dbats_log.o: dbats_log.c dbats_log.h Makefile
 
-$(TSDB_LIB): $(TSDB_LIB_O)
-	ar rs $@ ${TSDB_LIB_O}
+$(DBATS_LIB): dbats.o dbats_log.o quicklz.o
+	ar rs $@ $?
 	ranlib $@
 
-test: test.o $(TSDB_LIB)
-	$(CC) $(LDFLAGS) test.o $(TSDB_LIB) $(SYSLIBS) -o $@
-
-tsdbExport: tsdbExport.o $(TSDB_LIB) Makefile
-	$(CC) $(LDFLAGS) tsdbExport.o $(TSDB_LIB) $(SYSLIBS) -o $@
-
-domain2tsdb: domain2tsdb.o $(TSDB_LIB) Makefile
-	$(CC) $(LDFLAGS) domain2tsdb.o -o domain2tsdb $(TSDB_LIB) $(SYSLIBS)
-
 clean:
-	/bin/rm -f ${TARGETS} *.o *~
+	/bin/rm -f $(TARGETS) *.o *~
+
+report-in.o: report-in.c dbats.h Makefile
+
+report-out.o: report-out.c dbats.h Makefile
+
+report-in: report-in.o $(DBATS_LIB) Makefile
+	$(CC) $(LDFLAGS) report-in.o $(LDLIBS) -o $@
+
+report-out: report-out.o $(DBATS_LIB) Makefile
+	$(CC) $(LDFLAGS) report-out.o $(LDLIBS) -o $@

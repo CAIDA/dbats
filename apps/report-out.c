@@ -2,14 +2,14 @@
 #include <stdlib.h>
 #include <errno.h>
 #include <string.h>
-#include "tsdb_api.h"
+#include "dbats.h"
 
 static char *progname = 0;
 
 /* *********************************** */
 
 static void help(void) {
-    fprintf(stderr, "%s [{options}] {tsdb_path} {begin} {end}\n",
+    fprintf(stderr, "%s [{options}] {dbats_path} {begin} {end}\n",
 	progname);
     fprintf(stderr, "options:\n");
     fprintf(stderr, "-v{0|1|2|3}    verbosity level\n");
@@ -20,10 +20,10 @@ static void help(void) {
 /* ***************************************************************** */
 
 #define MAX_KEYS 262144
-static tsdb_key_info_t *keys[MAX_KEYS];
+static dbats_key_info_t *keys[MAX_KEYS];
 static int n_keys = 0;
 
-static void load_keys(tsdb_handler *handler, const char *path)
+static void load_keys(dbats_handler *handler, const char *path)
 {
     char line[128];
     FILE *keyfile = fopen(path, "r");
@@ -34,7 +34,7 @@ static void load_keys(tsdb_handler *handler, const char *path)
     while (fgets(line, sizeof(line), keyfile)) {
 	char *p = strchr(line, '\n');
 	if (p) *p = 0;
-	tsdb_get_key_info(handler, line, &keys[n_keys], 0);
+	dbats_get_key_info(handler, line, &keys[n_keys], 0);
 	n_keys++;
     }
     if (ferror(keyfile)) {
@@ -43,20 +43,20 @@ static void load_keys(tsdb_handler *handler, const char *path)
     }
 }
 
-static void get_keys(tsdb_handler *handler)
+static void get_keys(dbats_handler *handler)
 {
-    tsdb_keywalk_start(handler);
-    while (tsdb_keywalk_next(handler, &keys[n_keys]) == 0) {
+    dbats_keywalk_start(handler);
+    while (dbats_keywalk_next(handler, &keys[n_keys]) == 0) {
 	n_keys++;
     }
-    tsdb_keywalk_end(handler);
+    dbats_keywalk_end(handler);
 }
 
 int main(int argc, char *argv[]) {
-    tsdb_handler handler;
+    dbats_handler handler;
     uint32_t begin = 0, end = 0;
     uint32_t run_start, elapsed;
-    char *tsdb_path = NULL;
+    char *dbats_path = NULL;
     char *keyfile_path = NULL;
     FILE *out;
     progname = argv[0];
@@ -83,17 +83,17 @@ int main(int argc, char *argv[]) {
     if (argc != 3)
 	help();
 
-    tsdb_path = argv[0];
+    dbats_path = argv[0];
     begin = atol(argv[1]);
     end = atol(argv[2]);
 
-    traceEvent(TRACE_INFO, "begin=%"PRId32 " end=%"PRId32, begin, end);
+    dbats_log(TRACE_INFO, "begin=%"PRId32 " end=%"PRId32, begin, end);
     if ((begin <= 0) || (end < begin))
 	help();
 
-    traceEvent(TRACE_INFO, "Opening %s", tsdb_path);
+    dbats_log(TRACE_INFO, "Opening %s", dbats_path);
 
-    if (tsdb_open(&handler, tsdb_path, 0, 0, TSDB_READONLY) != 0)
+    if (dbats_open(&handler, dbats_path, 0, 0, DBATS_READONLY) != 0)
 	return(-1);
 
     if (keyfile_path)
@@ -109,17 +109,17 @@ int main(int argc, char *argv[]) {
 	for (uint32_t t = begin; t <= end; t += handler.agg[agg_id].period) {
 	    int rc;
 
-	    if ((rc = tsdb_goto_time(&handler, t, 0)) == -1) {
-		traceEvent(TRACE_INFO, "Unable to find time %u", t);
+	    if ((rc = dbats_goto_time(&handler, t, 0)) == -1) {
+		dbats_log(TRACE_INFO, "Unable to find time %u", t);
 		continue;
 	    }
 
-	    if (handler.agg[agg_id].func == TSDB_AGG_AVG) {
+	    if (handler.agg[agg_id].func == DBATS_AGG_AVG) {
 		const double *values;
 		for (int k = 0; k < n_keys; k++) {
-		    rc = tsdb_get_double(&handler, keys[k], &values, agg_id);
+		    rc = dbats_get_double(&handler, keys[k], &values, agg_id);
 		    if (rc != 0) {
-			fprintf(stdout, "error in tsdb_get(%s)\n", keys[k]->key);
+			fprintf(stdout, "error in dbats_get(%s)\n", keys[k]->key);
 			break;
 		    }
 		    fprintf(out, "%s ", keys[k]->key);
@@ -129,11 +129,11 @@ int main(int argc, char *argv[]) {
 		    fprintf(out, "%u %d\n", t, agg_id);
 		}
 	    } else {
-		const tsdb_value *values;
+		const dbats_value *values;
 		for (int k = 0; k < n_keys; k++) {
-		    rc = tsdb_get(&handler, keys[k], &values, agg_id);
+		    rc = dbats_get(&handler, keys[k], &values, agg_id);
 		    if (rc != 0) {
-			fprintf(stdout, "error in tsdb_get(%s)\n", keys[k]->key);
+			fprintf(stdout, "error in dbats_get(%s)\n", keys[k]->key);
 			break;
 		    }
 		    fprintf(out, "%s ", keys[k]->key);
@@ -148,9 +148,9 @@ int main(int argc, char *argv[]) {
 
     elapsed = time(NULL) - run_start;
 
-    traceEvent(TRACE_INFO, "Time elapsed: %u sec", elapsed);
-    traceEvent(TRACE_INFO, "Closing %s", tsdb_path);
-    tsdb_close(&handler);
-    traceEvent(TRACE_INFO, "Done");
+    dbats_log(TRACE_INFO, "Time elapsed: %u sec", elapsed);
+    dbats_log(TRACE_INFO, "Closing %s", dbats_path);
+    dbats_close(&handler);
+    dbats_log(TRACE_INFO, "Done");
     return(0);
 }

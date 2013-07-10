@@ -16,7 +16,7 @@
 #include <sys/types.h>
 #include <db.h>
 
-#include "tsdb_api.h"
+#include "dbats.h"
 #include "quicklz.h"
 
 
@@ -24,7 +24,7 @@
 // compile-time assertion (works anywhere a declaration is allowed)
 #define ct_assert(expr, label)  enum { ASSERTION_ERROR__##label = 1/(!!(expr)) };
 
-ct_assert((sizeof(double) <= sizeof(tsdb_value)), tsdb_value_is_smaller_than_double)
+ct_assert((sizeof(double) <= sizeof(dbats_value)), dbats_value_is_smaller_than_double)
 
 /*************************************************************************/
 
@@ -35,15 +35,15 @@ ct_assert((sizeof(double) <= sizeof(tsdb_value)), tsdb_value_is_smaller_than_dou
 #define vec_test(vec, i)   (vec[(i)/8] & (1<<((i)%8)))    // test the ith bit
 
 #define valueptr(handler, agg_id, frag_id, offset) \
-    ((tsdb_value*)(&handler->tslice[agg_id].frag[frag_id]->data[offset * handler->entry_size]))
+    ((dbats_value*)(&handler->tslice[agg_id].frag[frag_id]->data[offset * handler->entry_size]))
 
-struct tsdb_frag {
+struct dbats_frag {
     uint8_t compressed; // is data in db compressed?
     uint8_t is_set[vec_size(ENTRIES_PER_FRAG)]; // which indexes have values
     uint8_t data[]; // values (C99 flexible array member)
 };
 
-#define fragsize(handler) (sizeof(tsdb_frag) + ENTRIES_PER_FRAG * (handler)->entry_size)
+#define fragsize(handler) (sizeof(dbats_frag) + ENTRIES_PER_FRAG * (handler)->entry_size)
 
 typedef struct {
     uint32_t time;
@@ -67,7 +67,7 @@ static void *emalloc(size_t size, const char *msg)
 {
     void *ptr = malloc(size);
     if (!ptr)
-	traceEvent(TRACE_ERROR, "Can't allocate %zu bytes for %s", size, msg);
+	dbats_log(TRACE_ERROR, "Can't allocate %zu bytes for %s", size, msg);
     return ptr;
 }
 #else
@@ -78,33 +78,33 @@ static void *emalloc(size_t size, const char *msg)
  * DB wrappers
  ************************************************************************/
 
-static int raw_db_open(tsdb_handler *handler, DB **dbp, const char *envpath,
+static int raw_db_open(dbats_handler *handler, DB **dbp, const char *envpath,
     const char *dbname, uint32_t flags, int mode)
 {
     int ret;
 
     if ((ret = db_create(dbp, handler->dbenv, 0)) != 0) {
-	traceEvent(TRACE_ERROR, "Error creating DB handler %s: %s",
+	dbats_log(TRACE_ERROR, "Error creating DB handler %s: %s",
 	    dbname, db_strerror(ret));
 	return -1;
     }
 
     uint32_t dbflags = 0;
-    if (flags & TSDB_CREATE)
+    if (flags & DBATS_CREATE)
 	dbflags |= DB_CREATE;
-    if (flags & TSDB_READONLY)
+    if (flags & DBATS_READONLY)
 	dbflags |= DB_RDONLY;
 
     ret = (*dbp)->open(*dbp, NULL, dbname, NULL, DB_BTREE, dbflags, mode);
     if (ret != 0) {
-	traceEvent(TRACE_ERROR, "Error opening DB %s/%s (mode=%o): %s",
+	dbats_log(TRACE_ERROR, "Error opening DB %s/%s (mode=%o): %s",
 	    envpath, dbname, mode, db_strerror(ret));
 	return -1;
     }
     return 0;
 }
 
-static void raw_db_set(const tsdb_handler *handler, DB *db,
+static void raw_db_set(const dbats_handler *handler, DB *db,
     const void *key, uint32_t key_len,
     const void *value, uint32_t value_len)
 {
@@ -113,14 +113,14 @@ static void raw_db_set(const tsdb_handler *handler, DB *db,
 
     if (db == handler->dbData) {
 	fragkey_t *fragkey = (fragkey_t*)key;
-	traceEvent(TRACE_INFO, "raw_db_set Data: t=%u agg=%d frag=%u, compress=%d, len=%u",
+	dbats_log(TRACE_INFO, "raw_db_set Data: t=%u agg=%d frag=%u, compress=%d, len=%u",
 	    fragkey->time, fragkey->agg_id, fragkey->frag_id, *(uint8_t*)value, value_len);
     }
 
     if (handler->readonly) {
 	const char *dbname;
 	db->get_dbname(db, NULL, &dbname);
-	traceEvent(TRACE_WARNING, "Unable to set value in database \"%s\" "
+	dbats_log(TRACE_WARNING, "Unable to set value in database \"%s\" "
 	    "(read-only mode)", dbname);
 	return;
     }
@@ -135,7 +135,7 @@ static void raw_db_set(const tsdb_handler *handler, DB *db,
     data.flags = DB_DBT_USERMEM;
 
     if ((ret = db->put(db, NULL, &key_data, &data, 0)) != 0)
-	traceEvent(TRACE_WARNING, "Error in raw_db_set: %s", db_strerror(ret));
+	dbats_log(TRACE_WARNING, "Error in raw_db_set: %s", db_strerror(ret));
 }
 
 #define QLZ_OVERHEAD 400
@@ -143,7 +143,7 @@ static void raw_db_set(const tsdb_handler *handler, DB *db,
 static uint8_t *db_get_buf = 0;
 static size_t db_get_buf_len = 0;
 
-static int raw_db_get(const tsdb_handler *handler, DB* db,
+static int raw_db_get(const dbats_handler *handler, DB* db,
     const void *key, uint32_t key_len, void **value, size_t *value_len)
 {
     DBT key_data, data;
@@ -170,9 +170,9 @@ static int raw_db_get(const tsdb_handler *handler, DB* db,
 	*value_len = data.size;
 	return 0;
     } else {
-	traceEvent(TRACE_WARNING, "raw_db_get failed: %s", db_strerror(rc));
+	dbats_log(TRACE_WARNING, "raw_db_get failed: %s", db_strerror(rc));
 	if (rc == DB_BUFFER_SMALL) {
-	    traceEvent(TRACE_WARNING, "had %" PRIu32 ", needed %" PRIu32,
+	    dbats_log(TRACE_WARNING, "had %" PRIu32 ", needed %" PRIu32,
 		data.ulen, data.size);
 	}
 	return -1;
@@ -180,13 +180,13 @@ static int raw_db_get(const tsdb_handler *handler, DB* db,
 }
 
 /*
-static void raw_db_delete(const tsdb_handler *handler, DB *db,
+static void raw_db_delete(const dbats_handler *handler, DB *db,
     const void *key, uint32_t key_len)
 {
     DBT key_data;
 
     if (handler->readonly) {
-	traceEvent(TRACE_WARNING, "Unable to delete value (read-only mode)");
+	dbats_log(TRACE_WARNING, "Unable to delete value (read-only mode)");
 	return;
     }
 
@@ -196,12 +196,12 @@ static void raw_db_delete(const tsdb_handler *handler, DB *db,
     key_data.flags = DB_DBT_USERMEM;
 
     if (db->del(db, NULL, &key_data, 0) != 0)
-	traceEvent(TRACE_WARNING, "Error while deleting key");
+	dbats_log(TRACE_WARNING, "Error while deleting key");
 }
 */
 
 /*
-static int raw_db_key_exists(const tsdb_handler *handler, DB *db,
+static int raw_db_key_exists(const dbats_handler *handler, DB *db,
     const void *key, size_t key_len)
 {
     void *value;
@@ -214,18 +214,18 @@ static int raw_db_key_exists(const tsdb_handler *handler, DB *db,
 /*************************************************************************/
 
 // allocate a key_info block if needed
-static int alloc_key_info_block(tsdb_handler *handler, uint32_t block)
+static int alloc_key_info_block(dbats_handler *handler, uint32_t block)
 {
     if (!handler->key_info_block[block]) {
 	handler->key_info_block[block] =
-	    emalloc(sizeof(tsdb_key_info_t) * INFOS_PER_BLOCK, "key_info_block");
+	    emalloc(sizeof(dbats_key_info_t) * INFOS_PER_BLOCK, "key_info_block");
 	if (!handler->key_info_block[block])
 	    return -1;
     }
     return 0;
 }
 
-int tsdb_open(tsdb_handler *handler, const char *path,
+int dbats_open(dbats_handler *handler, const char *path,
     uint16_t num_values_per_entry,
     uint32_t period,
     uint32_t flags)
@@ -234,20 +234,20 @@ int tsdb_open(tsdb_handler *handler, const char *path,
     int dbmode = 00666;
     uint32_t dbflags = DB_INIT_MPOOL;
 
-    memset(handler, 0, sizeof(tsdb_handler));
-    handler->readonly = !!(flags & TSDB_READONLY);
-    handler->compress = !(flags & TSDB_UNCOMPRESSED);
+    memset(handler, 0, sizeof(dbats_handler));
+    handler->readonly = !!(flags & DBATS_READONLY);
+    handler->compress = !(flags & DBATS_UNCOMPRESSED);
     handler->num_values_per_entry = 1;
 
     if ((ret = db_env_create(&handler->dbenv, 0)) != 0) {
-	traceEvent(TRACE_ERROR, "Error creating DB env: %s",
+	dbats_log(TRACE_ERROR, "Error creating DB env: %s",
 	    db_strerror(ret));
 	return -1;
     }
 
-    if (flags & TSDB_CREATE) {
+    if (flags & DBATS_CREATE) {
 	if (mkdir(path, 0777) < 0 && errno != EEXIST) {
-	    traceEvent(TRACE_ERROR, "Error creating %s: %s",
+	    dbats_log(TRACE_ERROR, "Error creating %s: %s",
 		path, strerror(errno));
 	    return -1;
 	}
@@ -255,7 +255,7 @@ int tsdb_open(tsdb_handler *handler, const char *path,
     }
 
     if ((ret = handler->dbenv->open(handler->dbenv, path, dbflags, dbmode)) != 0) {
-	traceEvent(TRACE_ERROR, "Error opening DB environment: %s",
+	dbats_log(TRACE_ERROR, "Error opening DB environment: %s",
 	    db_strerror(ret));
 	return -1;
     }
@@ -264,7 +264,7 @@ int tsdb_open(tsdb_handler *handler, const char *path,
     if (raw_db_open(handler, &handler->dbKeys, path, "keys", flags, dbmode) != 0) return -1;
     if (raw_db_open(handler, &handler->dbData, path, "data", flags, dbmode) != 0) return -1;
 
-    handler->entry_size = sizeof(tsdb_value); // for db_get_buf_len
+    handler->entry_size = sizeof(dbats_value); // for db_get_buf_len
 
 #define initcfg(handler, type, field, defaultval) \
     do { \
@@ -277,7 +277,7 @@ int tsdb_open(tsdb_handler *handler, const char *path,
 	    raw_db_set(handler, handler->dbMeta, #field, strlen(#field), \
 		&handler->field, sizeof(handler->field)); \
 	} \
-	traceEvent(TRACE_INFO, "cfg: %-.22s = %u", #field, handler->field); \
+	dbats_log(TRACE_INFO, "cfg: %-.22s = %u", #field, handler->field); \
     } while (0)
 
     initcfg(handler, uint32_t, lowest_free_index,      0);
@@ -286,15 +286,15 @@ int tsdb_open(tsdb_handler *handler, const char *path,
     initcfg(handler, uint16_t, num_aggs,            1);
 
     if (handler->num_aggs > MAX_NUM_AGGS) {
-	traceEvent(TRACE_ERROR, "num_aggs %d > %d", handler->num_aggs,
+	dbats_log(TRACE_ERROR, "num_aggs %d > %d", handler->num_aggs,
 	    MAX_NUM_AGGS);
 	handler->readonly = 1;
 	return -1;
     }
 
-    handler->entry_size = handler->num_values_per_entry * sizeof(tsdb_value);
+    handler->entry_size = handler->num_values_per_entry * sizeof(dbats_value);
 
-    handler->agg[0].func = TSDB_AGG_NONE;
+    handler->agg[0].func = DBATS_AGG_NONE;
     handler->agg[0].steps = 1;
     handler->agg[0].period = handler->period;
 
@@ -303,9 +303,9 @@ int tsdb_open(tsdb_handler *handler, const char *path,
 	void *value;
 	size_t value_len;
 	if (raw_db_get(handler, handler->dbMeta, "agg", strlen("agg"), &value, &value_len) == 0) {
-	    if (value_len != handler->num_aggs * sizeof(tsdb_agg)) {
-		traceEvent(TRACE_ERROR, "corrupt aggregation config %zu != %zu",
-		    value_len, handler->num_aggs * sizeof(tsdb_agg));
+	    if (value_len != handler->num_aggs * sizeof(dbats_agg)) {
+		dbats_log(TRACE_ERROR, "corrupt aggregation config %zu != %zu",
+		    value_len, handler->num_aggs * sizeof(dbats_agg));
 		handler->readonly = 1;
 		return -1;
 	    }
@@ -317,7 +317,7 @@ int tsdb_open(tsdb_handler *handler, const char *path,
     int rc;
     DBC *cursor;
     if ((rc = handler->dbKeys->cursor(handler->dbKeys, NULL, &cursor, 0)) != 0) {
-	traceEvent(TRACE_ERROR, "Error in keywalk_start: %s", db_strerror(rc));
+	dbats_log(TRACE_ERROR, "Error in keywalk_start: %s", db_strerror(rc));
 	return -1;
     }
 
@@ -329,7 +329,7 @@ int tsdb_open(tsdb_handler *handler, const char *path,
 	if ((rc = cursor->get(cursor, &dbkey, &dbdata, DB_NEXT)) != 0) {
 	    if (rc == DB_NOTFOUND)
 		break;
-	    traceEvent(TRACE_ERROR, "Error in cursor->get: %s", db_strerror(rc));
+	    dbats_log(TRACE_ERROR, "Error in cursor->get: %s", db_strerror(rc));
 	    return -1;
 	}
 	uint32_t idx = ((raw_key_info_t*)dbdata.data)->index;
@@ -338,7 +338,7 @@ int tsdb_open(tsdb_handler *handler, const char *path,
 	if (alloc_key_info_block(handler, block) != 0)
 	    return -1;
 
-	tsdb_key_info_t *tkip = &handler->key_info_block[block][offset];
+	dbats_key_info_t *tkip = &handler->key_info_block[block][offset];
 	raw_key_info_t *rki = dbdata.data;
 	char *keycopy = emalloc(dbkey.size+1, "copy of key");
 	if (!keycopy) return -2;
@@ -356,7 +356,7 @@ int tsdb_open(tsdb_handler *handler, const char *path,
     }
 
     if ((rc = cursor->close(cursor)) != 0) {
-	traceEvent(TRACE_ERROR, "Error in cursor->close: %s", db_strerror(rc));
+	dbats_log(TRACE_ERROR, "Error in cursor->close: %s", db_strerror(rc));
 	return -1;
     }
 
@@ -365,17 +365,17 @@ int tsdb_open(tsdb_handler *handler, const char *path,
     return(0);
 }
 
-int tsdb_aggregate(tsdb_handler *handler, int func, int steps)
+int dbats_aggregate(dbats_handler *handler, int func, int steps)
 {
     if (handler->tslice[0].time > 0) {
 	// XXX fix this?
-	traceEvent(TRACE_ERROR,
+	dbats_log(TRACE_ERROR,
 	    "Adding a new aggregation to existing data is not yet supported.");
 	return -1;
     }
 
     if (handler->num_aggs >= MAX_NUM_AGGS) {
-	traceEvent(TRACE_ERROR, "Too many aggregations (%d)", MAX_NUM_AGGS);
+	dbats_log(TRACE_ERROR, "Too many aggregations (%d)", MAX_NUM_AGGS);
 	return -1;
     }
 
@@ -385,7 +385,7 @@ int tsdb_aggregate(tsdb_handler *handler, int func, int steps)
     handler->agg[agg_id].period = handler->agg[0].period * steps;
 
     raw_db_set(handler, handler->dbMeta, "agg", strlen("agg"),
-	handler->agg, sizeof(tsdb_agg) * handler->num_aggs);
+	handler->agg, sizeof(dbats_agg) * handler->num_aggs);
     raw_db_set(handler, handler->dbMeta, "num_aggs", strlen("num_aggs"),
 	&handler->num_aggs, sizeof(handler->num_aggs));
 
@@ -396,9 +396,9 @@ int tsdb_aggregate(tsdb_handler *handler, int func, int steps)
 
 // Writes tslice to db (unless db is readonly).
 // Also cleans up in-memory tslice, even if db is readonly.
-static void tsdb_flush_tslice(tsdb_handler *handler, int agg_id)
+static void dbats_flush_tslice(dbats_handler *handler, int agg_id)
 {
-    traceEvent(TRACE_INFO, "Flush t=%u agg_id=%d", handler->tslice[agg_id].time, agg_id);
+    dbats_log(TRACE_INFO, "Flush t=%u agg_id=%d", handler->tslice[agg_id].time, agg_id);
     size_t frag_size = fragsize(handler);
     fragkey_t dbkey;
     char *buf = NULL;
@@ -412,7 +412,7 @@ static void tsdb_flush_tslice(tsdb_handler *handler, int agg_id)
 	if (handler->readonly) {
 	    // do nothing
 	} else if (!handler->tslice[agg_id].frag_changed[f]) {
-	    traceEvent(TRACE_INFO, "Skipping frag %d (unchanged)", f);
+	    dbats_log(TRACE_INFO, "Skipping frag %d (unchanged)", f);
 	} else if (handler->compress) {
 	    if (!handler->state_compress) {
 		handler->state_compress = emalloc(sizeof(qlz_state_compress), "qlz_state_compress");
@@ -426,7 +426,7 @@ static void tsdb_flush_tslice(tsdb_handler *handler, int agg_id)
 	    handler->tslice[agg_id].frag[f]->compressed = 1;
 	    size_t compressed_len = qlz_compress(handler->tslice[agg_id].frag[f],
 		buf+1, frag_size, handler->state_compress);
-	    traceEvent(TRACE_INFO, "Frag %d compression: %zu -> %zu (%.1f %%)",
+	    dbats_log(TRACE_INFO, "Frag %d compression: %zu -> %zu (%.1f %%)",
 		f, frag_size, compressed_len, compressed_len*100.0/frag_size);
 	    raw_db_set(handler, handler->dbData, &dbkey, sizeof(dbkey),
 		buf, compressed_len + 1);
@@ -434,7 +434,7 @@ static void tsdb_flush_tslice(tsdb_handler *handler, int agg_id)
 	    if (!buf)
 		buf = (char*)emalloc(frag_size + 1, "write buffer");
 	    handler->tslice[agg_id].frag[f]->compressed = 0;
-	    traceEvent(TRACE_INFO, "Frag %d write: %zu", f, frag_size);
+	    dbats_log(TRACE_INFO, "Frag %d write: %zu", f, frag_size);
 	    raw_db_set(handler, handler->dbData, &dbkey, sizeof(dbkey),
 		handler->tslice[agg_id].frag[f], frag_size);
 	}
@@ -448,16 +448,16 @@ static void tsdb_flush_tslice(tsdb_handler *handler, int agg_id)
 	if (handler->agg[agg_id].last_flush < handler->tslice[agg_id].time)
 	    handler->agg[agg_id].last_flush = handler->tslice[agg_id].time;
 	raw_db_set(handler, handler->dbMeta, "agg", strlen("agg"),
-	    handler->agg, sizeof(tsdb_agg) * handler->num_aggs);
+	    handler->agg, sizeof(dbats_agg) * handler->num_aggs);
     }
 
-    memset(&handler->tslice[agg_id], 0, sizeof(tsdb_tslice));
+    memset(&handler->tslice[agg_id], 0, sizeof(dbats_tslice));
     if (buf) free(buf);
 }
 
 /*************************************************************************/
 
-static int set_key_info(const tsdb_handler *handler, tsdb_key_info_t *tkip)
+static int set_key_info(const dbats_handler *handler, dbats_key_info_t *tkip)
 {
     size_t tr_size = tkip->n_timeranges * sizeof(timerange_t);
     size_t rki_size = sizeof(raw_key_info_t) + tr_size;
@@ -467,24 +467,24 @@ static int set_key_info(const tsdb_handler *handler, tsdb_key_info_t *tkip)
     memcpy(rki->timeranges, tkip->timeranges, tr_size);
     raw_db_set(handler, handler->dbKeys, tkip->key, strlen(tkip->key), rki, rki_size);
     free(rki);
-    traceEvent(TRACE_INFO, "Write key %s -> %u, %d timeranges",
+    dbats_log(TRACE_INFO, "Write key %s -> %u, %d timeranges",
 	tkip->key, tkip->index, tkip->n_timeranges);
     /*
     int totalsteps = 0; // XXX
     for (int i = 0; i < tkip->n_timeranges; i++) { // XXX
 	int steps = (tkip->timeranges[i].end + handler->agg[0].period - tkip->timeranges[i].start) /
 	    handler->agg[0].period;
-	traceEvent(TRACE_INFO, "     %3d: %10u %10u (%3d)",
+	dbats_log(TRACE_INFO, "     %3d: %10u %10u (%3d)",
 	    i, tkip->timeranges[i].start, tkip->timeranges[i].end, steps);
 	totalsteps += steps;
     }
-    traceEvent(TRACE_INFO, "                              %6d", totalsteps); // XXX
+    dbats_log(TRACE_INFO, "                              %6d", totalsteps); // XXX
     */
     return 0;
 }
 
 // Insert a new timerange into tkip->timeranges at position i, and initialize it
-static timerange_t *timerange_insert(tsdb_key_info_t *tkip, int i,
+static timerange_t *timerange_insert(dbats_key_info_t *tkip, int i,
     uint32_t start, uint32_t end)
 {
     int n = ++tkip->n_timeranges;
@@ -502,18 +502,18 @@ static timerange_t *timerange_insert(tsdb_key_info_t *tkip, int i,
 }
 
 // Update the timeranges associated with each key.
-static int update_key_info(tsdb_handler *handler, int next_is_far)
+static int update_key_info(dbats_handler *handler, int next_is_far)
 {
-    tsdb_agg *agg0 = &handler->agg[0];
-    tsdb_tslice *tslice = &handler->tslice[0];
+    dbats_agg *agg0 = &handler->agg[0];
+    dbats_tslice *tslice = &handler->tslice[0];
     if (handler->readonly || tslice->time == 0) return 0;
     int is_last = tslice->time >= agg0->last_flush;
-    traceEvent(TRACE_INFO,
+    dbats_log(TRACE_INFO,
 	"update_key_info: t=%u, last_flush=%u, is_last=%d, next_is_far=%d",
 	tslice->time, agg0->last_flush, is_last, next_is_far); // XXX
 
 #define debugUKI(first, label, i) \
-    traceEvent(TRACE_INFO, \
+    dbats_log(TRACE_INFO, \
 	"%s idx=%u, t=%u, [%u..%u] %s %d/%d", \
 	(first ? "update_key_info:" : "             -->"), \
 	idx, tslice->time, tr[i].start, tr[i].end, label, i, tkip->n_timeranges)
@@ -521,7 +521,7 @@ static int update_key_info(tsdb_handler *handler, int next_is_far)
     for (uint32_t idx = 0; idx < handler->lowest_free_index; idx++) {
 	uint32_t block = idx / INFOS_PER_BLOCK;
 	uint32_t offset = idx % INFOS_PER_BLOCK;
-	tsdb_key_info_t *tkip = &handler->key_info_block[block][offset];
+	dbats_key_info_t *tkip = &handler->key_info_block[block][offset];
 	timerange_t *tr = tkip->timeranges; // shorthand
 
 	int i = tkip->n_timeranges - 1;
@@ -681,7 +681,7 @@ static int update_key_info(tsdb_handler *handler, int next_is_far)
 
 /*************************************************************************/
 
-void tsdb_close(tsdb_handler *handler)
+void dbats_close(dbats_handler *handler)
 {
     if (!handler->is_open) {
 	return;
@@ -689,17 +689,17 @@ void tsdb_close(tsdb_handler *handler)
     handler->is_open = 0;
 
     if (!handler->readonly)
-	traceEvent(TRACE_INFO, "Flushing database changes...");
+	dbats_log(TRACE_INFO, "Flushing database changes...");
 
     update_key_info(handler, 0);
     for (int agg_id = 0; agg_id < handler->num_aggs; agg_id++) {
-	tsdb_flush_tslice(handler, agg_id);
+	dbats_flush_tslice(handler, agg_id);
     }
 
     for (uint32_t idx = 0; idx < handler->lowest_free_index; idx++) {
 	uint32_t block = idx / INFOS_PER_BLOCK;
 	uint32_t offset = idx % INFOS_PER_BLOCK;
-	tsdb_key_info_t *tkip = &handler->key_info_block[block][offset];
+	dbats_key_info_t *tkip = &handler->key_info_block[block][offset];
 	free((void*)tkip->key);
 	tkip->key = NULL;
 	free(tkip->timeranges);
@@ -728,7 +728,7 @@ void tsdb_close(tsdb_handler *handler)
 
 static const time_t time_base = 259200; // 00:00 on first sunday of 1970, UTC
 
-uint32_t normalize_time(const tsdb_handler *handler, int agg_id, uint32_t *t)
+uint32_t normalize_time(const dbats_handler *handler, int agg_id, uint32_t *t)
 {
     *t -= (*t - time_base) % handler->agg[agg_id].period;
     return *t;
@@ -736,7 +736,7 @@ uint32_t normalize_time(const tsdb_handler *handler, int agg_id, uint32_t *t)
 
 /*************************************************************************/
 
-static int load_frag(tsdb_handler *handler, uint32_t t, int agg_id,
+static int load_frag(dbats_handler *handler, uint32_t t, int agg_id,
     uint32_t frag_id)
 {
     // load fragment
@@ -748,7 +748,7 @@ static int load_frag(tsdb_handler *handler, uint32_t t, int agg_id,
     dbkey.frag_id = frag_id;
     int rc = raw_db_get(handler, handler->dbData, &dbkey, sizeof(dbkey),
 	&value, &value_len);
-    traceEvent(TRACE_INFO, "load_frag t=%u, agg_id=%u, frag_id=%u: "
+    dbats_log(TRACE_INFO, "load_frag t=%u, agg_id=%u, frag_id=%u: "
 	"raw_db_get = %d", t, agg_id, frag_id, rc);
     if (rc != 0)
 	return 0; // no match
@@ -758,7 +758,7 @@ static int load_frag(tsdb_handler *handler, uint32_t t, int agg_id,
 	qlz_size_decompressed((void*)((uint8_t*)value+1));
     void *ptr = malloc(len);
     if (!ptr) {
-	traceEvent(TRACE_ERROR, "Can't allocate %zu bytes for frag "
+	dbats_log(TRACE_ERROR, "Can't allocate %zu bytes for frag "
 	    "t=%u, agg_id=%u, frag_id=%u", len, t, agg_id, frag_id);
 	return -2; // error
     }
@@ -771,39 +771,39 @@ static int load_frag(tsdb_handler *handler, uint32_t t, int agg_id,
 	    if (!handler->state_decompress) return -2;
 	}
 	len = qlz_decompress((void*)((uint8_t*)value+1), ptr, handler->state_decompress);
-	traceEvent(TRACE_INFO, "decompressed frag t=%u, agg_id=%u, frag_id=%u: "
+	dbats_log(TRACE_INFO, "decompressed frag t=%u, agg_id=%u, frag_id=%u: "
 	    "%u -> %u (%.1f%%)",
 	    t, agg_id, frag_id, value_len, len, len*100.0/value_len);
 
     } else {
 	// copy fragment
 	memcpy(ptr, (uint8_t*)value, len);
-	traceEvent(TRACE_INFO, "copied frag t=%u, agg_id=%u, frag_id=%u",
+	dbats_log(TRACE_INFO, "copied frag t=%u, agg_id=%u, frag_id=%u",
 	    t, agg_id, frag_id);
     }
 
     handler->tslice[agg_id].frag[frag_id] = ptr;
 
-    tsdb_tslice *tslice = &handler->tslice[agg_id];
+    dbats_tslice *tslice = &handler->tslice[agg_id];
     if (tslice->num_frags <= frag_id)
 	tslice->num_frags = frag_id + 1;
 
     return 0;
 }
 
-int tsdb_goto_time(tsdb_handler *handler, uint32_t time_value, uint32_t flags)
+int dbats_goto_time(dbats_handler *handler, uint32_t time_value, uint32_t flags)
 {
     int rc;
 
-    traceEvent(TRACE_INFO, "goto_time %u", time_value);
+    dbats_log(TRACE_INFO, "goto_time %u", time_value);
 
     for (int agg_id = 0; agg_id < handler->num_aggs; agg_id++) {
-	tsdb_tslice *tslice = &handler->tslice[agg_id];
+	dbats_tslice *tslice = &handler->tslice[agg_id];
 	uint32_t t = time_value;
 
 	normalize_time(handler, agg_id, &t);
 	if (tslice->time == t) {
-	    traceEvent(TRACE_INFO, "goto_time %u, agg_id=%d: already loaded", t, agg_id);
+	    dbats_log(TRACE_INFO, "goto_time %u, agg_id=%d: already loaded", t, agg_id);
 	    continue;
 	}
 
@@ -814,9 +814,9 @@ int tsdb_goto_time(tsdb_handler *handler, uint32_t time_value, uint32_t flags)
 	}
 
 	// Flush tslice if loaded
-	tsdb_flush_tslice(handler, agg_id);
+	dbats_flush_tslice(handler, agg_id);
 
-	tslice->preload = !!(flags & TSDB_PRELOAD);
+	tslice->preload = !!(flags & DBATS_PRELOAD);
 	tslice->time = t;
 
 	if (!tslice->preload)
@@ -831,7 +831,7 @@ int tsdb_goto_time(tsdb_handler *handler, uint32_t time_value, uint32_t flags)
 	    if (tslice->frag[frag_id])
 		loaded++;
 	}
-	traceEvent(TRACE_INFO, "goto_time %u: agg_id=%d, loaded %u/%u fragments",
+	dbats_log(TRACE_INFO, "goto_time %u: agg_id=%d, loaded %u/%u fragments",
 	    time_value, agg_id, loaded, tslice->num_frags);
     }
     return 0;
@@ -839,8 +839,8 @@ int tsdb_goto_time(tsdb_handler *handler, uint32_t time_value, uint32_t flags)
 
 /*************************************************************************/
 
-int tsdb_get_key_info(tsdb_handler *handler, const char *key,
-    tsdb_key_info_t **tkipp, uint32_t flags)
+int dbats_get_key_info(dbats_handler *handler, const char *key,
+    dbats_key_info_t **tkipp, uint32_t flags)
 {
     void *ptr;
     size_t keylen = strlen(key);
@@ -852,10 +852,10 @@ int tsdb_get_key_info(tsdb_handler *handler, const char *key,
 	uint32_t offset = idx % INFOS_PER_BLOCK;
 	*tkipp = &handler->key_info_block[block][offset];
 	// assert(strcmp((*tkipp)->key, key) == 0);
-	traceEvent(TRACE_INFO, "Found key %s = index %u", key, idx);
+	dbats_log(TRACE_INFO, "Found key %s = index %u", key, idx);
 
-    } else if (!(flags & TSDB_CREATE)) {
-	traceEvent(TRACE_INFO, "Key not found: %s", key);
+    } else if (!(flags & DBATS_CREATE)) {
+	dbats_log(TRACE_INFO, "Key not found: %s", key);
 	return -1;
 
     } else if (handler->lowest_free_index < MAX_NUM_FRAGS * ENTRIES_PER_FRAG) {
@@ -873,25 +873,25 @@ int tsdb_get_key_info(tsdb_handler *handler, const char *key,
 	(*tkipp)->timeranges = NULL;
 	if (set_key_info(handler, *tkipp) != 0)
 	    return -1;
-	traceEvent(TRACE_INFO, "Assigned key %s = index %u", key, (*tkipp)->index);
+	dbats_log(TRACE_INFO, "Assigned key %s = index %u", key, (*tkipp)->index);
 	raw_db_set(handler, handler->dbMeta,
 	    "lowest_free_index", strlen("lowest_free_index"),
 	    &handler->lowest_free_index, sizeof(handler->lowest_free_index));
 
     } else {
-	traceEvent(TRACE_ERROR, "Out of indexes for key %s", key);
+	dbats_log(TRACE_ERROR, "Out of indexes for key %s", key);
 	return -2;
     }
 
     return 0;
 }
 
-static int instantiate_frag(tsdb_handler *handler, int agg_id, uint32_t frag_id)
+static int instantiate_frag(dbats_handler *handler, int agg_id, uint32_t frag_id)
 {
-    tsdb_tslice *tslice = &handler->tslice[agg_id];
+    dbats_tslice *tslice = &handler->tslice[agg_id];
 
     if (frag_id > MAX_NUM_FRAGS) {
-	traceEvent(TRACE_ERROR, "Internal error: frag_id %u > %u",
+	dbats_log(TRACE_ERROR, "Internal error: frag_id %u > %u",
 	    frag_id, MAX_NUM_FRAGS);
 	return -2;
     }
@@ -914,18 +914,18 @@ static int instantiate_frag(tsdb_handler *handler, int agg_id, uint32_t frag_id)
     }
 
     // Allocate a new fragment.
-    traceEvent(TRACE_NORMAL, "grow tslice for time %u, agg_id %d, frag_id %u",
+    dbats_log(TRACE_NORMAL, "grow tslice for time %u, agg_id %d, frag_id %u",
 	tslice->time, agg_id, frag_id);
     tslice->frag[frag_id] = calloc(1, fragsize(handler));
     if (!tslice->frag[frag_id]) {
-	traceEvent(TRACE_WARNING, "Can't allocate %u bytes to grow tslice "
+	dbats_log(TRACE_WARNING, "Can't allocate %u bytes to grow tslice "
 	    "for time %u, agg_id %d, frag_id %u",
 	    fragsize(handler), tslice->time, agg_id, frag_id);
 	return -2;
     }
     if (tslice->num_frags <= frag_id)
 	tslice->num_frags = frag_id + 1;
-    traceEvent(TRACE_INFO, "Grew tslice to %u elements",
+    dbats_log(TRACE_INFO, "Grew tslice to %u elements",
 	tslice->num_frags * ENTRIES_PER_FRAG);
 
     return 0;
@@ -937,9 +937,9 @@ static inline uint32_t min(uint32_t a, uint32_t b) { return a < b ? a : b; }
 
 static inline uint32_t max(uint32_t a, uint32_t b) { return a > b ? a : b; }
 
-int tsdb_set(tsdb_handler *handler, tsdb_key_info_t *tkip, const tsdb_value *valuep)
+int dbats_set(dbats_handler *handler, dbats_key_info_t *tkip, const dbats_value *valuep)
 {
-    traceEvent(TRACE_INFO, "tsdb_set %u %u = %" PRIval, handler->tslice[0].time, tkip->index, valuep[0]); // XXX
+    dbats_log(TRACE_INFO, "dbats_set %u %u = %" PRIval, handler->tslice[0].time, tkip->index, valuep[0]); // XXX
     int rc;
 
     if (!handler->is_open || handler->readonly)
@@ -950,7 +950,7 @@ int tsdb_set(tsdb_handler *handler, tsdb_key_info_t *tkip, const tsdb_value *val
     }
 
     uint8_t was_set = vec_test(handler->tslice[0].frag[tkip->frag_id]->is_set, tkip->offset);
-    tsdb_value *oldvaluep = valueptr(handler, 0, tkip->frag_id, tkip->offset);
+    dbats_value *oldvaluep = valueptr(handler, 0, tkip->frag_id, tkip->offset);
 
     for (int agg_id = 1; agg_id < handler->num_aggs; agg_id++) {
 	if ((rc = instantiate_frag(handler, agg_id, tkip->frag_id)) != 0) {
@@ -961,7 +961,7 @@ int tsdb_set(tsdb_handler *handler, tsdb_key_info_t *tkip, const tsdb_value *val
 	// Aggregate *valuep into tslice[agg_id]
 	uint8_t changed = 0;
 	uint8_t failed = 0;
-	tsdb_value *aggval = valueptr(handler, agg_id, tkip->frag_id, tkip->offset);
+	dbats_value *aggval = valueptr(handler, agg_id, tkip->frag_id, tkip->offset);
 
 	uint32_t aggstart = handler->tslice[agg_id].time;
 	uint32_t aggend = aggstart + (handler->agg[agg_id].steps - 1) * handler->agg[0].period;
@@ -992,11 +992,11 @@ int tsdb_set(tsdb_handler *handler, tsdb_key_info_t *tkip, const tsdb_value *val
 	if (!active_included)
 	    n++;
 
-	traceEvent(TRACE_INFO, "agg %d: [%u..%u] aggval=%" PRIval " n=%d",
+	dbats_log(TRACE_INFO, "agg %d: [%u..%u] aggval=%" PRIval " n=%d",
 	    agg_id, aggstart, aggend, aggval[0], n); // XXX
 
 	switch (handler->agg[agg_id].func) {
-	case TSDB_AGG_MIN:
+	case DBATS_AGG_MIN:
 	    for (int i = 0; i < handler->num_values_per_entry; i++) {
 		if (was_set && valuep[i] == oldvaluep[i]) {
 		    // value did not change; no need to change agg value
@@ -1009,7 +1009,7 @@ int tsdb_set(tsdb_handler *handler, tsdb_key_info_t *tkip, const tsdb_value *val
 		}
 	    }
 	    break;
-	case TSDB_AGG_MAX:
+	case DBATS_AGG_MAX:
 	    for (int i = 0; i < handler->num_values_per_entry; i++) {
 		if (was_set && valuep[i] == oldvaluep[i]) {
 		    // value did not change; no need to change agg value
@@ -1022,7 +1022,7 @@ int tsdb_set(tsdb_handler *handler, tsdb_key_info_t *tkip, const tsdb_value *val
 		}
 	    }
 	    break;
-	case TSDB_AGG_AVG:
+	case DBATS_AGG_AVG:
 	    for (int i = 0; i < handler->num_values_per_entry; i++) {
 		double *daggval = ((double*)&aggval[i]);
 		if (was_set && valuep[i] == oldvaluep[i]) {
@@ -1038,7 +1038,7 @@ int tsdb_set(tsdb_handler *handler, tsdb_key_info_t *tkip, const tsdb_value *val
 		}
 	    }
 	    break;
-	case TSDB_AGG_LAST:
+	case DBATS_AGG_LAST:
 	    for (int i = 0; i < handler->num_values_per_entry; i++) {
 		if (was_set && valuep[i] == oldvaluep[i]) {
 		    // value did not change; no need to change agg value
@@ -1068,7 +1068,7 @@ int tsdb_set(tsdb_handler *handler, tsdb_key_info_t *tkip, const tsdb_value *val
 		}
 	    }
 	    break;
-	case TSDB_AGG_SUM:
+	case DBATS_AGG_SUM:
 	    for (int i = 0; i < handler->num_values_per_entry; i++) {
 		if (was_set && valuep[i] == oldvaluep[i]) {
 		    // value did not change; no need to change agg value
@@ -1089,22 +1089,22 @@ int tsdb_set(tsdb_handler *handler, tsdb_key_info_t *tkip, const tsdb_value *val
 	    // XXX if (n >= xff * steps)
 	    vec_set(handler->tslice[agg_id].frag[tkip->frag_id]->is_set, tkip->offset);
 	    handler->tslice[agg_id].frag_changed[tkip->frag_id] = 1;
-	    if (handler->agg[agg_id].func == TSDB_AGG_AVG) {
-		traceEvent(TRACE_INFO, "Succesfully set value "
+	    if (handler->agg[agg_id].func == DBATS_AGG_AVG) {
+		dbats_log(TRACE_INFO, "Succesfully set value "
 		    "[agg_id=%d][frag_id=%u][offset=%" PRIu32 "][value_len=%u] aggval=%f",
 		    agg_id, tkip->frag_id, tkip->offset, handler->entry_size, *(double*)aggval);
 	    } else {
-		traceEvent(TRACE_INFO, "Succesfully set value "
+		dbats_log(TRACE_INFO, "Succesfully set value "
 		    "[agg_id=%d][frag_id=%u][offset=%" PRIu32 "][value_len=%u] aggval=%" PRIval,
 		    agg_id, tkip->frag_id, tkip->offset, handler->entry_size, aggval[0]);
 	    }
 	} else if (failed) {
-	    if (handler->agg[agg_id].func == TSDB_AGG_AVG) {
-		traceEvent(TRACE_ERROR, "Failed to set value "
+	    if (handler->agg[agg_id].func == DBATS_AGG_AVG) {
+		dbats_log(TRACE_ERROR, "Failed to set value "
 		    "[agg_id=%d][frag_id=%u][offset=%" PRIu32 "][value_len=%u] aggval=%f",
 		    agg_id, tkip->frag_id, tkip->offset, handler->entry_size, *(double*)aggval);
 	    } else {
-		traceEvent(TRACE_ERROR, "Failed to set value "
+		dbats_log(TRACE_ERROR, "Failed to set value "
 		    "[agg_id=%d][frag_id=%u][offset=%" PRIu32 "][value_len=%u] aggval=%" PRIval,
 		    agg_id, tkip->frag_id, tkip->offset, handler->entry_size, aggval[0]);
 	    }
@@ -1118,33 +1118,33 @@ int tsdb_set(tsdb_handler *handler, tsdb_key_info_t *tkip, const tsdb_value *val
     memcpy(oldvaluep, valuep, handler->entry_size);
     vec_set(handler->tslice[0].frag[tkip->frag_id]->is_set, tkip->offset);
     handler->tslice[0].frag_changed[tkip->frag_id] = 1;
-    traceEvent(TRACE_INFO, "Succesfully set value "
+    dbats_log(TRACE_INFO, "Succesfully set value "
 	"[agg_id=%d][frag_id=%u][offset=%" PRIu32 "][value_len=%u] value=%" PRIval,
 	0, tkip->frag_id, tkip->offset, handler->entry_size, valuep[0]);
 
     return 0;
 }
 
-int tsdb_set_by_key(tsdb_handler *handler, const char *key,
-    const tsdb_value *valuep)
+int dbats_set_by_key(dbats_handler *handler, const char *key,
+    const dbats_value *valuep)
 {
     int rc;
-    tsdb_key_info_t *tkip;
+    dbats_key_info_t *tkip;
 
-    if ((rc = tsdb_get_key_info(handler, key, &tkip, TSDB_CREATE)) != 0) {
+    if ((rc = dbats_get_key_info(handler, key, &tkip, DBATS_CREATE)) != 0) {
 	handler->readonly = 1;
 	return rc;
     }
-    return tsdb_set(handler, tkip, valuep);
+    return dbats_set(handler, tkip, valuep);
 }
 
 /*************************************************************************/
 
-int tsdb_get(tsdb_handler *handler, tsdb_key_info_t *tkip,
-    const tsdb_value **valuepp, int agg_id)
+int dbats_get(dbats_handler *handler, dbats_key_info_t *tkip,
+    const dbats_value **valuepp, int agg_id)
 {
     int rc;
-    tsdb_tslice *tslice = &handler->tslice[agg_id];
+    dbats_tslice *tslice = &handler->tslice[agg_id];
 
     if (!handler->is_open) {
 	*valuepp = NULL;
@@ -1153,14 +1153,14 @@ int tsdb_get(tsdb_handler *handler, tsdb_key_info_t *tkip,
 
     if ((rc = instantiate_frag(handler, agg_id, tkip->frag_id)) == 0) {
 	if (!vec_test(tslice->frag[tkip->frag_id]->is_set, tkip->offset)) {
-	    traceEvent(TRACE_WARNING, "Value unset (v): %u %d %s",
+	    dbats_log(TRACE_WARNING, "Value unset (v): %u %d %s",
 		tslice->time, agg_id, tkip->key);
 	    *valuepp = NULL;
 	    return 1;
 	}
-	if (handler->agg[agg_id].func == TSDB_AGG_AVG) {
+	if (handler->agg[agg_id].func == DBATS_AGG_AVG) {
 	    double *dval = (double*)valueptr(handler, agg_id, tkip->frag_id, tkip->offset);
-	    static tsdb_value *avg_buf = NULL;
+	    static dbats_value *avg_buf = NULL;
 	    if (!avg_buf) {
 		avg_buf = emalloc(handler->entry_size * handler->num_values_per_entry, "avg_buf");
 		if (!avg_buf) return -2;
@@ -1171,12 +1171,12 @@ int tsdb_get(tsdb_handler *handler, tsdb_key_info_t *tkip,
 	} else {
 	    *valuepp = valueptr(handler, agg_id, tkip->frag_id, tkip->offset);
 	}
-	traceEvent(TRACE_INFO, "Succesfully read value [offset=%" PRIu32 "][value_len=%u]",
+	dbats_log(TRACE_INFO, "Succesfully read value [offset=%" PRIu32 "][value_len=%u]",
 	    tkip->offset, handler->entry_size);
 
     } else {
 	if (rc == 1)
-	    traceEvent(TRACE_WARNING, "Value unset (f): %u %d %s",
+	    dbats_log(TRACE_WARNING, "Value unset (f): %u %d %s",
 		tslice->time, agg_id, tkip->key);
 	*valuepp = NULL;
 	return rc;
@@ -1185,37 +1185,37 @@ int tsdb_get(tsdb_handler *handler, tsdb_key_info_t *tkip,
     return 0;
 }
 
-int tsdb_get_double(tsdb_handler *handler, tsdb_key_info_t *tkip,
+int dbats_get_double(dbats_handler *handler, dbats_key_info_t *tkip,
     const double **valuepp, int agg_id)
 {
     int rc;
-    tsdb_tslice *tslice = &handler->tslice[agg_id];
+    dbats_tslice *tslice = &handler->tslice[agg_id];
 
     if (!handler->is_open) {
 	*valuepp = NULL;
 	return -1;
     }
 
-    if (handler->agg[agg_id].func != TSDB_AGG_AVG) {
-	traceEvent(TRACE_ERROR, "Aggregation %d is not a double", agg_id);
+    if (handler->agg[agg_id].func != DBATS_AGG_AVG) {
+	dbats_log(TRACE_ERROR, "Aggregation %d is not a double", agg_id);
 	*valuepp = NULL;
 	return -1;
     }
 
     if ((rc = instantiate_frag(handler, agg_id, tkip->frag_id)) == 0) {
 	if (!vec_test(tslice->frag[tkip->frag_id]->is_set, tkip->offset)) {
-	    traceEvent(TRACE_WARNING, "Value unset (v): %u %d %s",
+	    dbats_log(TRACE_WARNING, "Value unset (v): %u %d %s",
 		tslice->time, agg_id, tkip->key);
 	    *valuepp = NULL;
 	    return 1;
 	}
 	*valuepp = (double*)valueptr(handler, agg_id, tkip->frag_id, tkip->offset);
-	traceEvent(TRACE_INFO, "Succesfully read value [offset=%" PRIu32 "][value_len=%u]",
+	dbats_log(TRACE_INFO, "Succesfully read value [offset=%" PRIu32 "][value_len=%u]",
 	    tkip->offset, handler->entry_size);
 
     } else {
 	if (rc == 1)
-	    traceEvent(TRACE_WARNING, "Value unset (f): %u %d %s",
+	    dbats_log(TRACE_WARNING, "Value unset (f): %u %d %s",
 		tslice->time, agg_id, tkip->key);
 	*valuepp = NULL;
 	return rc;
@@ -1224,32 +1224,32 @@ int tsdb_get_double(tsdb_handler *handler, tsdb_key_info_t *tkip,
     return 0;
 }
 
-int tsdb_get_by_key(tsdb_handler *handler, const char *key,
-    const tsdb_value **valuepp, int agg_id)
+int dbats_get_by_key(dbats_handler *handler, const char *key,
+    const dbats_value **valuepp, int agg_id)
 {
     int rc;
-    tsdb_key_info_t *tkip;
+    dbats_key_info_t *tkip;
 
-    if ((rc = tsdb_get_key_info(handler, key, &tkip, 0)) != 0) {
+    if ((rc = dbats_get_key_info(handler, key, &tkip, 0)) != 0) {
 	return rc;
     }
-    return tsdb_get(handler, tkip, valuepp, agg_id);
+    return dbats_get(handler, tkip, valuepp, agg_id);
 }
 
 /*************************************************************************/
 
-int tsdb_keywalk_start(tsdb_handler *handler)
+int dbats_keywalk_start(dbats_handler *handler)
 {
     int rc;
 
     if ((rc = handler->dbKeys->cursor(handler->dbKeys, NULL, &handler->keywalk, 0)) != 0) {
-	traceEvent(TRACE_ERROR, "Error in tsdb_keywalk_start: %s", db_strerror(rc));
+	dbats_log(TRACE_ERROR, "Error in dbats_keywalk_start: %s", db_strerror(rc));
 	return -1;
     }
     return 0;
 }
 
-int tsdb_keywalk_next(tsdb_handler *handler, tsdb_key_info_t **tkipp)
+int dbats_keywalk_next(dbats_handler *handler, dbats_key_info_t **tkipp)
 {
     int rc;
     DBT dbkey, dbdata;
@@ -1258,7 +1258,7 @@ int tsdb_keywalk_next(tsdb_handler *handler, tsdb_key_info_t **tkipp)
     memset(&dbdata, 0, sizeof(dbdata));
     if ((rc = handler->keywalk->get(handler->keywalk, &dbkey, &dbdata, DB_NEXT)) != 0) {
 	if (rc != DB_NOTFOUND)
-	    traceEvent(TRACE_ERROR, "Error in tsdb_keywalk_next: %s", db_strerror(rc));
+	    dbats_log(TRACE_ERROR, "Error in dbats_keywalk_next: %s", db_strerror(rc));
 	*tkipp = NULL;
 	return -1;
     }
@@ -1271,12 +1271,12 @@ int tsdb_keywalk_next(tsdb_handler *handler, tsdb_key_info_t **tkipp)
     return 0;
 }
 
-int tsdb_keywalk_end(tsdb_handler *handler)
+int dbats_keywalk_end(dbats_handler *handler)
 {
     int rc;
 
     if ((rc = handler->keywalk->close(handler->keywalk)) != 0) {
-	traceEvent(TRACE_ERROR, "Error in tsdb_keywalk_end: %s", db_strerror(rc));
+	dbats_log(TRACE_ERROR, "Error in dbats_keywalk_end: %s", db_strerror(rc));
 	return -1;
     }
     return 0;
@@ -1284,14 +1284,14 @@ int tsdb_keywalk_end(tsdb_handler *handler)
 
 /*************************************************************************/
 
-void tsdb_stat_print(const tsdb_handler *handler) {
+void dbats_stat_print(const dbats_handler *handler) {
     int rc;
     
     if ((rc = handler->dbMeta->stat_print(handler->dbMeta, DB_FAST_STAT)) != 0)
-	traceEvent(TRACE_ERROR, "Error while dumping DB stats for Meta [%s]", db_strerror(rc));
+	dbats_log(TRACE_ERROR, "Error while dumping DB stats for Meta [%s]", db_strerror(rc));
     if ((rc = handler->dbKeys->stat_print(handler->dbKeys, DB_FAST_STAT)) != 0)
-	traceEvent(TRACE_ERROR, "Error while dumping DB stats for Key [%s]", db_strerror(rc));
+	dbats_log(TRACE_ERROR, "Error while dumping DB stats for Key [%s]", db_strerror(rc));
     if ((rc = handler->dbData->stat_print(handler->dbData, DB_FAST_STAT)) != 0)
-	traceEvent(TRACE_ERROR, "Error while dumping DB stats for Data [%s]", db_strerror(rc));
+	dbats_log(TRACE_ERROR, "Error while dumping DB stats for Data [%s]", db_strerror(rc));
 }
 
