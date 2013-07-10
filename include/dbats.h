@@ -61,7 +61,15 @@ typedef struct {
     uint32_t last_flush;    // time of latest flush
 } tsdb_agg;
 
+#if 0
 typedef uint32_t tsdb_value;
+#define PRIval PRIu32
+#define SCNval SCNu32
+#else
+typedef uint64_t tsdb_value;
+#define PRIval PRIu64
+#define SCNval SCNu64
+#endif
 
 typedef struct {
     uint32_t start;

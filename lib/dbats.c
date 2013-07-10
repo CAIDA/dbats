@@ -61,7 +61,7 @@ static void *emalloc(size_t size, const char *msg)
 {
     void *ptr = malloc(size);
     if (!ptr)
-	traceEvent(TRACE_ERROR, "Can't allocate %u bytes for %s", size, msg);
+	traceEvent(TRACE_ERROR, "Can't allocate %zu bytes for %s", size, msg);
     return ptr;
 }
 #else
@@ -135,10 +135,10 @@ static void raw_db_set(const tsdb_handler *handler, DB *db,
 #define QLZ_OVERHEAD 400
 
 static uint8_t *db_get_buf = 0;
-static uint16_t db_get_buf_len = 0;
+static size_t db_get_buf_len = 0;
 
 static int raw_db_get(const tsdb_handler *handler, DB* db,
-    const void *key, uint32_t key_len, void **value, uint32_t *value_len)
+    const void *key, uint32_t key_len, void **value, size_t *value_len)
 {
     DBT key_data, data;
     int rc;
@@ -165,6 +165,10 @@ static int raw_db_get(const tsdb_handler *handler, DB* db,
 	return 0;
     } else {
 	traceEvent(TRACE_WARNING, "raw_db_get failed: %s", db_strerror(rc));
+	if (rc == DB_BUFFER_SMALL) {
+	    traceEvent(TRACE_WARNING, "had %" PRIu32 ", needed %" PRIu32,
+		data.ulen, data.size);
+	}
 	return -1;
     }
 }
@@ -192,10 +196,10 @@ static void raw_db_delete(const tsdb_handler *handler, DB *db,
 
 /*
 static int raw_db_key_exists(const tsdb_handler *handler, DB *db,
-    const void *key, uint32_t key_len)
+    const void *key, size_t key_len)
 {
     void *value;
-    uint32_t value_len;
+    size_t value_len;
 
     return (raw_db_get(handler, db, key, key_len, &value, &value_len) == 0);
 }
@@ -259,7 +263,7 @@ int tsdb_open(tsdb_handler *handler, const char *path,
 #define initcfg(handler, type, field, defaultval) \
     do { \
 	void *value; \
-	uint32_t value_len; \
+	size_t value_len; \
 	if (raw_db_get(handler, handler->dbMeta, #field, strlen(#field), &value, &value_len) == 0) { \
 	    handler->field = *((type*)value); \
 	} else if (!handler->readonly) { \
@@ -291,10 +295,10 @@ int tsdb_open(tsdb_handler *handler, const char *path,
     // load metadata for aggregates
     if (handler->num_aggs > 1) {
 	void *value;
-	uint32_t value_len;
+	size_t value_len;
 	if (raw_db_get(handler, handler->dbMeta, "agg", strlen("agg"), &value, &value_len) == 0) {
 	    if (value_len != handler->num_aggs * sizeof(tsdb_agg)) {
-		traceEvent(TRACE_ERROR, "corrupt aggregation config %d != %d",
+		traceEvent(TRACE_ERROR, "corrupt aggregation config %zu != %zu",
 		    value_len, handler->num_aggs * sizeof(tsdb_agg));
 		handler->readonly = 1;
 		return -1;
@@ -389,7 +393,7 @@ int tsdb_aggregate(tsdb_handler *handler, int func, int steps)
 static void tsdb_flush_tslice(tsdb_handler *handler, int agg_id)
 {
     traceEvent(TRACE_INFO, "Flush t=%u agg_id=%d", handler->tslice[agg_id].time, agg_id);
-    uint32_t frag_size = fragsize(handler);
+    size_t frag_size = fragsize(handler);
     fragkey_t dbkey;
     char *buf = NULL;
 
@@ -416,7 +420,7 @@ static void tsdb_flush_tslice(tsdb_handler *handler, int agg_id)
 	    handler->tslice[agg_id].frag[f]->compressed = 1;
 	    size_t compressed_len = qlz_compress(handler->tslice[agg_id].frag[f],
 		buf+1, frag_size, handler->state_compress);
-	    traceEvent(TRACE_INFO, "Frag %d compression: %u -> %u (%.1f %%)",
+	    traceEvent(TRACE_INFO, "Frag %d compression: %zu -> %zu (%.1f %%)",
 		f, frag_size, compressed_len, compressed_len*100.0/frag_size);
 	    raw_db_set(handler, handler->dbData, &dbkey, sizeof(dbkey),
 		buf, compressed_len + 1);
@@ -424,7 +428,7 @@ static void tsdb_flush_tslice(tsdb_handler *handler, int agg_id)
 	    if (!buf)
 		buf = (char*)emalloc(frag_size + 1, "write buffer");
 	    handler->tslice[agg_id].frag[f]->compressed = 0;
-	    traceEvent(TRACE_INFO, "Frag %d write: %u", f, frag_size);
+	    traceEvent(TRACE_INFO, "Frag %d write: %zu", f, frag_size);
 	    raw_db_set(handler, handler->dbData, &dbkey, sizeof(dbkey),
 		handler->tslice[agg_id].frag[f], frag_size);
 	}
@@ -732,7 +736,7 @@ static int load_frag(tsdb_handler *handler, uint32_t t, int agg_id,
     // load fragment
     fragkey_t dbkey;
     void *value;
-    uint32_t value_len;
+    size_t value_len;
     dbkey.time = t;
     dbkey.agg_id = agg_id;
     dbkey.frag_id = frag_id;
@@ -748,7 +752,7 @@ static int load_frag(tsdb_handler *handler, uint32_t t, int agg_id,
 	qlz_size_decompressed((void*)((uint8_t*)value+1));
     void *ptr = malloc(len);
     if (!ptr) {
-	traceEvent(TRACE_ERROR, "Can't allocate %u bytes for frag "
+	traceEvent(TRACE_ERROR, "Can't allocate %zu bytes for frag "
 	    "t=%u, agg_id=%u, frag_id=%u", len, t, agg_id, frag_id);
 	return -2; // error
     }
@@ -833,8 +837,8 @@ int tsdb_get_key_info(tsdb_handler *handler, const char *key,
     tsdb_key_info_t **tkipp, uint32_t flags)
 {
     void *ptr;
-    uint32_t keylen = strlen(key);
-    uint32_t len;
+    size_t keylen = strlen(key);
+    size_t len;
 
     if (raw_db_get(handler, handler->dbKeys, key, keylen, &ptr, &len) == 0) {
 	uint32_t idx = ((raw_key_info_t*)ptr)->index;
@@ -929,7 +933,7 @@ static inline uint32_t max(uint32_t a, uint32_t b) { return a > b ? a : b; }
 
 int tsdb_set(tsdb_handler *handler, tsdb_key_info_t *tkip, const tsdb_value *valuep)
 {
-    traceEvent(TRACE_INFO, "tsdb_set %u %u = %u", handler->tslice[0].time, tkip->index, valuep[0]); // XXX
+    traceEvent(TRACE_INFO, "tsdb_set %u %u = %" PRIval, handler->tslice[0].time, tkip->index, valuep[0]); // XXX
     int rc;
 
     if (!handler->is_open || handler->readonly)
@@ -982,7 +986,7 @@ int tsdb_set(tsdb_handler *handler, tsdb_key_info_t *tkip, const tsdb_value *val
 	if (!active_included)
 	    n++;
 
-	traceEvent(TRACE_INFO, "agg %d: [%u..%u] aggval=%u n=%d",
+	traceEvent(TRACE_INFO, "agg %d: [%u..%u] aggval=%" PRIval " n=%d",
 	    agg_id, aggstart, aggend, aggval[0], n); // XXX
 
 	switch (handler->agg[agg_id].func) {
@@ -1079,11 +1083,11 @@ int tsdb_set(tsdb_handler *handler, tsdb_key_info_t *tkip, const tsdb_value *val
 	    vec_set(handler->tslice[agg_id].frag[tkip->frag_id]->is_set, tkip->offset);
 	    handler->tslice[agg_id].frag_changed[tkip->frag_id] = 1;
 	    traceEvent(TRACE_INFO, "Succesfully set value "
-		"[agg_id=%d][frag_id=%u][offset=%" PRIu32 "][value_len=%u] aggval=%u",
+		"[agg_id=%d][frag_id=%u][offset=%" PRIu32 "][value_len=%u] aggval=%" PRIval,
 		agg_id, tkip->frag_id, tkip->offset, handler->entry_size, aggval[0]);
 	} else if (failed) {
 	    traceEvent(TRACE_ERROR, "Failed to set value "
-		"[agg_id=%d][frag_id=%u][offset=%" PRIu32 "][value_len=%u] aggval=%u",
+		"[agg_id=%d][frag_id=%u][offset=%" PRIu32 "][value_len=%u] aggval=%" PRIval,
 		agg_id, tkip->frag_id, tkip->offset, handler->entry_size, aggval[0]);
 	    handler->readonly = 1;
 	    return -1;
@@ -1096,7 +1100,7 @@ int tsdb_set(tsdb_handler *handler, tsdb_key_info_t *tkip, const tsdb_value *val
     vec_set(handler->tslice[0].frag[tkip->frag_id]->is_set, tkip->offset);
     handler->tslice[0].frag_changed[tkip->frag_id] = 1;
     traceEvent(TRACE_INFO, "Succesfully set value "
-	"[agg_id=%d][frag_id=%u][offset=%" PRIu32 "][value_len=%u] value=%u",
+	"[agg_id=%d][frag_id=%u][offset=%" PRIu32 "][value_len=%u] value=%" PRIval,
 	0, tkip->frag_id, tkip->offset, handler->entry_size, valuep[0]);
 
     return 0;

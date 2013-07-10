@@ -56,7 +56,7 @@ int main(int argc, char *argv[]) {
     tsdb_handler handler;
     uint32_t begin = 0, end = 0;
     uint32_t run_start, elapsed;
-    const uint32_t *values;
+    const tsdb_value *values;
     char *tsdb_path = NULL;
     char *keyfile_path = NULL;
     FILE *out;
@@ -123,7 +123,7 @@ int main(int argc, char *argv[]) {
 		}
 		fprintf(out, "%s ", keys[k]->key);
 		for (int j = 0; j < handler.num_values_per_entry; j++) {
-		    fprintf(out, "%u ", values ? values[j] : 0);
+		    fprintf(out, "%" PRIval " ", values ? values[j] : 0);
 		}
 		fprintf(out, "%u %d\n", t, agg_id);
 	    }

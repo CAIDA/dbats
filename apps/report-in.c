@@ -68,7 +68,7 @@ int main(int argc, char *argv[]) {
 	return -1;
 
     while (1) {
-	int n = scanf("%127s %" SCNu32 " %" SCNu32 "\n", key, &value, &t);
+	int n = scanf("%127s %" SCNval " %" SCNu32 "\n", key, &value, &t);
 	if (n != 3) break;
 
 	if (t != last_t) {
