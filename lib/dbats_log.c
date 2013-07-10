@@ -19,7 +19,11 @@
  *  51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
  */
 
-#include "tsdb_api.h"
+#include <stdlib.h>
+#include <string.h>
+#include <stdio.h>
+#include <time.h>
+#include "tsdb_trace.h"
 
 int traceLevel = 2;
 
@@ -41,7 +45,7 @@ void traceEvent(int eventTraceLevel, const char* file, int line, const char * fo
      */
 
     memset(buf, 0, sizeof(buf));
-    strftime(theDate, 32, "%d/%b/%Y %H:%M:%S", localtime(&theTime));
+    strftime(theDate, 32, "%Y-%m-%d %H:%M:%S", localtime(&theTime));
 
     vsnprintf(buf, sizeof(buf)-1, format, va_ap);
 
