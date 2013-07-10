@@ -21,6 +21,12 @@
 
 
 /*************************************************************************/
+// compile-time assertion (works anywhere a declaration is allowed)
+#define ct_assert(expr, label)  enum { ASSERTION_ERROR__##label = 1/(!!(expr)) };
+
+ct_assert((sizeof(double) <= sizeof(tsdb_value)), tsdb_value_is_smaller_than_double)
+
+/*************************************************************************/
 
 // bit vector
 #define vec_size(N)        (((N)+7)/8)                    // size for N bits
@@ -1018,15 +1024,16 @@ int tsdb_set(tsdb_handler *handler, tsdb_key_info_t *tkip, const tsdb_value *val
 	    break;
 	case TSDB_AGG_AVG:
 	    for (int i = 0; i < handler->num_values_per_entry; i++) {
+		double *daggval = ((double*)&aggval[i]);
 		if (was_set && valuep[i] == oldvaluep[i]) {
 		    // value did not change; no need to change agg value
 		} else if (n == 1) {
-		    aggval[i] = valuep[i];
+		    *daggval = valuep[i];
 		    changed = 1;
-		} else if (aggval[i] != valuep[i]) {
+		} else if (*daggval != valuep[i]) {
 		    if (was_set)
-			aggval[i] -= ((/*signed*/double)oldvaluep[i] - aggval[i]) / n + 0.5;
-		    aggval[i] += ((/*signed*/double)valuep[i] - aggval[i]) / n + 0.5;
+			*daggval -= (oldvaluep[i] - *daggval) / n;
+		    *daggval += (valuep[i] - *daggval) / n;
 		    changed = 1;
 		}
 	    }
@@ -1082,13 +1089,25 @@ int tsdb_set(tsdb_handler *handler, tsdb_key_info_t *tkip, const tsdb_value *val
 	    // XXX if (n >= xff * steps)
 	    vec_set(handler->tslice[agg_id].frag[tkip->frag_id]->is_set, tkip->offset);
 	    handler->tslice[agg_id].frag_changed[tkip->frag_id] = 1;
-	    traceEvent(TRACE_INFO, "Succesfully set value "
-		"[agg_id=%d][frag_id=%u][offset=%" PRIu32 "][value_len=%u] aggval=%" PRIval,
-		agg_id, tkip->frag_id, tkip->offset, handler->entry_size, aggval[0]);
+	    if (handler->agg[agg_id].func == TSDB_AGG_AVG) {
+		traceEvent(TRACE_INFO, "Succesfully set value "
+		    "[agg_id=%d][frag_id=%u][offset=%" PRIu32 "][value_len=%u] aggval=%f",
+		    agg_id, tkip->frag_id, tkip->offset, handler->entry_size, *(double*)aggval);
+	    } else {
+		traceEvent(TRACE_INFO, "Succesfully set value "
+		    "[agg_id=%d][frag_id=%u][offset=%" PRIu32 "][value_len=%u] aggval=%" PRIval,
+		    agg_id, tkip->frag_id, tkip->offset, handler->entry_size, aggval[0]);
+	    }
 	} else if (failed) {
-	    traceEvent(TRACE_ERROR, "Failed to set value "
-		"[agg_id=%d][frag_id=%u][offset=%" PRIu32 "][value_len=%u] aggval=%" PRIval,
-		agg_id, tkip->frag_id, tkip->offset, handler->entry_size, aggval[0]);
+	    if (handler->agg[agg_id].func == TSDB_AGG_AVG) {
+		traceEvent(TRACE_ERROR, "Failed to set value "
+		    "[agg_id=%d][frag_id=%u][offset=%" PRIu32 "][value_len=%u] aggval=%f",
+		    agg_id, tkip->frag_id, tkip->offset, handler->entry_size, *(double*)aggval);
+	    } else {
+		traceEvent(TRACE_ERROR, "Failed to set value "
+		    "[agg_id=%d][frag_id=%u][offset=%" PRIu32 "][value_len=%u] aggval=%" PRIval,
+		    agg_id, tkip->frag_id, tkip->offset, handler->entry_size, aggval[0]);
+	    }
 	    handler->readonly = 1;
 	    return -1;
 	}
@@ -1139,7 +1158,58 @@ int tsdb_get(tsdb_handler *handler, tsdb_key_info_t *tkip,
 	    *valuepp = NULL;
 	    return 1;
 	}
-	*valuepp = valueptr(handler, agg_id, tkip->frag_id, tkip->offset);
+	if (handler->agg[agg_id].func == TSDB_AGG_AVG) {
+	    double *dval = (double*)valueptr(handler, agg_id, tkip->frag_id, tkip->offset);
+	    static tsdb_value *avg_buf = NULL;
+	    if (!avg_buf) {
+		avg_buf = emalloc(handler->entry_size * handler->num_values_per_entry, "avg_buf");
+		if (!avg_buf) return -2;
+	    }
+	    for (int i = 0; i < handler->num_values_per_entry; i++)
+		avg_buf[i] = dval[i] + 0.5;
+	    *valuepp = avg_buf;
+	} else {
+	    *valuepp = valueptr(handler, agg_id, tkip->frag_id, tkip->offset);
+	}
+	traceEvent(TRACE_INFO, "Succesfully read value [offset=%" PRIu32 "][value_len=%u]",
+	    tkip->offset, handler->entry_size);
+
+    } else {
+	if (rc == 1)
+	    traceEvent(TRACE_WARNING, "Value unset (f): %u %d %s",
+		tslice->time, agg_id, tkip->key);
+	*valuepp = NULL;
+	return rc;
+    }
+
+    return 0;
+}
+
+int tsdb_get_double(tsdb_handler *handler, tsdb_key_info_t *tkip,
+    const double **valuepp, int agg_id)
+{
+    int rc;
+    tsdb_tslice *tslice = &handler->tslice[agg_id];
+
+    if (!handler->is_open) {
+	*valuepp = NULL;
+	return -1;
+    }
+
+    if (handler->agg[agg_id].func != TSDB_AGG_AVG) {
+	traceEvent(TRACE_ERROR, "Aggregation %d is not a double", agg_id);
+	*valuepp = NULL;
+	return -1;
+    }
+
+    if ((rc = instantiate_frag(handler, agg_id, tkip->frag_id)) == 0) {
+	if (!vec_test(tslice->frag[tkip->frag_id]->is_set, tkip->offset)) {
+	    traceEvent(TRACE_WARNING, "Value unset (v): %u %d %s",
+		tslice->time, agg_id, tkip->key);
+	    *valuepp = NULL;
+	    return 1;
+	}
+	*valuepp = (double*)valueptr(handler, agg_id, tkip->frag_id, tkip->offset);
 	traceEvent(TRACE_INFO, "Succesfully read value [offset=%" PRIu32 "][value_len=%u]",
 	    tkip->offset, handler->entry_size);
 

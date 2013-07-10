@@ -56,7 +56,6 @@ int main(int argc, char *argv[]) {
     tsdb_handler handler;
     uint32_t begin = 0, end = 0;
     uint32_t run_start, elapsed;
-    const tsdb_value *values;
     char *tsdb_path = NULL;
     char *keyfile_path = NULL;
     FILE *out;
@@ -115,17 +114,34 @@ int main(int argc, char *argv[]) {
 		continue;
 	    }
 
-	    for (int k = 0; k < n_keys; k++) {
-		rc = tsdb_get(&handler, keys[k], &values, agg_id);
-		if (rc != 0) {
-		    fprintf(stdout, "error in tsdb_get(%s)\n", keys[k]->key);
-		    break;
+	    if (handler.agg[agg_id].func == TSDB_AGG_AVG) {
+		const double *values;
+		for (int k = 0; k < n_keys; k++) {
+		    rc = tsdb_get_double(&handler, keys[k], &values, agg_id);
+		    if (rc != 0) {
+			fprintf(stdout, "error in tsdb_get(%s)\n", keys[k]->key);
+			break;
+		    }
+		    fprintf(out, "%s ", keys[k]->key);
+		    for (int j = 0; j < handler.num_values_per_entry; j++) {
+			fprintf(out, "%.3f ", values ? values[j] : 0);
+		    }
+		    fprintf(out, "%u %d\n", t, agg_id);
 		}
-		fprintf(out, "%s ", keys[k]->key);
-		for (int j = 0; j < handler.num_values_per_entry; j++) {
-		    fprintf(out, "%" PRIval " ", values ? values[j] : 0);
+	    } else {
+		const tsdb_value *values;
+		for (int k = 0; k < n_keys; k++) {
+		    rc = tsdb_get(&handler, keys[k], &values, agg_id);
+		    if (rc != 0) {
+			fprintf(stdout, "error in tsdb_get(%s)\n", keys[k]->key);
+			break;
+		    }
+		    fprintf(out, "%s ", keys[k]->key);
+		    for (int j = 0; j < handler.num_values_per_entry; j++) {
+			fprintf(out, "%" PRIval " ", values ? values[j] : 0);
+		    }
+		    fprintf(out, "%u %d\n", t, agg_id);
 		}
-		fprintf(out, "%u %d\n", t, agg_id);
 	    }
 	}
     }

@@ -133,6 +133,8 @@ extern int tsdb_set_by_key (tsdb_handler *handler, const char *key,
 
 extern int tsdb_get(tsdb_handler *handler, tsdb_key_info_t *tkip,
     const tsdb_value **valuepp, int agg_id);
+extern int tsdb_get_double(tsdb_handler *handler, tsdb_key_info_t *tkip,
+    const double **valuepp, int agg_id);
 extern int tsdb_get_by_key(tsdb_handler *handler, const char *key,
     const tsdb_value **valuepp, int agg_id);
 
