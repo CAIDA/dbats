@@ -1,8 +1,4 @@
 /*
- *
- *  Copyright (C) 2011 IIT/CNR (http://www.iit.cnr.it/en)
- *                     Luca Deri <deri@ntop.org>
- *
  *  This program is free software; you can redistribute it and/or modify
  *  it under the terms of the GNU General Public License as published by
  *  the Free Software Foundation; either version 2 of the License, or
@@ -20,12 +16,16 @@
 
 #include <stdarg.h>
 
-#define TRACE_ERROR     0, __FILE__, __LINE__
-#define TRACE_WARNING   1, __FILE__, __LINE__
-#define TRACE_NORMAL    2, __FILE__, __LINE__
-#define TRACE_INFO      3, __FILE__, __LINE__
+#define TRACE_ERROR     0
+#define TRACE_WARNING   1
+#define TRACE_NORMAL    2
+#define TRACE_INFO      3
 
 extern int traceLevel;
-extern void traceEvent(int eventTraceLevel, const char* file, int line, const char * format, ...)
+extern FILE *traceFile;
+
+#define traceEvent(level, ...) traceEventFunc(level, __FILE__, __LINE__, __VA_ARGS__)
+
+extern void traceEventFunc(int level, const char *file, int line, const char * format, ...)
     __attribute__ ((format (printf, 4, 5)));
 

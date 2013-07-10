@@ -1,9 +1,4 @@
 /*
- *
- *  Copyright (C) 2011 IIT/CNR (http://www.iit.cnr.it/en)
- *                     Luca Deri <deri@ntop.org>
- *
- *
  *  This program is free software; you can redistribute it and/or modify
  *  it under the terms of the GNU General Public License as published by
  *  the Free Software Foundation; either version 2 of the License, or
@@ -25,48 +20,35 @@
 #include <time.h>
 #include "tsdb_trace.h"
 
-int traceLevel = 2;
+int traceLevel = TRACE_NORMAL;
+FILE *traceFile = NULL;
 
-void traceEvent(int eventTraceLevel, const char* file, int line, const char * format, ...) {
-  va_list va_ap;
+void traceEventFunc(int level, const char *file, int line, const char *fmt, ...)
+{
+    va_list va_ap;
 
-  if(eventTraceLevel <= traceLevel) {
-    char buf[2048], out_buf[640];
-    char theDate[32];
-    const char *extra_msg = "";
-    time_t theTime = time(NULL);
+    if (!traceFile)
+	traceFile = stderr;
 
-    va_start (va_ap, format);
+    if (level <= traceLevel) {
+	char msgbuf[2048];
+	char datebuf[32];
+	const char *prefix =
+	    (level <= TRACE_ERROR) ? "ERROR: " :
+	    (level <= TRACE_WARNING) ? "WARNING: " :
+	    "";
 
-    /* We have two paths - one if we're logging, one if we aren't
-     *   Note that the no-log case is those systems which don't support it (WIN32),
-     *                                those without the headers !defined(USE_SYSLOG)
-     *                                those where it's parametrically off...
-     */
+	va_start(va_ap, fmt);
+	vsnprintf(msgbuf, sizeof(msgbuf)-1, fmt, va_ap);
+	msgbuf[sizeof(msgbuf)] = '\0';
+	va_end(va_ap);
 
-    memset(buf, 0, sizeof(buf));
-    strftime(theDate, 32, "%Y-%m-%d %H:%M:%S", localtime(&theTime));
+	time_t t = time(NULL);
+	strftime(datebuf, sizeof(datebuf), "%Y-%m-%d %H:%M:%S", localtime(&t));
 
-    vsnprintf(buf, sizeof(buf)-1, format, va_ap);
+	fprintf(traceFile, "%s %s:%d: %s%s\n",
+	    datebuf, file, line, prefix, msgbuf);
+    }
 
-    if(eventTraceLevel == 0 /* TRACE_ERROR */)
-      extra_msg = "ERROR: ";
-    else if(eventTraceLevel == 1 /* TRACE_WARNING */)
-      extra_msg = "WARNING: ";
-
-    while(buf[strlen(buf)-1] == '\n') buf[strlen(buf)-1] = '\0';
-
-    snprintf(out_buf, sizeof(out_buf), "%s [%s:%d] %s%s", theDate,
-#ifdef WIN32
-	     strrchr(file, '\\')+1,
-#else
-	     file,
-#endif
-	     line, extra_msg, buf);
-
-    printf("%s\n", out_buf);
-  }
-
-  fflush(stdout);
-  va_end(va_ap);
+    fflush(traceFile);
 }
