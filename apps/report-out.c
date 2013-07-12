@@ -91,11 +91,11 @@ int main(int argc, char *argv[]) {
     begin = atol(argv[1]);
     end = atol(argv[2]);
 
-    dbats_log(TRACE_INFO, "begin=%"PRId32 " end=%"PRId32, begin, end);
+    dbats_log(LOG_INFO, "begin=%"PRId32 " end=%"PRId32, begin, end);
     if ((begin <= 0) || (end < begin))
 	help();
 
-    dbats_log(TRACE_INFO, "Opening %s", dbats_path);
+    dbats_log(LOG_INFO, "Opening %s", dbats_path);
 
     if (dbats_open(&handler, dbats_path, 0, 0, DBATS_READONLY) != 0)
 	return(-1);
@@ -114,7 +114,7 @@ int main(int argc, char *argv[]) {
 	    int rc;
 
 	    if ((rc = dbats_goto_time(&handler, t, 0)) == -1) {
-		dbats_log(TRACE_INFO, "Unable to find time %u", t);
+		dbats_log(LOG_INFO, "Unable to find time %u", t);
 		continue;
 	    }
 
@@ -152,9 +152,9 @@ int main(int argc, char *argv[]) {
 
     elapsed = time(NULL) - run_start;
 
-    dbats_log(TRACE_INFO, "Time elapsed: %u sec", elapsed);
-    dbats_log(TRACE_INFO, "Closing %s", dbats_path);
+    dbats_log(LOG_INFO, "Time elapsed: %u sec", elapsed);
+    dbats_log(LOG_INFO, "Closing %s", dbats_path);
     dbats_close(&handler);
-    dbats_log(TRACE_INFO, "Done");
+    dbats_log(LOG_INFO, "Done");
     return(0);
 }

@@ -20,7 +20,7 @@
 #include <time.h>
 #include "dbats_log.h"
 
-int traceLevel = TRACE_NORMAL;
+int traceLevel = LOG_NORMAL;
 FILE *traceFile = NULL;
 
 void dbats_log_func(int level, const char *file, int line, const char *fmt, ...)
@@ -34,8 +34,8 @@ void dbats_log_func(int level, const char *file, int line, const char *fmt, ...)
 	char msgbuf[2048];
 	char datebuf[32];
 	const char *prefix =
-	    (level <= TRACE_ERROR) ? "ERROR: " :
-	    (level <= TRACE_WARNING) ? "WARNING: " :
+	    (level <= LOG_ERROR) ? "ERROR: " :
+	    (level <= LOG_WARNING) ? "WARNING: " :
 	    "";
 
 	va_start(va_ap, fmt);
