@@ -180,14 +180,14 @@ static int raw_db_get(const dbats_handler *handler, DB* db,
 	*value = data.data;
 	*value_len = data.size;
 	return 0;
-    } else {
-	dbats_log(TRACE_WARNING, "raw_db_get failed: %s", db_strerror(rc));
-	if (rc == DB_BUFFER_SMALL) {
-	    dbats_log(TRACE_WARNING, "had %" PRIu32 ", needed %" PRIu32,
-		data.ulen, data.size);
-	}
-	return -1;
     }
+    if (rc != DB_NOTFOUND)
+	dbats_log(TRACE_INFO, "raw_db_get failed: %s", db_strerror(rc));
+    if (rc == DB_BUFFER_SMALL) {
+	dbats_log(TRACE_WARNING, "raw_db_get: had %" PRIu32 ", needed %" PRIu32,
+	    data.ulen, data.size);
+    }
+    return -1;
 }
 
 /*
