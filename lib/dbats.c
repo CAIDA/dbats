@@ -237,18 +237,19 @@ static int alloc_key_info_block(dbats_handler *handler, uint32_t block)
 }
 
 int dbats_open(dbats_handler *handler, const char *path,
-    uint16_t num_values_per_entry,
+    uint16_t values_per_entry,
     uint32_t period,
     uint32_t flags)
 {
     int ret;
     int dbmode = 00666;
     uint32_t dbflags = DB_INIT_MPOOL;
+    int is_new = 0;
 
     memset(handler, 0, sizeof(dbats_handler));
     handler->readonly = !!(flags & DBATS_READONLY);
     handler->compress = !(flags & DBATS_UNCOMPRESSED);
-    handler->num_values_per_entry = 1;
+    handler->values_per_entry = 1;
 
     if ((ret = db_env_create(&handler->dbenv, 0)) != 0) {
 	dbats_log(LOG_ERROR, "Error creating DB env: %s",
@@ -257,12 +258,23 @@ int dbats_open(dbats_handler *handler, const char *path,
     }
 
     if (flags & DBATS_CREATE) {
-	if (mkdir(path, 0777) < 0 && errno != EEXIST) {
+	if (handler->readonly) {
+	    dbats_log(LOG_ERROR,
+		"DBATS_CREATE and DBATS_READONLY are not compatible");
+	    return -1;
+	} else if (mkdir(path, 0777) == 0) {
+	    // new database dir
+	    is_new = 1;
+	    dbflags |= DB_CREATE;
+	} else if (errno == EEXIST) {
+	    // existing database dir
+	    flags &= ~DBATS_CREATE;
+	} else {
+	    // new database dir failed
 	    dbats_log(LOG_ERROR, "Error creating %s: %s",
 		path, strerror(errno));
 	    return -1;
 	}
-	dbflags |= DB_CREATE;
     }
 
     if ((ret = handler->dbenv->open(handler->dbenv, path, dbflags, dbmode)) != 0) {
@@ -277,24 +289,29 @@ int dbats_open(dbats_handler *handler, const char *path,
 
     handler->entry_size = sizeof(dbats_value); // for db_get_buf_len
 
-#define initcfg(handler, type, field, defaultval) \
+#define initcfg(type, field, defaultval) \
     do { \
-	void *value; \
-	size_t value_len; \
-	if (raw_db_get(handler, handler->dbMeta, #field, strlen(#field), &value, &value_len) == 0) { \
-	    handler->field = *((type*)value); \
-	} else if (!handler->readonly) { \
+	if (is_new) { \
 	    handler->field = (defaultval); \
 	    raw_db_set(handler, handler->dbMeta, #field, strlen(#field), \
 		&handler->field, sizeof(handler->field)); \
+	} else { \
+	    void *value; \
+	    size_t value_len; \
+	    if (raw_db_get(handler, handler->dbMeta, #field, strlen(#field), &value, &value_len) == 0) { \
+		handler->field = *((type*)value); \
+	    } else { \
+		dbats_log(LOG_ERROR, "%s: missing config value %s", path, #field); \
+		return -1; \
+	    } \
 	} \
-	dbats_log(LOG_INFO, "cfg: %-.22s = %u", #field, handler->field); \
+	dbats_log(LOG_INFO, "cfg: %s = %u", #field, handler->field); \
     } while (0)
 
-    initcfg(handler, uint32_t, lowest_free_index,      0);
-    initcfg(handler, uint32_t, period,                 period);
-    initcfg(handler, uint16_t, num_values_per_entry,   num_values_per_entry);
-    initcfg(handler, uint16_t, num_aggs,            1);
+    initcfg(uint32_t, lowest_free_index, 0);
+    initcfg(uint32_t, period,            period);
+    initcfg(uint16_t, values_per_entry,  values_per_entry);
+    initcfg(uint16_t, num_aggs,          1);
 
     if (handler->num_aggs > MAX_NUM_AGGS) {
 	dbats_log(LOG_ERROR, "num_aggs %d > %d", handler->num_aggs,
@@ -303,7 +320,7 @@ int dbats_open(dbats_handler *handler, const char *path,
 	return -1;
     }
 
-    handler->entry_size = handler->num_values_per_entry * sizeof(dbats_value);
+    handler->entry_size = handler->values_per_entry * sizeof(dbats_value);
 
     handler->agg[0].func = DBATS_AGG_NONE;
     handler->agg[0].steps = 1;
@@ -1021,7 +1038,7 @@ int dbats_set(dbats_handler *handler, dbats_key_info_t *tkip, const dbats_value 
 
 	switch (handler->agg[agg_id].func) {
 	case DBATS_AGG_MIN:
-	    for (int i = 0; i < handler->num_values_per_entry; i++) {
+	    for (int i = 0; i < handler->values_per_entry; i++) {
 		if (was_set && valuep[i] == oldvaluep[i]) {
 		    // value did not change; no need to change agg value
 		} else if (n == 1 || valuep[i] <= aggval[i]) {
@@ -1034,7 +1051,7 @@ int dbats_set(dbats_handler *handler, dbats_key_info_t *tkip, const dbats_value 
 	    }
 	    break;
 	case DBATS_AGG_MAX:
-	    for (int i = 0; i < handler->num_values_per_entry; i++) {
+	    for (int i = 0; i < handler->values_per_entry; i++) {
 		if (was_set && valuep[i] == oldvaluep[i]) {
 		    // value did not change; no need to change agg value
 		} else if (n == 1 || valuep[i] >= aggval[i]) {
@@ -1047,7 +1064,7 @@ int dbats_set(dbats_handler *handler, dbats_key_info_t *tkip, const dbats_value 
 	    }
 	    break;
 	case DBATS_AGG_AVG:
-	    for (int i = 0; i < handler->num_values_per_entry; i++) {
+	    for (int i = 0; i < handler->values_per_entry; i++) {
 		double *daggval = ((double*)&aggval[i]);
 		if (was_set && valuep[i] == oldvaluep[i]) {
 		    // value did not change; no need to change agg value
@@ -1063,7 +1080,7 @@ int dbats_set(dbats_handler *handler, dbats_key_info_t *tkip, const dbats_value 
 	    }
 	    break;
 	case DBATS_AGG_LAST:
-	    for (int i = 0; i < handler->num_values_per_entry; i++) {
+	    for (int i = 0; i < handler->values_per_entry; i++) {
 		if (was_set && valuep[i] == oldvaluep[i]) {
 		    // value did not change; no need to change agg value
 		} else if (handler->tslice[0]->time >= handler->agg[0].last_flush) {
@@ -1093,7 +1110,7 @@ int dbats_set(dbats_handler *handler, dbats_key_info_t *tkip, const dbats_value 
 	    }
 	    break;
 	case DBATS_AGG_SUM:
-	    for (int i = 0; i < handler->num_values_per_entry; i++) {
+	    for (int i = 0; i < handler->values_per_entry; i++) {
 		if (was_set && valuep[i] == oldvaluep[i]) {
 		    // value did not change; no need to change agg value
 		} else if (n == 1) {
@@ -1186,10 +1203,10 @@ int dbats_get(dbats_handler *handler, dbats_key_info_t *tkip,
 	    double *dval = (double*)valueptr(handler, agg_id, tkip->frag_id, tkip->offset);
 	    static dbats_value *avg_buf = NULL;
 	    if (!avg_buf) {
-		avg_buf = emalloc(handler->entry_size * handler->num_values_per_entry, "avg_buf");
+		avg_buf = emalloc(handler->entry_size * handler->values_per_entry, "avg_buf");
 		if (!avg_buf) return -2;
 	    }
-	    for (int i = 0; i < handler->num_values_per_entry; i++)
+	    for (int i = 0; i < handler->values_per_entry; i++)
 		avg_buf[i] = dval[i] + 0.5;
 	    *valuepp = avg_buf;
 	} else {
