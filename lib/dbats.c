@@ -35,12 +35,23 @@ ct_assert((sizeof(double) <= sizeof(dbats_value)), dbats_value_is_smaller_than_d
 #define vec_test(vec, i)   (vec[(i)/8] & (1<<((i)%8)))    // test the ith bit
 
 #define valueptr(handler, agg_id, frag_id, offset) \
-    ((dbats_value*)(&handler->tslice[agg_id].frag[frag_id]->data[offset * handler->entry_size]))
+    ((dbats_value*)(&handler->tslice[agg_id]->frag[frag_id]->data[offset * handler->entry_size]))
 
-struct dbats_frag {
+// "Fragment", containing a large subset of entries for a timeslice
+typedef struct dbats_frag {
     uint8_t compressed; // is data in db compressed?
     uint8_t is_set[vec_size(ENTRIES_PER_FRAG)]; // which indexes have values
     uint8_t data[]; // values (C99 flexible array member)
+} dbats_frag;
+
+// Logical row or "time slice", containing all the entries for a given time
+// (broken into fragments).
+struct dbats_tslice {
+    uint32_t time;                        // start time (unix seconds)
+    uint32_t num_frags;                   // number of fragments
+    uint8_t preload;                      // load frags when tslice is selected
+    dbats_frag *frag[MAX_NUM_FRAGS];
+    uint8_t frag_changed[MAX_NUM_FRAGS];
 };
 
 #define fragsize(handler) (sizeof(dbats_frag) + ENTRIES_PER_FRAG * (handler)->entry_size)
@@ -313,6 +324,13 @@ int dbats_open(dbats_handler *handler, const char *path,
 	memcpy(handler->agg, value, value_len);
     }
 
+    // allocate tslice for each aggregate
+    for (int agg_id = 0; agg_id < handler->num_aggs; agg_id++) {
+	if (!(handler->tslice[agg_id] = emalloc(sizeof(dbats_tslice), "tslice")))
+	    return -1;
+	memset(handler->tslice[agg_id], 0, sizeof(dbats_tslice));
+    }
+
     // load key_info for every key
     int rc;
     DBC *cursor;
@@ -361,13 +379,12 @@ int dbats_open(dbats_handler *handler, const char *path,
     }
 
     handler->is_open = 1;
-
-    return(0);
+    return 0;
 }
 
 int dbats_aggregate(dbats_handler *handler, int func, int steps)
 {
-    if (handler->tslice[0].time > 0) {
+    if (handler->tslice[0]->time > 0) {
 	// XXX fix this?
 	dbats_log(TRACE_ERROR,
 	    "Adding a new aggregation to existing data is not yet supported.");
@@ -380,6 +397,11 @@ int dbats_aggregate(dbats_handler *handler, int func, int steps)
     }
 
     int agg_id = handler->num_aggs++;
+
+    if (!(handler->tslice[agg_id] = emalloc(sizeof(dbats_tslice), "tslice")))
+	return -1;
+    memset(handler->tslice[agg_id], 0, sizeof(dbats_tslice));
+
     handler->agg[agg_id].func = func;
     handler->agg[agg_id].steps = steps;
     handler->agg[agg_id].period = handler->agg[0].period * steps;
@@ -389,7 +411,7 @@ int dbats_aggregate(dbats_handler *handler, int func, int steps)
     raw_db_set(handler, handler->dbMeta, "num_aggs", strlen("num_aggs"),
 	&handler->num_aggs, sizeof(handler->num_aggs));
 
-    return(0);
+    return 0;
 }
 
 /*************************************************************************/
@@ -398,20 +420,20 @@ int dbats_aggregate(dbats_handler *handler, int func, int steps)
 // Also cleans up in-memory tslice, even if db is readonly.
 static void dbats_flush_tslice(dbats_handler *handler, int agg_id)
 {
-    dbats_log(TRACE_INFO, "Flush t=%u agg_id=%d", handler->tslice[agg_id].time, agg_id);
+    dbats_log(TRACE_INFO, "Flush t=%u agg_id=%d", handler->tslice[agg_id]->time, agg_id);
     size_t frag_size = fragsize(handler);
     fragkey_t dbkey;
     char *buf = NULL;
 
     // Write fragments to the DB
-    dbkey.time = handler->tslice[agg_id].time;
+    dbkey.time = handler->tslice[agg_id]->time;
     dbkey.agg_id = agg_id;
-    for (int f = 0; f < handler->tslice[agg_id].num_frags; f++) {
-	if (!handler->tslice[agg_id].frag[f]) continue;
+    for (int f = 0; f < handler->tslice[agg_id]->num_frags; f++) {
+	if (!handler->tslice[agg_id]->frag[f]) continue;
 	dbkey.frag_id = f;
 	if (handler->readonly) {
 	    // do nothing
-	} else if (!handler->tslice[agg_id].frag_changed[f]) {
+	} else if (!handler->tslice[agg_id]->frag_changed[f]) {
 	    dbats_log(TRACE_INFO, "Skipping frag %d (unchanged)", f);
 	} else if (handler->compress) {
 	    if (!handler->state_compress) {
@@ -423,8 +445,8 @@ static void dbats_flush_tslice(dbats_handler *handler, int agg_id)
 		if (!buf) return;
 	    }
 	    buf[0] = 1; // compression flag
-	    handler->tslice[agg_id].frag[f]->compressed = 1;
-	    size_t compressed_len = qlz_compress(handler->tslice[agg_id].frag[f],
+	    handler->tslice[agg_id]->frag[f]->compressed = 1;
+	    size_t compressed_len = qlz_compress(handler->tslice[agg_id]->frag[f],
 		buf+1, frag_size, handler->state_compress);
 	    dbats_log(TRACE_INFO, "Frag %d compression: %zu -> %zu (%.1f %%)",
 		f, frag_size, compressed_len, compressed_len*100.0/frag_size);
@@ -433,25 +455,25 @@ static void dbats_flush_tslice(dbats_handler *handler, int agg_id)
 	} else {
 	    if (!buf)
 		buf = (char*)emalloc(frag_size + 1, "write buffer");
-	    handler->tslice[agg_id].frag[f]->compressed = 0;
+	    handler->tslice[agg_id]->frag[f]->compressed = 0;
 	    dbats_log(TRACE_INFO, "Frag %d write: %zu", f, frag_size);
 	    raw_db_set(handler, handler->dbData, &dbkey, sizeof(dbkey),
-		handler->tslice[agg_id].frag[f], frag_size);
+		handler->tslice[agg_id]->frag[f], frag_size);
 	}
 
-	handler->tslice[agg_id].frag_changed[f] = 0;
-	free(handler->tslice[agg_id].frag[f]);
-	handler->tslice[agg_id].frag[f] = 0;
+	handler->tslice[agg_id]->frag_changed[f] = 0;
+	free(handler->tslice[agg_id]->frag[f]);
+	handler->tslice[agg_id]->frag[f] = 0;
     }
 
     if (!handler->readonly) {
-	if (handler->agg[agg_id].last_flush < handler->tslice[agg_id].time)
-	    handler->agg[agg_id].last_flush = handler->tslice[agg_id].time;
+	if (handler->agg[agg_id].last_flush < handler->tslice[agg_id]->time)
+	    handler->agg[agg_id].last_flush = handler->tslice[agg_id]->time;
 	raw_db_set(handler, handler->dbMeta, "agg", strlen("agg"),
 	    handler->agg, sizeof(dbats_agg) * handler->num_aggs);
     }
 
-    memset(&handler->tslice[agg_id], 0, sizeof(dbats_tslice));
+    memset(handler->tslice[agg_id], 0, sizeof(dbats_tslice));
     if (buf) free(buf);
 }
 
@@ -505,7 +527,7 @@ static timerange_t *timerange_insert(dbats_key_info_t *tkip, int i,
 static int update_key_info(dbats_handler *handler, int next_is_far)
 {
     dbats_agg *agg0 = &handler->agg[0];
-    dbats_tslice *tslice = &handler->tslice[0];
+    dbats_tslice *tslice = handler->tslice[0];
     if (handler->readonly || tslice->time == 0) return 0;
     int is_last = tslice->time >= agg0->last_flush;
     dbats_log(TRACE_INFO,
@@ -692,8 +714,10 @@ void dbats_close(dbats_handler *handler)
 	dbats_log(TRACE_INFO, "Flushing database changes...");
 
     update_key_info(handler, 0);
-    for (int agg_id = 0; agg_id < handler->num_aggs; agg_id++) {
+    for (int agg_id = handler->num_aggs - 1; agg_id >= 0; agg_id--) {
 	dbats_flush_tslice(handler, agg_id);
+	free(handler->tslice[agg_id]);
+	handler->tslice[agg_id] = NULL;
     }
 
     for (uint32_t idx = 0; idx < handler->lowest_free_index; idx++) {
@@ -782,9 +806,9 @@ static int load_frag(dbats_handler *handler, uint32_t t, int agg_id,
 	    t, agg_id, frag_id);
     }
 
-    handler->tslice[agg_id].frag[frag_id] = ptr;
+    handler->tslice[agg_id]->frag[frag_id] = ptr;
 
-    dbats_tslice *tslice = &handler->tslice[agg_id];
+    dbats_tslice *tslice = handler->tslice[agg_id];
     if (tslice->num_frags <= frag_id)
 	tslice->num_frags = frag_id + 1;
 
@@ -798,7 +822,7 @@ int dbats_goto_time(dbats_handler *handler, uint32_t time_value, uint32_t flags)
     dbats_log(TRACE_INFO, "goto_time %u", time_value);
 
     for (int agg_id = 0; agg_id < handler->num_aggs; agg_id++) {
-	dbats_tslice *tslice = &handler->tslice[agg_id];
+	dbats_tslice *tslice = handler->tslice[agg_id];
 	uint32_t t = time_value;
 
 	normalize_time(handler, agg_id, &t);
@@ -888,7 +912,7 @@ int dbats_get_key_info(dbats_handler *handler, const char *key,
 
 static int instantiate_frag(dbats_handler *handler, int agg_id, uint32_t frag_id)
 {
-    dbats_tslice *tslice = &handler->tslice[agg_id];
+    dbats_tslice *tslice = handler->tslice[agg_id];
 
     if (frag_id > MAX_NUM_FRAGS) {
 	dbats_log(TRACE_ERROR, "Internal error: frag_id %u > %u",
@@ -939,7 +963,7 @@ static inline uint32_t max(uint32_t a, uint32_t b) { return a > b ? a : b; }
 
 int dbats_set(dbats_handler *handler, dbats_key_info_t *tkip, const dbats_value *valuep)
 {
-    dbats_log(TRACE_INFO, "dbats_set %u %u = %" PRIval, handler->tslice[0].time, tkip->index, valuep[0]); // XXX
+    dbats_log(TRACE_INFO, "dbats_set %u %u = %" PRIval, handler->tslice[0]->time, tkip->index, valuep[0]); // XXX
     int rc;
 
     if (!handler->is_open || handler->readonly)
@@ -949,7 +973,7 @@ int dbats_set(dbats_handler *handler, dbats_key_info_t *tkip, const dbats_value 
 	return rc;
     }
 
-    uint8_t was_set = vec_test(handler->tslice[0].frag[tkip->frag_id]->is_set, tkip->offset);
+    uint8_t was_set = vec_test(handler->tslice[0]->frag[tkip->frag_id]->is_set, tkip->offset);
     dbats_value *oldvaluep = valueptr(handler, 0, tkip->frag_id, tkip->offset);
 
     for (int agg_id = 1; agg_id < handler->num_aggs; agg_id++) {
@@ -963,7 +987,7 @@ int dbats_set(dbats_handler *handler, dbats_key_info_t *tkip, const dbats_value 
 	uint8_t failed = 0;
 	dbats_value *aggval = valueptr(handler, agg_id, tkip->frag_id, tkip->offset);
 
-	uint32_t aggstart = handler->tslice[agg_id].time;
+	uint32_t aggstart = handler->tslice[agg_id]->time;
 	uint32_t aggend = aggstart + (handler->agg[agg_id].steps - 1) * handler->agg[0].period;
 
 	int n = 0; // number of steps contributing to aggregate
@@ -985,8 +1009,8 @@ int dbats_set(dbats_handler *handler, dbats_key_info_t *tkip, const dbats_value 
 	    // tslice of agg period, (overlap_end == overlap_start - period),
 	    // so be careful with unsigned underflow.
 	    n += (overlap_end + handler->agg[0].period - overlap_start) / handler->agg[0].period;
-	    if (handler->tslice[0].time >= overlap_start &&
-		handler->tslice[0].time <= overlap_end)
+	    if (handler->tslice[0]->time >= overlap_start &&
+		handler->tslice[0]->time <= overlap_end)
 		    active_included = 1;
 	}
 	if (!active_included)
@@ -1042,7 +1066,7 @@ int dbats_set(dbats_handler *handler, dbats_key_info_t *tkip, const dbats_value 
 	    for (int i = 0; i < handler->num_values_per_entry; i++) {
 		if (was_set && valuep[i] == oldvaluep[i]) {
 		    // value did not change; no need to change agg value
-		} else if (handler->tslice[0].time >= handler->agg[0].last_flush) {
+		} else if (handler->tslice[0]->time >= handler->agg[0].last_flush) {
 		    // common case: value is latest ever seen
 		    aggval[i] = valuep[i];
 		    changed = 1;
@@ -1059,7 +1083,7 @@ int dbats_set(dbats_handler *handler, dbats_key_info_t *tkip, const dbats_value 
 			uint32_t tr_end = tr[tri].end != 0 ?
 			    tr[tri].end : handler->agg[0].last_flush;
 			uint32_t overlap_end = min(aggend, tr_end);
-			if (handler->tslice[0].time >= overlap_end) {
+			if (handler->tslice[0]->time >= overlap_end) {
 			    // no timerange overlaps agg, or active time >= overlap_end
 			    aggval[i] = valuep[i];
 			    changed = 1;
@@ -1087,8 +1111,8 @@ int dbats_set(dbats_handler *handler, dbats_key_info_t *tkip, const dbats_value 
 
 	if (changed) {
 	    // XXX if (n >= xff * steps)
-	    vec_set(handler->tslice[agg_id].frag[tkip->frag_id]->is_set, tkip->offset);
-	    handler->tslice[agg_id].frag_changed[tkip->frag_id] = 1;
+	    vec_set(handler->tslice[agg_id]->frag[tkip->frag_id]->is_set, tkip->offset);
+	    handler->tslice[agg_id]->frag_changed[tkip->frag_id] = 1;
 	    if (handler->agg[agg_id].func == DBATS_AGG_AVG) {
 		dbats_log(TRACE_INFO, "Succesfully set value "
 		    "[agg_id=%d][frag_id=%u][offset=%" PRIu32 "][value_len=%u] aggval=%f",
@@ -1116,8 +1140,8 @@ int dbats_set(dbats_handler *handler, dbats_key_info_t *tkip, const dbats_value 
     // Set value at agg_id 0 (after aggregations because aggregations need
     // both old and new values)
     memcpy(oldvaluep, valuep, handler->entry_size);
-    vec_set(handler->tslice[0].frag[tkip->frag_id]->is_set, tkip->offset);
-    handler->tslice[0].frag_changed[tkip->frag_id] = 1;
+    vec_set(handler->tslice[0]->frag[tkip->frag_id]->is_set, tkip->offset);
+    handler->tslice[0]->frag_changed[tkip->frag_id] = 1;
     dbats_log(TRACE_INFO, "Succesfully set value "
 	"[agg_id=%d][frag_id=%u][offset=%" PRIu32 "][value_len=%u] value=%" PRIval,
 	0, tkip->frag_id, tkip->offset, handler->entry_size, valuep[0]);
@@ -1144,7 +1168,7 @@ int dbats_get(dbats_handler *handler, dbats_key_info_t *tkip,
     const dbats_value **valuepp, int agg_id)
 {
     int rc;
-    dbats_tslice *tslice = &handler->tslice[agg_id];
+    dbats_tslice *tslice = handler->tslice[agg_id];
 
     if (!handler->is_open) {
 	*valuepp = NULL;
@@ -1189,7 +1213,7 @@ int dbats_get_double(dbats_handler *handler, dbats_key_info_t *tkip,
     const double **valuepp, int agg_id)
 {
     int rc;
-    dbats_tslice *tslice = &handler->tslice[agg_id];
+    dbats_tslice *tslice = handler->tslice[agg_id];
 
     if (!handler->is_open) {
 	*valuepp = NULL;

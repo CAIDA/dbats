@@ -20,13 +20,12 @@
 
 /* ************************************************** */
 
+// Limits
 #define ENTRIES_PER_FRAG    10000 // number of entries in a fragment
 #define MAX_NUM_FRAGS       16384 // max number of fragments in a tslice
-
 #define INFOS_PER_BLOCK     10000 // number of key_info in a block
 #define MAX_NUM_INFOBLOCKS  16384 // max number of key_info blocks
-
-#define MAX_NUM_AGGS           16 // max number of aggregation levels
+#define MAX_NUM_AGGS           16 // max number of aggregations
 
 // Flags
 #define DBATS_CREATE          0x01 // create database if it doesn't exist
@@ -34,18 +33,7 @@
 #define DBATS_READONLY        0x08 // don't allow writing
 #define DBATS_UNCOMPRESSED    0x10 // don't compress data written to db
 
-typedef struct dbats_frag dbats_frag;
-
-// Logical row or "time slice", containing all the entries for a given time.
-// Entries are actually batched into fragments within a tslice.
-typedef struct {
-    uint32_t time;                        // start time (unix seconds)
-    uint32_t num_frags;                   // number of fragments
-    uint8_t preload;                      // load frags when tslice is selected
-    dbats_frag *frag[MAX_NUM_FRAGS];
-    uint8_t frag_changed[MAX_NUM_FRAGS];
-} dbats_tslice;
-
+// Aggregation functions
 #define DBATS_AGG_NONE   0
 #define DBATS_AGG_MIN    1
 #define DBATS_AGG_MAX    2
@@ -70,6 +58,8 @@ typedef uint64_t dbats_value;
 #define PRIval PRIu64
 #define SCNval SCNu64
 #endif
+
+typedef struct dbats_tslice dbats_tslice;
 
 typedef struct {
     uint32_t start;
@@ -102,8 +92,8 @@ typedef struct {
     DB *dbIndex;                          // index -> metric key
     DB *dbData;                           // {time, agg_id, frag_id} -> data
     DBC *keywalk;                         // cursor for iterating over keys
-    dbats_tslice tslice[MAX_NUM_AGGS];     // a tslice for each aggregation level
-    dbats_agg agg[MAX_NUM_AGGS];           // parameters for each aggregation level
+    dbats_tslice *tslice[MAX_NUM_AGGS];   // a tslice for each aggregation level
+    dbats_agg agg[MAX_NUM_AGGS];          // parameters for each aggregation level
     dbats_key_info_t *key_info_block[MAX_NUM_INFOBLOCKS];
 } dbats_handler;
 
