@@ -19,6 +19,13 @@
 #include "dbats.h"
 #include "quicklz.h"
 
+// Limits
+#define ENTRIES_PER_FRAG    10000 // number of entries in a fragment
+#define MAX_NUM_FRAGS       16384 // max number of fragments in a tslice
+#define INFOS_PER_BLOCK     10000 // number of key_info in a block
+#define MAX_NUM_INFOBLOCKS  16384 // max number of key_info blocks
+#define MAX_NUM_AGGS           16 // max number of aggregations
+
 
 /*************************************************************************/
 // compile-time assertion (works anywhere a declaration is allowed)
@@ -65,7 +72,7 @@ typedef struct {
 // key_info as stored in db
 typedef struct {
     uint32_t index;
-    timerange_t timeranges[]; // When did this key have a value? (C99 flexible array member)
+    dbats_timerange_t timeranges[]; // When did this key have a value? (C99 flexible array member)
 } raw_key_info_t;
 
 
@@ -151,20 +158,17 @@ static void raw_db_set(const dbats_handler *handler, DB *db,
 
 #define QLZ_OVERHEAD 400
 
-static uint8_t *db_get_buf = 0;
-static size_t db_get_buf_len = 0;
-
-static int raw_db_get(const dbats_handler *handler, DB* db,
+static int raw_db_get(dbats_handler *handler, DB* db,
     const void *key, uint32_t key_len, void **value, size_t *value_len)
 {
     DBT key_data, data;
     int rc;
 
-    if (db_get_buf_len < fragsize(handler) + QLZ_OVERHEAD) {
-	if (db_get_buf) free(db_get_buf);
-	db_get_buf_len = fragsize(handler) + QLZ_OVERHEAD;
-	db_get_buf = emalloc(db_get_buf_len, "decompression buffer");
-	if (!db_get_buf) return -2;
+    if (handler->db_get_buf_len < fragsize(handler) + QLZ_OVERHEAD) {
+	if (handler->db_get_buf) free(handler->db_get_buf);
+	handler->db_get_buf_len = fragsize(handler) + QLZ_OVERHEAD;
+	handler->db_get_buf = emalloc(handler->db_get_buf_len, "get buffer");
+	if (!handler->db_get_buf) return -2;
     }
 
     memset(&key_data, 0, sizeof(key_data));
@@ -173,8 +177,8 @@ static int raw_db_get(const dbats_handler *handler, DB* db,
     key_data.data = (void*)key; // assumption: DB won't write to *key_data.data
     key_data.size = key_len;
     key_data.flags = DB_DBT_USERMEM;
-    data.data = db_get_buf;
-    data.ulen = db_get_buf_len;
+    data.data = handler->db_get_buf;
+    data.ulen = handler->db_get_buf_len;
     data.flags = DB_DBT_USERMEM;
     if ((rc = db->get(db, NULL, &key_data, &data, 0)) == 0) {
 	*value = data.data;
@@ -278,8 +282,7 @@ int dbats_open(dbats_handler *handler, const char *path,
     }
 
     if ((ret = handler->dbenv->open(handler->dbenv, path, dbflags, dbmode)) != 0) {
-	dbats_log(LOG_ERROR, "Error opening DB environment: %s",
-	    db_strerror(ret));
+	dbats_log(LOG_ERROR, "Error opening DB %s: %s", path, db_strerror(ret));
 	return -1;
     }
 
@@ -319,6 +322,13 @@ int dbats_open(dbats_handler *handler, const char *path,
 	handler->readonly = 1;
 	return -1;
     }
+
+    handler->agg = emalloc(MAX_NUM_AGGS * sizeof(dbats_agg), "handler->agg");
+    if (!handler->agg) return -1;
+    handler->tslice = emalloc(MAX_NUM_AGGS * sizeof(dbats_tslice*), "handler->tslice");
+    if (!handler->tslice) return -1;
+    handler->key_info_block = emalloc(MAX_NUM_INFOBLOCKS * sizeof(dbats_key_info_t*), "handler->key_info_block");
+    if (!handler->tslice) return -1;
 
     handler->entry_size = handler->values_per_entry * sizeof(dbats_value);
 
@@ -384,7 +394,7 @@ int dbats_open(dbats_handler *handler, const char *path,
 	tkip->frag_id = tkip->index / ENTRIES_PER_FRAG;
 	tkip->offset = tkip->index % ENTRIES_PER_FRAG;
 	size_t tr_size = dbdata.size - sizeof(raw_key_info_t);
-	tkip->n_timeranges = tr_size / sizeof(timerange_t);
+	tkip->n_timeranges = tr_size / sizeof(dbats_timerange_t);
 	tkip->timeranges = emalloc(tr_size, "timeranges");
 	if (!tkip->timeranges) return -2;
 	memcpy(tkip->timeranges, rki->timeranges, tr_size);
@@ -498,7 +508,7 @@ static void dbats_flush_tslice(dbats_handler *handler, int agg_id)
 
 static int set_key_info(const dbats_handler *handler, dbats_key_info_t *tkip)
 {
-    size_t tr_size = tkip->n_timeranges * sizeof(timerange_t);
+    size_t tr_size = tkip->n_timeranges * sizeof(dbats_timerange_t);
     size_t rki_size = sizeof(raw_key_info_t) + tr_size;
     raw_key_info_t *rki = emalloc(rki_size, tkip->key);
     if (!rki) return -1;
@@ -523,16 +533,16 @@ static int set_key_info(const dbats_handler *handler, dbats_key_info_t *tkip)
 }
 
 // Insert a new timerange into tkip->timeranges at position i, and initialize it
-static timerange_t *timerange_insert(dbats_key_info_t *tkip, int i,
+static dbats_timerange_t *timerange_insert(dbats_key_info_t *tkip, int i,
     uint32_t start, uint32_t end)
 {
     int n = ++tkip->n_timeranges;
-    timerange_t *tr = tkip->timeranges;
-    timerange_t *newtr = emalloc(n * sizeof(timerange_t), "timeranges");
+    dbats_timerange_t *tr = tkip->timeranges;
+    dbats_timerange_t *newtr = emalloc(n * sizeof(dbats_timerange_t), "timeranges");
     if (!newtr) return NULL;
     if (tr) {
-	memcpy(&newtr[0], &tr[0], i * sizeof(timerange_t));
-	memcpy(&newtr[i+1], &tr[i], (n-1-i) * sizeof(timerange_t));
+	memcpy(&newtr[0], &tr[0], i * sizeof(dbats_timerange_t));
+	memcpy(&newtr[i+1], &tr[i], (n-1-i) * sizeof(dbats_timerange_t));
 	free(tr);
     }
     newtr[i].start = start;
@@ -561,7 +571,7 @@ static int update_key_info(dbats_handler *handler, int next_is_far)
 	uint32_t block = idx / INFOS_PER_BLOCK;
 	uint32_t offset = idx % INFOS_PER_BLOCK;
 	dbats_key_info_t *tkip = &handler->key_info_block[block][offset];
-	timerange_t *tr = tkip->timeranges; // shorthand
+	dbats_timerange_t *tr = tkip->timeranges; // shorthand
 
 	int i = tkip->n_timeranges - 1;
 	int tr_changed = 0; // timerange changed?
@@ -633,11 +643,11 @@ static int update_key_info(dbats_handler *handler, int next_is_far)
 		    {
 			// extended range i now abuts range i+1; merge them
 			int n = --tkip->n_timeranges;
-			size_t size = n * sizeof(timerange_t);
-			timerange_t *newtr = emalloc(size, "timeranges");
+			size_t size = n * sizeof(dbats_timerange_t);
+			dbats_timerange_t *newtr = emalloc(size, "timeranges");
 			if (!newtr) return -1;
-			memcpy(&newtr[0], &tr[0], (i+1) * sizeof(timerange_t));
-			memcpy(&newtr[i+1], &tr[i+2], (n-i-1) * sizeof(timerange_t));
+			memcpy(&newtr[0], &tr[0], (i+1) * sizeof(dbats_timerange_t));
+			memcpy(&newtr[i+1], &tr[i+2], (n-i-1) * sizeof(dbats_timerange_t));
 			newtr[i].end = tr[i+1].end;
 			free(tr);
 			tr = tkip->timeranges = newtr;
@@ -685,7 +695,7 @@ static int update_key_info(dbats_handler *handler, int next_is_far)
 		    // timerange would become empty; delete it
 		    debugUKI(1, "unset historic clear", i); // XXX
 		    int n = --tkip->n_timeranges;
-		    memmove(&tr[i], &tr[i+1], (n - i) * sizeof(timerange_t));
+		    memmove(&tr[i], &tr[i+1], (n - i) * sizeof(dbats_timerange_t));
 		} else if (tr[i].start == tslice->time) {
 		    // delete first step of timerange
 		    debugUKI(1, "unset historic start", i); // XXX
@@ -750,9 +760,11 @@ void dbats_close(dbats_handler *handler)
 	free(handler->key_info_block[block]);
 	handler->key_info_block[block] = NULL;
     }
-    free(db_get_buf);
-    db_get_buf = NULL;
-    db_get_buf_len = 0;
+
+    if (handler->db_get_buf) free(handler->db_get_buf);
+    if (handler->agg) free(handler->agg);
+    if (handler->tslice) free(handler->tslice);
+    if (handler->key_info_block) free(handler->key_info_block);
 
     //handler->dbMeta->close(handler->dbMeta, 0);
     //handler->dbKeys->close(handler->dbKeys, 0);
@@ -769,7 +781,7 @@ void dbats_close(dbats_handler *handler)
 
 static const time_t time_base = 259200; // 00:00 on first sunday of 1970, UTC
 
-uint32_t normalize_time(const dbats_handler *handler, int agg_id, uint32_t *t)
+uint32_t dbats_normalize_time(const dbats_handler *handler, int agg_id, uint32_t *t)
 {
     *t -= (*t - time_base) % handler->agg[agg_id].period;
     return *t;
@@ -842,7 +854,7 @@ int dbats_goto_time(dbats_handler *handler, uint32_t time_value, uint32_t flags)
 	dbats_tslice *tslice = handler->tslice[agg_id];
 	uint32_t t = time_value;
 
-	normalize_time(handler, agg_id, &t);
+	dbats_normalize_time(handler, agg_id, &t);
 	if (tslice->time == t) {
 	    dbats_log(LOG_INFO, "goto_time %u, agg_id=%d: already loaded", t, agg_id);
 	    continue;
@@ -1009,7 +1021,7 @@ int dbats_set(dbats_handler *handler, dbats_key_info_t *tkip, const dbats_value 
 
 	int n = 0; // number of steps contributing to aggregate
 	int active_included = 0;
-	timerange_t *tr = tkip->timeranges; // shorthand
+	dbats_timerange_t *tr = tkip->timeranges; // shorthand
 	int ntr = tkip->n_timeranges; // number of time ranges
 	for (int tri = ntr - 1;
 	    tri >= 0 && (tr[tri].end == 0 || tr[tri].end >= aggstart);

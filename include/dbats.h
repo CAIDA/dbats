@@ -20,13 +20,6 @@
 
 /* ************************************************** */
 
-// Limits
-#define ENTRIES_PER_FRAG    10000 // number of entries in a fragment
-#define MAX_NUM_FRAGS       16384 // max number of fragments in a tslice
-#define INFOS_PER_BLOCK     10000 // number of key_info in a block
-#define MAX_NUM_INFOBLOCKS  16384 // max number of key_info blocks
-#define MAX_NUM_AGGS           16 // max number of aggregations
-
 // Flags
 #define DBATS_CREATE         0x01 // create database if it doesn't exist
 #define DBATS_PRELOAD        0x04 // load fragments when tslice is selected
@@ -64,15 +57,15 @@ typedef struct dbats_tslice dbats_tslice;
 typedef struct {
     uint32_t start;
     uint32_t end;
-} timerange_t;
+} dbats_timerange_t;
 
 typedef struct {
     const char *key;
-    uint32_t index;          // column index within timeslice
-    uint32_t frag_id;        // fragment within timeslice
-    uint32_t offset;         // index within fragment
-    uint32_t n_timeranges;   // number of timeranges
-    timerange_t *timeranges; // When did this key actually have a value?
+    uint32_t index;                // column index within timeslice
+    uint32_t frag_id;              // fragment within timeslice
+    uint32_t offset;               // index within fragment
+    uint32_t n_timeranges;         // number of timeranges
+    dbats_timerange_t *timeranges; // When did this key actually have a value?
 } dbats_key_info_t;
 
 typedef struct {
@@ -92,9 +85,11 @@ typedef struct {
     DB *dbIndex;                          // index -> metric key
     DB *dbData;                           // {time, agg_id, frag_id} -> fragment
     DBC *keywalk;                         // cursor for iterating over keys
-    dbats_tslice *tslice[MAX_NUM_AGGS];   // a tslice for each aggregation level
-    dbats_agg agg[MAX_NUM_AGGS];          // parameters for each aggregation level
-    dbats_key_info_t *key_info_block[MAX_NUM_INFOBLOCKS];
+    dbats_tslice **tslice;                // a tslice for each aggregation level
+    dbats_agg *agg;                       // parameters for each aggregation level
+    dbats_key_info_t **key_info_block;
+    uint8_t *db_get_buf;
+    size_t db_get_buf_len;
 } dbats_handler;
 
 /* ************************************************** */
@@ -108,7 +103,8 @@ extern int dbats_aggregate(dbats_handler *handler, int func, int steps);
 
 extern void dbats_close(dbats_handler *handler);
 
-extern uint32_t normalize_time(const dbats_handler *handler, int s, uint32_t *time);
+extern uint32_t dbats_normalize_time(const dbats_handler *handler, int agg_id,
+    uint32_t *time);
 
 extern int dbats_goto_time(dbats_handler *handler,
     uint32_t time_value, uint32_t flags);
