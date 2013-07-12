@@ -127,7 +127,7 @@ int main(int argc, char *argv[]) {
 			break;
 		    }
 		    fprintf(out, "%s ", keys[k]->key);
-		    for (int j = 0; j < handler.num_values_per_entry; j++) {
+		    for (int j = 0; j < handler.values_per_entry; j++) {
 			fprintf(out, "%.3f ", values ? values[j] : 0);
 		    }
 		    fprintf(out, "%u %d\n", t, agg_id);
@@ -141,7 +141,7 @@ int main(int argc, char *argv[]) {
 			break;
 		    }
 		    fprintf(out, "%s ", keys[k]->key);
-		    for (int j = 0; j < handler.num_values_per_entry; j++) {
+		    for (int j = 0; j < handler.values_per_entry; j++) {
 			fprintf(out, "%" PRIval " ", values ? values[j] : 0);
 		    }
 		    fprintf(out, "%u %d\n", t, agg_id);

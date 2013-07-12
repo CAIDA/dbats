@@ -28,10 +28,10 @@
 #define MAX_NUM_AGGS           16 // max number of aggregations
 
 // Flags
-#define DBATS_CREATE          0x01 // create database if it doesn't exist
-#define DBATS_PRELOAD         0x04 // load fragments when tslice is selected
-#define DBATS_READONLY        0x08 // don't allow writing
-#define DBATS_UNCOMPRESSED    0x10 // don't compress data written to db
+#define DBATS_CREATE         0x01 // create database if it doesn't exist
+#define DBATS_PRELOAD        0x04 // load fragments when tslice is selected
+#define DBATS_READONLY       0x08 // don't allow writing
+#define DBATS_UNCOMPRESSED   0x10 // don't compress data written to db
 
 // Aggregation functions
 #define DBATS_AGG_NONE   0
@@ -80,17 +80,17 @@ typedef struct {
     uint8_t  readonly;                   // Mode used to open the db file
     uint8_t  compress;                   // Compress fragments?
     uint16_t num_aggs;                   // Number of aggregations
-    uint16_t num_values_per_entry;       // Number of dbats_values in an entry
+    uint16_t values_per_entry;           // Number of dbats_values in an entry
     uint16_t entry_size;                 // Size of an entry (bytes)
-    uint32_t lowest_free_index;          // Hint to speed finding a free index
+    uint32_t lowest_free_index;          // Next available key index
     uint32_t period;                     // length of raw time slice (sec)
     void *state_compress;
     void *state_decompress;
     DB_ENV *dbenv;                        // DB environment
     DB *dbMeta;                           // config parameters
-    DB *dbKeys;                           // metric key -> index
+    DB *dbKeys;                           // metric key -> key_info
     DB *dbIndex;                          // index -> metric key
-    DB *dbData;                           // {time, agg_id, frag_id} -> data
+    DB *dbData;                           // {time, agg_id, frag_id} -> fragment
     DBC *keywalk;                         // cursor for iterating over keys
     dbats_tslice *tslice[MAX_NUM_AGGS];   // a tslice for each aggregation level
     dbats_agg agg[MAX_NUM_AGGS];          // parameters for each aggregation level
@@ -100,7 +100,7 @@ typedef struct {
 /* ************************************************** */
 
 extern int dbats_open(dbats_handler *handler, const char *dbats_path,
-    uint16_t num_values_per_entry,
+    uint16_t values_per_entry,
     uint32_t period,
     uint32_t flags);
 
