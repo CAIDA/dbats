@@ -2,7 +2,7 @@
 CC           = gcc-anal -g -std=gnu99
 #WARNS        =  -Wshadow -Wpointer-arith -Wmissing-prototypes -Wmissing-declarations -Wnested-externs
 INCLUDE      = -I. -I /opt/local/include $(WARNS)
-#OPTIMIZE     = -O
+OPTIMIZE     = -O
 CFLAGS       = $(OPTIMIZE) -Wall $(INCLUDE) # -fPIC
 LDFLAGS      = -L .
 #DMALLOCLIBS  = dmalloc/malloc.o dmalloc/dmalloc.o
