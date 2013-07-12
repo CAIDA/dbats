@@ -14,6 +14,7 @@ static void help(void) {
     fprintf(stderr, "options:\n");
     fprintf(stderr, "-v{0|1|2|3}    verbosity level\n");
     fprintf(stderr, "-k{path}       load list of keys from {path}\n");
+    fprintf(stderr, "               (default: use all keys in db)\n");
     exit(-1);
 }
 
@@ -34,7 +35,10 @@ static void load_keys(dbats_handler *handler, const char *path)
     while (fgets(line, sizeof(line), keyfile)) {
 	char *p = strchr(line, '\n');
 	if (p) *p = 0;
-	dbats_get_key_info(handler, line, &keys[n_keys], 0);
+	if (dbats_get_key_info(handler, line, &keys[n_keys], 0) != 0) {
+	    fprintf(stderr, "no such key: %s\n", line);
+	    exit(-1);
+	}
 	n_keys++;
     }
     if (ferror(keyfile)) {
