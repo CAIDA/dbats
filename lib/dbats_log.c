@@ -20,17 +20,18 @@
 #include <time.h>
 #include "dbats_log.h"
 
-int traceLevel = LOG_NORMAL;
-FILE *traceFile = NULL;
+int dbats_log_level = LOG_NORMAL;
+FILE *dbats_log_file = NULL;
 
 void dbats_log_func(int level, const char *file, int line, const char *fmt, ...)
 {
     va_list va_ap;
 
-    if (!traceFile)
-	traceFile = stderr;
+    if (level <= dbats_log_level) {
 
-    if (level <= traceLevel) {
+	if (!dbats_log_file)
+	    dbats_log_file = stderr;
+
 	char msgbuf[2048];
 	char datebuf[32];
 	const char *prefix =
@@ -46,9 +47,9 @@ void dbats_log_func(int level, const char *file, int line, const char *fmt, ...)
 	time_t t = time(NULL);
 	strftime(datebuf, sizeof(datebuf), "%Y-%m-%d %H:%M:%S", localtime(&t));
 
-	fprintf(traceFile, "%s %s:%d: %s%s\n",
+	fprintf(dbats_log_file, "%s %s:%d: %s%s\n",
 	    datebuf, file, line, prefix, msgbuf);
-    }
 
-    fflush(traceFile);
+	fflush(dbats_log_file);
+    }
 }

@@ -64,13 +64,13 @@ int main(int argc, char *argv[]) {
     char *keyfile_path = NULL;
     FILE *out;
     progname = argv[0];
-    traceLevel = 1;
+    dbats_log_level = 1;
 
     int c;
     while ((c = getopt(argc, argv, "v:k:")) != -1) {
 	switch (c) {
 	case 'v':
-	    traceLevel = atoi(optarg);
+	    dbats_log_level = atoi(optarg);
 	    break;
 	case 'k':
 	    keyfile_path = strdup(optarg);

@@ -22,8 +22,7 @@ int main(int argc, char *argv[]) {
     int open_flags = DBATS_CREATE;
     progname = argv[0];
 
-    //traceLevel = 99;
-    traceLevel = 1;
+    dbats_log_level = 1;
 
     uint32_t last_t = 0;
     uint32_t t;
@@ -34,7 +33,7 @@ int main(int argc, char *argv[]) {
     while ((c = getopt(argc, argv, "v:pZ")) != -1) {
 	switch (c) {
 	case 'v':
-	    traceLevel = atoi(optarg);
+	    dbats_log_level = atoi(optarg);
 	    break;
 	case 'p':
 	    goto_flags |= DBATS_PRELOAD;

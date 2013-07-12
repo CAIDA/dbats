@@ -21,10 +21,15 @@
 #define LOG_NORMAL    2
 #define LOG_INFO      3
 
-extern int traceLevel;
-extern FILE *traceFile;
+extern int dbats_log_level;
+extern FILE *dbats_log_file;
 
-#define dbats_log(level, ...) dbats_log_func(level, __FILE__, __LINE__, __VA_ARGS__)
+#define dbats_log(level, ...) \
+    do { \
+	if (level <= dbats_log_level) { \
+	    dbats_log_func(level, __FILE__, __LINE__, __VA_ARGS__); \
+	} \
+    } while (0)
 
 extern void dbats_log_func(int level, const char *file, int line, const char * format, ...)
     __attribute__ ((format (printf, 4, 5)));
