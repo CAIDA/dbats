@@ -939,20 +939,9 @@ int dbats_get_key_info(dbats_handler *handler, const char *key,
     return 0;
 }
 
-static int instantiate_frag(dbats_handler *handler, int agg_id, uint32_t frag_id)
+static int instantiate_frag_func(dbats_handler *handler, int agg_id, uint32_t frag_id)
 {
     dbats_tslice *tslice = handler->tslice[agg_id];
-
-    if (frag_id > MAX_NUM_FRAGS) {
-	dbats_log(LOG_ERROR, "Internal error: frag_id %u > %u",
-	    frag_id, MAX_NUM_FRAGS);
-	return -2;
-    }
-
-    if (tslice->frag[frag_id]) {
-	// We already have the right fragment.  Do nothing.
-	return 0;
-    }
 
     if (!tslice->preload || handler->readonly) {
 	// Try to load the fragment.
@@ -982,6 +971,17 @@ static int instantiate_frag(dbats_handler *handler, int agg_id, uint32_t frag_id
 	tslice->num_frags * ENTRIES_PER_FRAG);
 
     return 0;
+}
+
+// inline version handles the common case without a function call
+static inline int instantiate_frag(dbats_handler *handler, int agg_id, uint32_t frag_id)
+{
+    if (handler->tslice[agg_id]->frag[frag_id]) {
+	// We already have the fragment.  Do nothing.
+	return 0;
+    } else {
+	return instantiate_frag_func(handler, agg_id, frag_id);
+    }
 }
 
 /*************************************************************************/
