@@ -62,7 +62,7 @@ typedef struct {
 
 typedef struct {
     const char *key;
-    uint32_t index;                // column index within timeslice
+    uint32_t key_id;               // id of key/column
     uint32_t frag_id;              // fragment within timeslice
     uint32_t offset;               // index within fragment
     uint32_t n_timeranges;         // number of timeranges
@@ -76,14 +76,13 @@ typedef struct {
     uint16_t num_aggs;                   // Number of aggregations
     uint16_t values_per_entry;           // Number of dbats_values in an entry
     uint16_t entry_size;                 // Size of an entry (bytes)
-    uint32_t lowest_free_index;          // Next available key index
+    uint32_t num_keys;                   // Next available key_id
     uint32_t period;                     // length of raw time slice (sec)
     void *state_compress;
     void *state_decompress;
     DB_ENV *dbenv;                        // DB environment
     DB *dbMeta;                           // config parameters
-    DB *dbKeys;                           // metric key -> key_info
-    DB *dbIndex;                          // index -> metric key
+    DB *dbKeys;                           // key name -> key_info
     DB *dbData;                           // {time, agg_id, frag_id} -> fragment
     DBC *keywalk;                         // cursor for iterating over keys
     dbats_tslice **tslice;                // a tslice for each aggregation level
