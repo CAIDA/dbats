@@ -319,7 +319,6 @@ int dbats_open(dbats_handler *handler, const char *path,
     if (handler->num_aggs > MAX_NUM_AGGS) {
 	dbats_log(LOG_ERROR, "num_aggs %d > %d", handler->num_aggs,
 	    MAX_NUM_AGGS);
-	handler->readonly = 1;
 	return -1;
     }
 
@@ -332,23 +331,27 @@ int dbats_open(dbats_handler *handler, const char *path,
 
     handler->entry_size = handler->values_per_entry * sizeof(dbats_value);
 
-    handler->agg[0].func = DBATS_AGG_NONE;
-    handler->agg[0].steps = 1;
-    handler->agg[0].period = handler->period;
-
     // load metadata for aggregates
-    if (handler->num_aggs > 1) {
+    if (is_new) {
+	handler->agg[0].func = DBATS_AGG_NONE;
+	handler->agg[0].steps = 1;
+	handler->agg[0].period = handler->period;
+    } else {
 	void *value;
 	size_t value_len;
-	if (raw_db_get(handler, handler->dbMeta, "agg", strlen("agg"), &value, &value_len) == 0) {
-	    if (value_len != handler->num_aggs * sizeof(dbats_agg)) {
-		dbats_log(LOG_ERROR, "corrupt aggregation config %zu != %zu",
-		    value_len, handler->num_aggs * sizeof(dbats_agg));
-		handler->readonly = 1;
+	char keybuf[32];
+	for (int agg_id = 0; agg_id < handler->num_aggs; agg_id++) {
+	    sprintf(keybuf, "agg%d", agg_id);
+	    if (raw_db_get(handler, handler->dbMeta, keybuf, strlen(keybuf), &value, &value_len) != 0) {
+		dbats_log(LOG_ERROR, "missing aggregation config %d", agg_id);
+		return -1;
+	    } else if (value_len != sizeof(dbats_agg)) {
+		dbats_log(LOG_ERROR, "corrupt aggregation config: size %zu != %zu",
+		    value_len, sizeof(dbats_agg));
 		return -1;
 	    }
+	    memcpy(&handler->agg[agg_id], value, value_len);
 	}
-	memcpy(handler->agg, value, value_len);
     }
 
     // allocate tslice for each aggregate
@@ -433,8 +436,10 @@ int dbats_aggregate(dbats_handler *handler, int func, int steps)
     handler->agg[agg_id].steps = steps;
     handler->agg[agg_id].period = handler->agg[0].period * steps;
 
-    raw_db_set(handler, handler->dbMeta, "agg", strlen("agg"),
-	handler->agg, sizeof(dbats_agg) * handler->num_aggs);
+    char keybuf[32];
+    sprintf(keybuf, "agg%d", agg_id);
+    raw_db_set(handler, handler->dbMeta, keybuf, strlen(keybuf),
+	&handler->agg[agg_id], sizeof(dbats_agg));
     raw_db_set(handler, handler->dbMeta, "num_aggs", strlen("num_aggs"),
 	&handler->num_aggs, sizeof(handler->num_aggs));
 
@@ -506,8 +511,10 @@ static void dbats_flush_tslice(dbats_handler *handler, int agg_id)
 	    changed = 1;
 	}
 	if (changed) {
-	    raw_db_set(handler, handler->dbMeta, "agg", strlen("agg"),
-		handler->agg, sizeof(dbats_agg) * handler->num_aggs);
+	    char keybuf[32];
+	    sprintf(keybuf, "agg%d", agg_id);
+	    raw_db_set(handler, handler->dbMeta, keybuf, strlen(keybuf),
+		&handler->agg[agg_id], sizeof(dbats_agg));
 	}
     }
 
