@@ -494,10 +494,21 @@ static void dbats_flush_tslice(dbats_handler *handler, int agg_id)
     }
 
     if (!handler->readonly) {
-	if (handler->agg[agg_id].last_flush < handler->tslice[agg_id]->time)
+	int changed = 0;
+	if (handler->agg[agg_id].first_flush == 0 ||
+	    handler->agg[agg_id].first_flush > handler->tslice[agg_id]->time)
+	{
 	    handler->agg[agg_id].last_flush = handler->tslice[agg_id]->time;
-	raw_db_set(handler, handler->dbMeta, "agg", strlen("agg"),
-	    handler->agg, sizeof(dbats_agg) * handler->num_aggs);
+	    changed = 1;
+	}
+	if (handler->agg[agg_id].last_flush < handler->tslice[agg_id]->time) {
+	    handler->agg[agg_id].last_flush = handler->tslice[agg_id]->time;
+	    changed = 1;
+	}
+	if (changed) {
+	    raw_db_set(handler, handler->dbMeta, "agg", strlen("agg"),
+		handler->agg, sizeof(dbats_agg) * handler->num_aggs);
+	}
     }
 
     memset(handler->tslice[agg_id], 0, sizeof(dbats_tslice));
