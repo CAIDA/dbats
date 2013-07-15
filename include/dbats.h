@@ -110,22 +110,22 @@ extern int dbats_goto_time(dbats_handler *handler,
     uint32_t time_value, uint32_t flags);
 
 extern int dbats_get_key_info(dbats_handler *handler, const char *key,
-    dbats_key_info_t **tkipp, uint32_t flags);
+    dbats_key_info_t **dkipp, uint32_t flags);
 
-extern int dbats_set(dbats_handler *handler, dbats_key_info_t *tkip,
+extern int dbats_set(dbats_handler *handler, dbats_key_info_t *dkip,
     const dbats_value *valuep);
 extern int dbats_set_by_key (dbats_handler *handler, const char *key,
     const dbats_value *valuep);
 
-extern int dbats_get(dbats_handler *handler, dbats_key_info_t *tkip,
+extern int dbats_get(dbats_handler *handler, dbats_key_info_t *dkip,
     const dbats_value **valuepp, int agg_id);
-extern int dbats_get_double(dbats_handler *handler, dbats_key_info_t *tkip,
+extern int dbats_get_double(dbats_handler *handler, dbats_key_info_t *dkip,
     const double **valuepp, int agg_id);
 extern int dbats_get_by_key(dbats_handler *handler, const char *key,
     const dbats_value **valuepp, int agg_id);
 
 extern int dbats_keywalk_start(dbats_handler *handler);
-extern int dbats_keywalk_next(dbats_handler *handler, dbats_key_info_t **tkipp);
+extern int dbats_keywalk_next(dbats_handler *handler, dbats_key_info_t **dkipp);
 extern int dbats_keywalk_end(dbats_handler *handler);
 
 extern void dbats_stat_print(const dbats_handler *handler);

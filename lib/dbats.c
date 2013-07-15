@@ -383,21 +383,21 @@ int dbats_open(dbats_handler *handler, const char *path,
 	if (alloc_key_info_block(handler, block) != 0)
 	    return -1;
 
-	dbats_key_info_t *tkip = &handler->key_info_block[block][offset];
+	dbats_key_info_t *dkip = &handler->key_info_block[block][offset];
 	raw_key_info_t *rki = dbdata.data;
 	char *keycopy = emalloc(dbkey.size+1, "copy of key");
 	if (!keycopy) return -2;
 	memcpy(keycopy, dbkey.data, dbkey.size);
 	keycopy[dbkey.size] = 0; // nul-terminate
-	tkip->key = keycopy;
-	tkip->index = rki->index;
-	tkip->frag_id = tkip->index / ENTRIES_PER_FRAG;
-	tkip->offset = tkip->index % ENTRIES_PER_FRAG;
+	dkip->key = keycopy;
+	dkip->index = rki->index;
+	dkip->frag_id = dkip->index / ENTRIES_PER_FRAG;
+	dkip->offset = dkip->index % ENTRIES_PER_FRAG;
 	size_t tr_size = dbdata.size - sizeof(raw_key_info_t);
-	tkip->n_timeranges = tr_size / sizeof(dbats_timerange_t);
-	tkip->timeranges = emalloc(tr_size, "timeranges");
-	if (!tkip->timeranges) return -2;
-	memcpy(tkip->timeranges, rki->timeranges, tr_size);
+	dkip->n_timeranges = tr_size / sizeof(dbats_timerange_t);
+	dkip->timeranges = emalloc(tr_size, "timeranges");
+	if (!dkip->timeranges) return -2;
+	memcpy(dkip->timeranges, rki->timeranges, tr_size);
     }
 
     if ((rc = cursor->close(cursor)) != 0) {
@@ -506,25 +506,25 @@ static void dbats_flush_tslice(dbats_handler *handler, int agg_id)
 
 /*************************************************************************/
 
-static int set_key_info(const dbats_handler *handler, dbats_key_info_t *tkip)
+static int set_key_info(const dbats_handler *handler, dbats_key_info_t *dkip)
 {
-    size_t tr_size = tkip->n_timeranges * sizeof(dbats_timerange_t);
+    size_t tr_size = dkip->n_timeranges * sizeof(dbats_timerange_t);
     size_t rki_size = sizeof(raw_key_info_t) + tr_size;
-    raw_key_info_t *rki = emalloc(rki_size, tkip->key);
+    raw_key_info_t *rki = emalloc(rki_size, dkip->key);
     if (!rki) return -1;
-    rki->index = tkip->index;
-    memcpy(rki->timeranges, tkip->timeranges, tr_size);
-    raw_db_set(handler, handler->dbKeys, tkip->key, strlen(tkip->key), rki, rki_size);
+    rki->index = dkip->index;
+    memcpy(rki->timeranges, dkip->timeranges, tr_size);
+    raw_db_set(handler, handler->dbKeys, dkip->key, strlen(dkip->key), rki, rki_size);
     free(rki);
     dbats_log(LOG_INFO, "Write key %s -> %u, %d timeranges",
-	tkip->key, tkip->index, tkip->n_timeranges);
+	dkip->key, dkip->index, dkip->n_timeranges);
     /*
     int totalsteps = 0; // XXX
-    for (int i = 0; i < tkip->n_timeranges; i++) { // XXX
-	int steps = (tkip->timeranges[i].end + handler->agg[0].period - tkip->timeranges[i].start) /
+    for (int i = 0; i < dkip->n_timeranges; i++) { // XXX
+	int steps = (dkip->timeranges[i].end + handler->agg[0].period - dkip->timeranges[i].start) /
 	    handler->agg[0].period;
 	dbats_log(LOG_INFO, "     %3d: %10u %10u (%3d)",
-	    i, tkip->timeranges[i].start, tkip->timeranges[i].end, steps);
+	    i, dkip->timeranges[i].start, dkip->timeranges[i].end, steps);
 	totalsteps += steps;
     }
     dbats_log(LOG_INFO, "                              %6d", totalsteps); // XXX
@@ -532,12 +532,12 @@ static int set_key_info(const dbats_handler *handler, dbats_key_info_t *tkip)
     return 0;
 }
 
-// Insert a new timerange into tkip->timeranges at position i, and initialize it
-static dbats_timerange_t *timerange_insert(dbats_key_info_t *tkip, int i,
+// Insert a new timerange into dkip->timeranges at position i, and initialize it
+static dbats_timerange_t *timerange_insert(dbats_key_info_t *dkip, int i,
     uint32_t start, uint32_t end)
 {
-    int n = ++tkip->n_timeranges;
-    dbats_timerange_t *tr = tkip->timeranges;
+    int n = ++dkip->n_timeranges;
+    dbats_timerange_t *tr = dkip->timeranges;
     dbats_timerange_t *newtr = emalloc(n * sizeof(dbats_timerange_t), "timeranges");
     if (!newtr) return NULL;
     if (tr) {
@@ -547,7 +547,7 @@ static dbats_timerange_t *timerange_insert(dbats_key_info_t *tkip, int i,
     }
     newtr[i].start = start;
     newtr[i].end = end;
-    return tkip->timeranges = newtr;
+    return dkip->timeranges = newtr;
 }
 
 // Update the timeranges associated with each key.
@@ -565,15 +565,15 @@ static int update_key_info(dbats_handler *handler, int next_is_far)
     dbats_log(LOG_INFO, \
 	"%s idx=%u, t=%u, [%u..%u] %s %d/%d", \
 	(first ? "update_key_info:" : "             -->"), \
-	idx, tslice->time, tr[i].start, tr[i].end, label, i, tkip->n_timeranges)
+	idx, tslice->time, tr[i].start, tr[i].end, label, i, dkip->n_timeranges)
 
     for (uint32_t idx = 0; idx < handler->lowest_free_index; idx++) {
 	uint32_t block = idx / INFOS_PER_BLOCK;
 	uint32_t offset = idx % INFOS_PER_BLOCK;
-	dbats_key_info_t *tkip = &handler->key_info_block[block][offset];
-	dbats_timerange_t *tr = tkip->timeranges; // shorthand
+	dbats_key_info_t *dkip = &handler->key_info_block[block][offset];
+	dbats_timerange_t *tr = dkip->timeranges; // shorthand
 
-	int i = tkip->n_timeranges - 1;
+	int i = dkip->n_timeranges - 1;
 	int tr_changed = 0; // timerange changed?
 
 	// Should timerange change due to next_is_far?
@@ -589,7 +589,7 @@ static int update_key_info(dbats_handler *handler, int next_is_far)
 
 	// Should timerange change because value's set/unset state changed?
 
-	if (!tslice->frag[tkip->frag_id]) {
+	if (!tslice->frag[dkip->frag_id]) {
 	    // Fragment wasn't loaded, so value's state could not have changed.
 	    if (tslice->time > agg0->last_flush) {
 		// This is the first visit to the current timeslice, so the
@@ -603,7 +603,7 @@ static int update_key_info(dbats_handler *handler, int next_is_far)
 		}
 	    }
 
-	} else if (vec_test(tslice->frag[tkip->frag_id]->is_set, tkip->offset)) {
+	} else if (vec_test(tslice->frag[dkip->frag_id]->is_set, dkip->offset)) {
 	    // Value is set.
 	    if (i >= 0 && tr[i].end == 0 && tslice->time >= tr[i].start) {
 		// active time is within or after current range
@@ -620,7 +620,7 @@ static int update_key_info(dbats_handler *handler, int next_is_far)
 		    debugUKI(1, "post-current", i); // XXX
 		    tr[i].end = agg0->last_flush;
 		    debugUKI(0, "post-current", i); // XXX
-		    if (!(tr = timerange_insert(tkip, ++i, tslice->time, 0)))
+		    if (!(tr = timerange_insert(dkip, ++i, tslice->time, 0)))
 			return -1;
 		    debugUKI(0, "post-current", i); // XXX
 		}
@@ -638,11 +638,11 @@ static int update_key_info(dbats_handler *handler, int next_is_far)
 		    debugUKI(1, "abut end", i); // XXX
 		    tr[i].end = tslice->time;
 		    debugUKI(0, "abut end", i); // XXX
-		    if (i+1 < tkip->n_timeranges &&
+		    if (i+1 < dkip->n_timeranges &&
 			tr[i].end + agg0->period == tr[i+1].start)
 		    {
 			// extended range i now abuts range i+1; merge them
-			int n = --tkip->n_timeranges;
+			int n = --dkip->n_timeranges;
 			size_t size = n * sizeof(dbats_timerange_t);
 			dbats_timerange_t *newtr = emalloc(size, "timeranges");
 			if (!newtr) return -1;
@@ -650,10 +650,10 @@ static int update_key_info(dbats_handler *handler, int next_is_far)
 			memcpy(&newtr[i+1], &tr[i+2], (n-i-1) * sizeof(dbats_timerange_t));
 			newtr[i].end = tr[i+1].end;
 			free(tr);
-			tr = tkip->timeranges = newtr;
+			tr = dkip->timeranges = newtr;
 			debugUKI(0, "merge", i); // XXX
 		    }
-		} else if (i+1 < tkip->n_timeranges &&
+		} else if (i+1 < dkip->n_timeranges &&
 		    tslice->time + agg0->period == tr[i+1].start)
 		{
 		    // time abuts start of historic timerange; extend it
@@ -665,7 +665,7 @@ static int update_key_info(dbats_handler *handler, int next_is_far)
 		} else {
 		    // no match found; create a new timerange
 		    tr_changed++;
-		    if (!(tr = timerange_insert(tkip, ++i, tslice->time,
+		    if (!(tr = timerange_insert(dkip, ++i, tslice->time,
 			(!is_last || next_is_far) ? tslice->time : 0)))
 			    return -1;
 		    debugUKI(1, "create", i); // XXX
@@ -674,7 +674,7 @@ static int update_key_info(dbats_handler *handler, int next_is_far)
 
 	} else {
 	    // Value is not set.
-	    if (tkip->n_timeranges == 0) {
+	    if (dkip->n_timeranges == 0) {
 		// No change to timeranges.
 	    } else if (tr[i].end == 0 && tslice->time >= tr[i].start) {
 		// current timerange matches; terminate it
@@ -694,7 +694,7 @@ static int update_key_info(dbats_handler *handler, int next_is_far)
 		{
 		    // timerange would become empty; delete it
 		    debugUKI(1, "unset historic clear", i); // XXX
-		    int n = --tkip->n_timeranges;
+		    int n = --dkip->n_timeranges;
 		    memmove(&tr[i], &tr[i+1], (n - i) * sizeof(dbats_timerange_t));
 		} else if (tr[i].start == tslice->time) {
 		    // delete first step of timerange
@@ -709,7 +709,7 @@ static int update_key_info(dbats_handler *handler, int next_is_far)
 		} else {
 		    // split time range
 		    debugUKI(1, "unset historic split", i); // XXX
-		    if (!(tr = timerange_insert(tkip, i,
+		    if (!(tr = timerange_insert(dkip, i,
 			tr[i].start, tslice->time - agg0->period)))
 			    return -1;
 		    tr[i+1].start = tslice->time + agg0->period;
@@ -721,7 +721,7 @@ static int update_key_info(dbats_handler *handler, int next_is_far)
 
 	// write modified key info to db
 	if (tr_changed) {
-	    if (set_key_info(handler, tkip) != 0)
+	    if (set_key_info(handler, dkip) != 0)
 		return -1;
 	}
     }
@@ -750,11 +750,11 @@ void dbats_close(dbats_handler *handler)
     for (uint32_t idx = 0; idx < handler->lowest_free_index; idx++) {
 	uint32_t block = idx / INFOS_PER_BLOCK;
 	uint32_t offset = idx % INFOS_PER_BLOCK;
-	dbats_key_info_t *tkip = &handler->key_info_block[block][offset];
-	free((void*)tkip->key);
-	tkip->key = NULL;
-	free(tkip->timeranges);
-	tkip->timeranges = NULL;
+	dbats_key_info_t *dkip = &handler->key_info_block[block][offset];
+	free((void*)dkip->key);
+	dkip->key = NULL;
+	free(dkip->timeranges);
+	dkip->timeranges = NULL;
     }
     for (uint32_t block = 0; block < (handler->lowest_free_index + INFOS_PER_BLOCK - 1) / INFOS_PER_BLOCK; block++) {
 	free(handler->key_info_block[block]);
@@ -893,7 +893,7 @@ int dbats_goto_time(dbats_handler *handler, uint32_t time_value, uint32_t flags)
 /*************************************************************************/
 
 int dbats_get_key_info(dbats_handler *handler, const char *key,
-    dbats_key_info_t **tkipp, uint32_t flags)
+    dbats_key_info_t **dkipp, uint32_t flags)
 {
     void *ptr;
     size_t keylen = strlen(key);
@@ -903,8 +903,8 @@ int dbats_get_key_info(dbats_handler *handler, const char *key,
 	uint32_t idx = ((raw_key_info_t*)ptr)->index;
 	uint32_t block = idx / INFOS_PER_BLOCK;
 	uint32_t offset = idx % INFOS_PER_BLOCK;
-	*tkipp = &handler->key_info_block[block][offset];
-	// assert(strcmp((*tkipp)->key, key) == 0);
+	*dkipp = &handler->key_info_block[block][offset];
+	// assert(strcmp((*dkipp)->key, key) == 0);
 	dbats_log(LOG_INFO, "Found key %s = index %u", key, idx);
 
     } else if (!(flags & DBATS_CREATE)) {
@@ -917,16 +917,16 @@ int dbats_get_key_info(dbats_handler *handler, const char *key,
 	uint32_t offset = idx % INFOS_PER_BLOCK;
 	if (alloc_key_info_block(handler, block) != 0)
 	    return -1;
-	*tkipp = &handler->key_info_block[block][offset];
-	(*tkipp)->key = strdup(key);
-	(*tkipp)->index = idx;
-	(*tkipp)->frag_id = (*tkipp)->index / ENTRIES_PER_FRAG;
-	(*tkipp)->offset = (*tkipp)->index % ENTRIES_PER_FRAG;
-	(*tkipp)->n_timeranges = 0;
-	(*tkipp)->timeranges = NULL;
-	if (set_key_info(handler, *tkipp) != 0)
+	*dkipp = &handler->key_info_block[block][offset];
+	(*dkipp)->key = strdup(key);
+	(*dkipp)->index = idx;
+	(*dkipp)->frag_id = (*dkipp)->index / ENTRIES_PER_FRAG;
+	(*dkipp)->offset = (*dkipp)->index % ENTRIES_PER_FRAG;
+	(*dkipp)->n_timeranges = 0;
+	(*dkipp)->timeranges = NULL;
+	if (set_key_info(handler, *dkipp) != 0)
 	    return -1;
-	dbats_log(LOG_INFO, "Assigned key %s = index %u", key, (*tkipp)->index);
+	dbats_log(LOG_INFO, "Assigned key %s = index %u", key, (*dkipp)->index);
 	raw_db_set(handler, handler->dbMeta,
 	    "lowest_free_index", strlen("lowest_free_index"),
 	    &handler->lowest_free_index, sizeof(handler->lowest_free_index));
@@ -976,37 +976,33 @@ static int instantiate_frag_func(dbats_handler *handler, int agg_id, uint32_t fr
 // inline version handles the common case without a function call
 static inline int instantiate_frag(dbats_handler *handler, int agg_id, uint32_t frag_id)
 {
-    if (handler->tslice[agg_id]->frag[frag_id]) {
-	// We already have the fragment.  Do nothing.
-	return 0;
-    } else {
-	return instantiate_frag_func(handler, agg_id, frag_id);
-    }
+    return handler->tslice[agg_id]->frag[frag_id] ?
+	0 : // We already have the fragment.
+	instantiate_frag_func(handler, agg_id, frag_id);
 }
 
 /*************************************************************************/
 
 static inline uint32_t min(uint32_t a, uint32_t b) { return a < b ? a : b; }
-
 static inline uint32_t max(uint32_t a, uint32_t b) { return a > b ? a : b; }
 
-int dbats_set(dbats_handler *handler, dbats_key_info_t *tkip, const dbats_value *valuep)
+int dbats_set(dbats_handler *handler, dbats_key_info_t *dkip, const dbats_value *valuep)
 {
-    dbats_log(LOG_INFO, "dbats_set %u %u = %" PRIval, handler->tslice[0]->time, tkip->index, valuep[0]); // XXX
+    dbats_log(LOG_INFO, "dbats_set %u %u = %" PRIval, handler->tslice[0]->time, dkip->index, valuep[0]); // XXX
     int rc;
 
     if (!handler->is_open || handler->readonly)
 	return -1;
-    if ((rc = instantiate_frag(handler, 0, tkip->frag_id)) != 0) {
+    if ((rc = instantiate_frag(handler, 0, dkip->frag_id)) != 0) {
 	handler->readonly = 1;
 	return rc;
     }
 
-    uint8_t was_set = vec_test(handler->tslice[0]->frag[tkip->frag_id]->is_set, tkip->offset);
-    dbats_value *oldvaluep = valueptr(handler, 0, tkip->frag_id, tkip->offset);
+    uint8_t was_set = vec_test(handler->tslice[0]->frag[dkip->frag_id]->is_set, dkip->offset);
+    dbats_value *oldvaluep = valueptr(handler, 0, dkip->frag_id, dkip->offset);
 
     for (int agg_id = 1; agg_id < handler->num_aggs; agg_id++) {
-	if ((rc = instantiate_frag(handler, agg_id, tkip->frag_id)) != 0) {
+	if ((rc = instantiate_frag(handler, agg_id, dkip->frag_id)) != 0) {
 	    handler->readonly = 1;
 	    return rc;
 	}
@@ -1014,15 +1010,15 @@ int dbats_set(dbats_handler *handler, dbats_key_info_t *tkip, const dbats_value 
 	// Aggregate *valuep into tslice[agg_id]
 	uint8_t changed = 0;
 	uint8_t failed = 0;
-	dbats_value *aggval = valueptr(handler, agg_id, tkip->frag_id, tkip->offset);
+	dbats_value *aggval = valueptr(handler, agg_id, dkip->frag_id, dkip->offset);
 
 	uint32_t aggstart = handler->tslice[agg_id]->time;
 	uint32_t aggend = aggstart + (handler->agg[agg_id].steps - 1) * handler->agg[0].period;
 
 	int n = 0; // number of steps contributing to aggregate
 	int active_included = 0;
-	dbats_timerange_t *tr = tkip->timeranges; // shorthand
-	int ntr = tkip->n_timeranges; // number of time ranges
+	dbats_timerange_t *tr = dkip->timeranges; // shorthand
+	int ntr = dkip->n_timeranges; // number of time ranges
 	for (int tri = ntr - 1;
 	    tri >= 0 && (tr[tri].end == 0 || tr[tri].end >= aggstart);
 	    tri--)
@@ -1101,8 +1097,8 @@ int dbats_set(dbats_handler *handler, dbats_key_info_t *tkip, const dbats_value 
 		    changed = 1;
 		} else {
 		    // find last timerange that overlaps this agg
-                    int tri = tkip->n_timeranges - 1;
-		    while (tri >= 0 && tkip->timeranges[tri].start > aggend)
+                    int tri = dkip->n_timeranges - 1;
+		    while (tri >= 0 && dkip->timeranges[tri].start > aggend)
 			tri--;
 		    if (tri < 0) {
 			// no timerange overlaps agg
@@ -1140,26 +1136,26 @@ int dbats_set(dbats_handler *handler, dbats_key_info_t *tkip, const dbats_value 
 
 	if (changed) {
 	    // XXX if (n >= xff * steps)
-	    vec_set(handler->tslice[agg_id]->frag[tkip->frag_id]->is_set, tkip->offset);
-	    handler->tslice[agg_id]->frag_changed[tkip->frag_id] = 1;
+	    vec_set(handler->tslice[agg_id]->frag[dkip->frag_id]->is_set, dkip->offset);
+	    handler->tslice[agg_id]->frag_changed[dkip->frag_id] = 1;
 	    if (handler->agg[agg_id].func == DBATS_AGG_AVG) {
 		dbats_log(LOG_INFO, "Succesfully set value "
 		    "[agg_id=%d][frag_id=%u][offset=%" PRIu32 "][value_len=%u] aggval=%f",
-		    agg_id, tkip->frag_id, tkip->offset, handler->entry_size, *(double*)aggval);
+		    agg_id, dkip->frag_id, dkip->offset, handler->entry_size, *(double*)aggval);
 	    } else {
 		dbats_log(LOG_INFO, "Succesfully set value "
 		    "[agg_id=%d][frag_id=%u][offset=%" PRIu32 "][value_len=%u] aggval=%" PRIval,
-		    agg_id, tkip->frag_id, tkip->offset, handler->entry_size, aggval[0]);
+		    agg_id, dkip->frag_id, dkip->offset, handler->entry_size, aggval[0]);
 	    }
 	} else if (failed) {
 	    if (handler->agg[agg_id].func == DBATS_AGG_AVG) {
 		dbats_log(LOG_ERROR, "Failed to set value "
 		    "[agg_id=%d][frag_id=%u][offset=%" PRIu32 "][value_len=%u] aggval=%f",
-		    agg_id, tkip->frag_id, tkip->offset, handler->entry_size, *(double*)aggval);
+		    agg_id, dkip->frag_id, dkip->offset, handler->entry_size, *(double*)aggval);
 	    } else {
 		dbats_log(LOG_ERROR, "Failed to set value "
 		    "[agg_id=%d][frag_id=%u][offset=%" PRIu32 "][value_len=%u] aggval=%" PRIval,
-		    agg_id, tkip->frag_id, tkip->offset, handler->entry_size, aggval[0]);
+		    agg_id, dkip->frag_id, dkip->offset, handler->entry_size, aggval[0]);
 	    }
 	    handler->readonly = 1;
 	    return -1;
@@ -1169,11 +1165,11 @@ int dbats_set(dbats_handler *handler, dbats_key_info_t *tkip, const dbats_value 
     // Set value at agg_id 0 (after aggregations because aggregations need
     // both old and new values)
     memcpy(oldvaluep, valuep, handler->entry_size);
-    vec_set(handler->tslice[0]->frag[tkip->frag_id]->is_set, tkip->offset);
-    handler->tslice[0]->frag_changed[tkip->frag_id] = 1;
+    vec_set(handler->tslice[0]->frag[dkip->frag_id]->is_set, dkip->offset);
+    handler->tslice[0]->frag_changed[dkip->frag_id] = 1;
     dbats_log(LOG_INFO, "Succesfully set value "
 	"[agg_id=%d][frag_id=%u][offset=%" PRIu32 "][value_len=%u] value=%" PRIval,
-	0, tkip->frag_id, tkip->offset, handler->entry_size, valuep[0]);
+	0, dkip->frag_id, dkip->offset, handler->entry_size, valuep[0]);
 
     return 0;
 }
@@ -1182,18 +1178,18 @@ int dbats_set_by_key(dbats_handler *handler, const char *key,
     const dbats_value *valuep)
 {
     int rc;
-    dbats_key_info_t *tkip;
+    dbats_key_info_t *dkip;
 
-    if ((rc = dbats_get_key_info(handler, key, &tkip, DBATS_CREATE)) != 0) {
+    if ((rc = dbats_get_key_info(handler, key, &dkip, DBATS_CREATE)) != 0) {
 	handler->readonly = 1;
 	return rc;
     }
-    return dbats_set(handler, tkip, valuep);
+    return dbats_set(handler, dkip, valuep);
 }
 
 /*************************************************************************/
 
-int dbats_get(dbats_handler *handler, dbats_key_info_t *tkip,
+int dbats_get(dbats_handler *handler, dbats_key_info_t *dkip,
     const dbats_value **valuepp, int agg_id)
 {
     int rc;
@@ -1204,15 +1200,15 @@ int dbats_get(dbats_handler *handler, dbats_key_info_t *tkip,
 	return -1;
     }
 
-    if ((rc = instantiate_frag(handler, agg_id, tkip->frag_id)) == 0) {
-	if (!vec_test(tslice->frag[tkip->frag_id]->is_set, tkip->offset)) {
+    if ((rc = instantiate_frag(handler, agg_id, dkip->frag_id)) == 0) {
+	if (!vec_test(tslice->frag[dkip->frag_id]->is_set, dkip->offset)) {
 	    dbats_log(LOG_WARNING, "Value unset (v): %u %d %s",
-		tslice->time, agg_id, tkip->key);
+		tslice->time, agg_id, dkip->key);
 	    *valuepp = NULL;
 	    return 1;
 	}
 	if (handler->agg[agg_id].func == DBATS_AGG_AVG) {
-	    double *dval = (double*)valueptr(handler, agg_id, tkip->frag_id, tkip->offset);
+	    double *dval = (double*)valueptr(handler, agg_id, dkip->frag_id, dkip->offset);
 	    static dbats_value *avg_buf = NULL;
 	    if (!avg_buf) {
 		avg_buf = emalloc(handler->entry_size * handler->values_per_entry, "avg_buf");
@@ -1222,15 +1218,15 @@ int dbats_get(dbats_handler *handler, dbats_key_info_t *tkip,
 		avg_buf[i] = dval[i] + 0.5;
 	    *valuepp = avg_buf;
 	} else {
-	    *valuepp = valueptr(handler, agg_id, tkip->frag_id, tkip->offset);
+	    *valuepp = valueptr(handler, agg_id, dkip->frag_id, dkip->offset);
 	}
 	dbats_log(LOG_INFO, "Succesfully read value [offset=%" PRIu32 "][value_len=%u]",
-	    tkip->offset, handler->entry_size);
+	    dkip->offset, handler->entry_size);
 
     } else {
 	if (rc == 1)
 	    dbats_log(LOG_WARNING, "Value unset (f): %u %d %s",
-		tslice->time, agg_id, tkip->key);
+		tslice->time, agg_id, dkip->key);
 	*valuepp = NULL;
 	return rc;
     }
@@ -1238,7 +1234,7 @@ int dbats_get(dbats_handler *handler, dbats_key_info_t *tkip,
     return 0;
 }
 
-int dbats_get_double(dbats_handler *handler, dbats_key_info_t *tkip,
+int dbats_get_double(dbats_handler *handler, dbats_key_info_t *dkip,
     const double **valuepp, int agg_id)
 {
     int rc;
@@ -1255,21 +1251,21 @@ int dbats_get_double(dbats_handler *handler, dbats_key_info_t *tkip,
 	return -1;
     }
 
-    if ((rc = instantiate_frag(handler, agg_id, tkip->frag_id)) == 0) {
-	if (!vec_test(tslice->frag[tkip->frag_id]->is_set, tkip->offset)) {
+    if ((rc = instantiate_frag(handler, agg_id, dkip->frag_id)) == 0) {
+	if (!vec_test(tslice->frag[dkip->frag_id]->is_set, dkip->offset)) {
 	    dbats_log(LOG_WARNING, "Value unset (v): %u %d %s",
-		tslice->time, agg_id, tkip->key);
+		tslice->time, agg_id, dkip->key);
 	    *valuepp = NULL;
 	    return 1;
 	}
-	*valuepp = (double*)valueptr(handler, agg_id, tkip->frag_id, tkip->offset);
+	*valuepp = (double*)valueptr(handler, agg_id, dkip->frag_id, dkip->offset);
 	dbats_log(LOG_INFO, "Succesfully read value [offset=%" PRIu32 "][value_len=%u]",
-	    tkip->offset, handler->entry_size);
+	    dkip->offset, handler->entry_size);
 
     } else {
 	if (rc == 1)
 	    dbats_log(LOG_WARNING, "Value unset (f): %u %d %s",
-		tslice->time, agg_id, tkip->key);
+		tslice->time, agg_id, dkip->key);
 	*valuepp = NULL;
 	return rc;
     }
@@ -1281,12 +1277,12 @@ int dbats_get_by_key(dbats_handler *handler, const char *key,
     const dbats_value **valuepp, int agg_id)
 {
     int rc;
-    dbats_key_info_t *tkip;
+    dbats_key_info_t *dkip;
 
-    if ((rc = dbats_get_key_info(handler, key, &tkip, 0)) != 0) {
+    if ((rc = dbats_get_key_info(handler, key, &dkip, 0)) != 0) {
 	return rc;
     }
-    return dbats_get(handler, tkip, valuepp, agg_id);
+    return dbats_get(handler, dkip, valuepp, agg_id);
 }
 
 /*************************************************************************/
@@ -1302,7 +1298,7 @@ int dbats_keywalk_start(dbats_handler *handler)
     return 0;
 }
 
-int dbats_keywalk_next(dbats_handler *handler, dbats_key_info_t **tkipp)
+int dbats_keywalk_next(dbats_handler *handler, dbats_key_info_t **dkipp)
 {
     int rc;
     DBT dbkey, dbdata;
@@ -1312,14 +1308,14 @@ int dbats_keywalk_next(dbats_handler *handler, dbats_key_info_t **tkipp)
     if ((rc = handler->keywalk->get(handler->keywalk, &dbkey, &dbdata, DB_NEXT)) != 0) {
 	if (rc != DB_NOTFOUND)
 	    dbats_log(LOG_ERROR, "Error in dbats_keywalk_next: %s", db_strerror(rc));
-	*tkipp = NULL;
+	*dkipp = NULL;
 	return -1;
     }
 
     uint32_t idx = ((raw_key_info_t*)dbdata.data)->index;
     uint32_t block = idx / INFOS_PER_BLOCK;
     uint32_t offset = idx % INFOS_PER_BLOCK;
-    *tkipp = &handler->key_info_block[block][offset];
+    *dkipp = &handler->key_info_block[block][offset];
 
     return 0;
 }
