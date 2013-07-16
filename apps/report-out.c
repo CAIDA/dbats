@@ -49,11 +49,11 @@ static void load_keys(dbats_handler *handler, const char *path)
 
 static void get_keys(dbats_handler *handler)
 {
-    dbats_keywalk_start(handler);
-    while (dbats_keywalk_next(handler, &key_id[n_keys]) == 0) {
+    dbats_walk_keyid_start(handler);
+    while (dbats_walk_keyid_next(handler, &key_id[n_keys]) == 0) {
 	n_keys++;
     }
-    dbats_keywalk_end(handler);
+    dbats_walk_keyid_end(handler);
 }
 
 int main(int argc, char *argv[]) {

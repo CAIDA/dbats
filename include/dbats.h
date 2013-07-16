@@ -76,7 +76,8 @@ typedef struct {
     DB *dbMeta;                           // config parameters
     DB *dbKeys;                           // key name -> key_info
     DB *dbData;                           // {time, agg_id, frag_id} -> fragment
-    DBC *keywalk;                         // cursor for iterating over keys
+    DBC *keyname_cursor;                  // for iterating over key names
+    uint32_t keyid_walker;                // for iterating over key ids
     dbats_tslice **tslice;                // a tslice for each aggregation level
     dbats_agg *agg;                       // parameters for each aggregation level
     dbats_key_info_t **key_info_block;
@@ -117,8 +118,12 @@ extern int dbats_get_double(dbats_handler *handler, uint32_t key_id,
 extern int dbats_get_by_key(dbats_handler *handler, const char *key,
     const dbats_value **valuepp, int agg_id);
 
-extern int dbats_keywalk_start(dbats_handler *handler);
-extern int dbats_keywalk_next(dbats_handler *handler, uint32_t *key_id_p);
-extern int dbats_keywalk_end(dbats_handler *handler);
+extern int dbats_walk_keyname_start(dbats_handler *handler);
+extern int dbats_walk_keyname_next(dbats_handler *handler, uint32_t *key_id_p);
+extern int dbats_walk_keyname_end(dbats_handler *handler);
+
+extern int dbats_walk_keyid_start(dbats_handler *handler);
+extern int dbats_walk_keyid_next(dbats_handler *handler, uint32_t *key_id_p);
+extern int dbats_walk_keyid_end(dbats_handler *handler);
 
 extern void dbats_stat_print(const dbats_handler *handler);

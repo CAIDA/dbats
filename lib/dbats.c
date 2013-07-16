@@ -391,7 +391,7 @@ int dbats_open(dbats_handler *handler, const char *path,
     int rc;
     DBC *cursor;
     if ((rc = handler->dbKeys->cursor(handler->dbKeys, NULL, &cursor, 0)) != 0) {
-	dbats_log(LOG_ERROR, "Error in keywalk_start: %s", db_strerror(rc));
+	dbats_log(LOG_ERROR, "Error in cursor: %s", db_strerror(rc));
 	return -1;
     }
 
@@ -1326,41 +1326,67 @@ int dbats_get_by_key(dbats_handler *handler, const char *key,
 
 /*************************************************************************/
 
-int dbats_keywalk_start(dbats_handler *handler)
+int dbats_walk_keyname_start(dbats_handler *handler)
 {
     int rc;
 
-    if ((rc = handler->dbKeys->cursor(handler->dbKeys, NULL, &handler->keywalk, 0)) != 0) {
-	dbats_log(LOG_ERROR, "Error in dbats_keywalk_start: %s", db_strerror(rc));
+    if ((rc = handler->dbKeys->cursor(handler->dbKeys, NULL, &handler->keyname_cursor, 0)) != 0) {
+	dbats_log(LOG_ERROR, "Error in dbats_walk_keyname_start: %s", db_strerror(rc));
 	return -1;
     }
     return 0;
 }
 
-int dbats_keywalk_next(dbats_handler *handler, uint32_t *key_id_p)
+int dbats_walk_keyname_next(dbats_handler *handler, uint32_t *key_id_p)
 {
     int rc;
     DBT dbkey, dbdata;
 
     memset(&dbkey, 0, sizeof(dbkey));
     memset(&dbdata, 0, sizeof(dbdata));
-    if ((rc = handler->keywalk->get(handler->keywalk, &dbkey, &dbdata, DB_NEXT)) != 0) {
+    if ((rc = handler->keyname_cursor->get(handler->keyname_cursor, &dbkey, &dbdata, DB_NEXT)) != 0) {
 	if (rc != DB_NOTFOUND)
-	    dbats_log(LOG_ERROR, "Error in dbats_keywalk_next: %s", db_strerror(rc));
+	    dbats_log(LOG_ERROR, "Error in dbats_walk_keyname_next: %s", db_strerror(rc));
 	return -1;
     }
     *key_id_p = ((raw_key_info_t*)dbdata.data)->key_id;
     return 0;
 }
 
-int dbats_keywalk_end(dbats_handler *handler)
+int dbats_walk_keyname_end(dbats_handler *handler)
 {
     int rc;
 
-    if ((rc = handler->keywalk->close(handler->keywalk)) != 0) {
-	dbats_log(LOG_ERROR, "Error in dbats_keywalk_end: %s", db_strerror(rc));
+    if ((rc = handler->keyname_cursor->close(handler->keyname_cursor)) != 0) {
+	dbats_log(LOG_ERROR, "Error in dbats_walk_keyname_end: %s", db_strerror(rc));
 	return -1;
     }
+    return 0;
+}
+
+/*************************************************************************/
+
+int dbats_walk_keyid_start(dbats_handler *handler)
+{
+    handler->keyid_walker = 0;
+    return 0;
+}
+
+int dbats_walk_keyid_next(dbats_handler *handler, uint32_t *key_id_p)
+{
+    dbats_key_info_t *dkip;
+    while (handler->keyid_walker < handler->num_keys) {
+	dkip = find_key(handler, handler->keyid_walker++);
+	if (dkip->key) {
+	    *key_id_p = dkip->key_id;
+	    return 0;
+	}
+    }
+    return -1;
+}
+
+int dbats_walk_keyid_end(dbats_handler *handler)
+{
     return 0;
 }
 
