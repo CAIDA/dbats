@@ -107,9 +107,9 @@ int main(int argc, char *argv[]) {
     handler = dbats_open(dbats_path, 0, 0, DBATS_READONLY);
     if (!handler) return(-1);
 
-    const dbats_timerange_t *times = dbats_get_agg_times(handler, 0);
-    if (begin == 0) begin = times->start;
-    if (end == 0) end = times->end;
+    const dbats_agg *agg0 = dbats_get_agg(handler, 0);
+    if (begin == 0) begin = agg0->times.start;
+    if (end == 0) end = agg0->times.end;
 
     if (keyfile_path)
 	load_keys(handler, keyfile_path);
@@ -124,7 +124,8 @@ int main(int argc, char *argv[]) {
     uint32_t num_aggs = dbats_get_num_aggs(handler);
 
     for (int agg_id = 0; agg_id < num_aggs; agg_id++) {
-	for (uint32_t t = begin; t <= end; t += dbats_get_agg_period(handler, agg_id)) {
+	const dbats_agg *agg = dbats_get_agg(handler, agg_id);
+	for (uint32_t t = begin; t <= end; t += agg->period) {
 	    int rc;
 
 	    if ((rc = dbats_goto_time(handler, t, 0)) == -1) {
@@ -132,7 +133,7 @@ int main(int argc, char *argv[]) {
 		continue;
 	    }
 
-	    if (dbats_get_agg_func(handler, agg_id) == DBATS_AGG_AVG) {
+	    if (agg->func == DBATS_AGG_AVG) {
 		const double *values;
 		for (int k = 0; k < n_keys; k++) {
 		    const char *key = dbats_get_key_name(handler, key_id[k]);

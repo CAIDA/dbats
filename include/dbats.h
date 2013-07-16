@@ -39,6 +39,14 @@ typedef struct {
     uint32_t end;
 } dbats_timerange_t;
 
+// Aggregation parameters
+typedef struct {
+    uint32_t func;           // aggregation function
+    uint32_t steps;          // # of data points contributing to one agg value
+    uint32_t period;         // time covered by one agg value (seconds)
+    dbats_timerange_t times; // times of first and last data point
+} dbats_agg;
+
 #if 0
 typedef uint32_t dbats_value;
 #define PRIval PRIu32
@@ -94,8 +102,6 @@ extern int dbats_walk_keyid_end(dbats_handler *handler);
 
 extern uint32_t dbats_get_values_per_entry(dbats_handler *handler);
 extern uint32_t dbats_get_num_aggs(dbats_handler *handler);
-extern const dbats_timerange_t *dbats_get_agg_times(dbats_handler *handler, int agg_id);
-extern uint32_t dbats_get_agg_period(dbats_handler *handler, int agg_id);
-extern uint32_t dbats_get_agg_func(dbats_handler *handler, int agg_id);
+extern const dbats_agg *dbats_get_agg(dbats_handler *handler, int agg_id);
 
 extern void dbats_stat_print(const dbats_handler *handler);

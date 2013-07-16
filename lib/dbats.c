@@ -85,14 +85,6 @@ typedef struct {
     dbats_timerange_t timeranges[]; // When did this key have a value? (C99 flexible array member)
 } raw_key_info_t;
 
-// Aggregation parameters
-typedef struct {
-    uint32_t func;           // aggregation function
-    uint32_t steps;          // number of primary data points in agg
-    uint32_t period;         // length of slice (seconds)
-    dbats_timerange_t times; // times of first and last flush
-} dbats_agg;
-
 struct dbats_handler {
     uint8_t  is_open;
     uint8_t  readonly;                   // Mode used to open the db file
@@ -1433,14 +1425,8 @@ uint32_t dbats_get_values_per_entry(dbats_handler *handler)
 uint32_t dbats_get_num_aggs(dbats_handler *handler)
     { return handler->num_aggs; }
 
-const dbats_timerange_t *dbats_get_agg_times(dbats_handler *handler, int agg_id)
-    { return &handler->agg[agg_id].times; }
-
-uint32_t dbats_get_agg_period(dbats_handler *handler, int agg_id)
-    { return handler->agg[agg_id].period; }
-
-uint32_t dbats_get_agg_func(dbats_handler *handler, int agg_id)
-    { return handler->agg[agg_id].func; }
+const dbats_agg *dbats_get_agg(dbats_handler *handler, int agg_id)
+    { return &handler->agg[agg_id]; }
 
 /*************************************************************************/
 
