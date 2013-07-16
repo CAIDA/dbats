@@ -18,6 +18,8 @@ static void help(void) {
     fprintf(stderr, "               (default: first time in db)\n");
     fprintf(stderr, "-e{end}        end time\n");
     fprintf(stderr, "               (default: last time in db)\n");
+    fprintf(stderr, "-o text        output text\n");
+    fprintf(stderr, "-o gnuplot     output gnuplot script\n");
     exit(-1);
 }
 
@@ -59,6 +61,8 @@ static void get_keys(dbats_handler *handler)
     dbats_walk_keyid_end(handler);
 }
 
+enum { OT_TEXT, OT_GNUPLOT };
+
 int main(int argc, char *argv[]) {
     dbats_handler *handler;
     uint32_t begin = 0, end = 0;
@@ -68,9 +72,10 @@ int main(int argc, char *argv[]) {
     FILE *out;
     progname = argv[0];
     dbats_log_level = 1;
+    int outtype = OT_TEXT;
 
     int c;
-    while ((c = getopt(argc, argv, "v:k:b:e:")) != -1) {
+    while ((c = getopt(argc, argv, "v:k:b:e:o:")) != -1) {
 	switch (c) {
 	case 'v':
 	    dbats_log_level = atoi(optarg);
@@ -83,6 +88,16 @@ int main(int argc, char *argv[]) {
 	    break;
 	case 'e':
 	    end = atol(optarg);
+	    break;
+	case 'o':
+	    if (strcmp(optarg, "text") == 0) {
+		outtype = OT_TEXT;
+	    } else if (strcmp(optarg, "gnuplot") == 0) {
+		outtype = OT_GNUPLOT;
+	    } else {
+		fprintf(stderr, "unknown output type \"%s\"\n", optarg);
+		help();
+	    }
 	    break;
 	default:
 	    help();
@@ -122,9 +137,35 @@ int main(int argc, char *argv[]) {
 
     const dbats_config *cfg = dbats_get_config(handler);
 
+    if (outtype == OT_GNUPLOT) {
+	fprintf(out, "set style data steps\n");
+	fprintf(out, "set xrange [%" PRIu32 ":%" PRIu32 "]\n",
+	    0, end + agg0->period - begin);
+	const dbats_agg *agg;
+	if (cfg->num_aggs > 0) {
+	    agg = dbats_get_agg(handler, 1);
+	    fprintf(out, "set xtics %d\n", agg->period);
+	    fprintf(out, "set mxtics %d\n", agg->steps);
+	    fprintf(out, "set grid xtics\n");
+	}
+	const char *prefix = "plot";
+	for (int agg_id = 0; agg_id < cfg->num_aggs; agg_id++) {
+	    agg = dbats_get_agg(handler, agg_id);
+	    fprintf(out, "%s '-' using ($1-%"PRIu32"):($2) "
+		"linecolor %d title \"%"PRIu32"s %s\"",
+		prefix, begin,
+		agg_id, agg->period, dbats_agg_func_label[agg->func]);
+	    prefix = ",";
+	}
+	fprintf(out, "\n");
+    }
+
     for (int agg_id = 0; agg_id < cfg->num_aggs; agg_id++) {
 	const dbats_agg *agg = dbats_get_agg(handler, agg_id);
-	for (uint32_t t = begin; t <= end; t += agg->period) {
+	char strval[64];
+	strval[0] = '\0';
+	uint32_t t;
+	for (t = begin; t <= end; t += agg->period) {
 	    int rc;
 
 	    if ((rc = dbats_goto_time(handler, t, 0)) == -1) {
@@ -141,11 +182,19 @@ int main(int argc, char *argv[]) {
 			fprintf(stdout, "error in dbats_get(%s)\n", key);
 			break;
 		    }
-		    fprintf(out, "%s ", key);
-		    for (int j = 0; j < cfg->values_per_entry; j++) {
-			fprintf(out, "%.3f ", values ? values[j] : 0);
+		    switch (outtype) {
+		    case OT_TEXT:
+			fprintf(out, "%s ", key);
+			for (int j = 0; j < cfg->values_per_entry; j++) {
+			    fprintf(out, "%.3f ", values ? values[j] : 0);
+			}
+			fprintf(out, "%u %d\n", t, agg_id);
+			break;
+		    case OT_GNUPLOT:
+			sprintf(strval, "%.3f", values ? values[0] : 0);
+			fprintf(out, "%u %s\n", t, strval);
+			break;
 		    }
-		    fprintf(out, "%u %d\n", t, agg_id);
 		}
 	    } else {
 		const dbats_value *values;
@@ -156,13 +205,24 @@ int main(int argc, char *argv[]) {
 			fprintf(stdout, "error in dbats_get(%s)\n", key);
 			break;
 		    }
-		    fprintf(out, "%s ", key);
-		    for (int j = 0; j < cfg->values_per_entry; j++) {
-			fprintf(out, "%" PRIval " ", values ? values[j] : 0);
+		    switch (outtype) {
+		    case OT_TEXT:
+			fprintf(out, "%s ", key);
+			for (int j = 0; j < cfg->values_per_entry; j++) {
+			    fprintf(out, "%" PRIval " ", values ? values[j] : 0);
+			}
+			fprintf(out, "%u %d\n", t, agg_id);
+			break;
+		    case OT_GNUPLOT:
+			sprintf(strval, "%" PRIval, values ? values[0] : 0);
+			fprintf(out, "%u %s\n", t, strval);
+			break;
 		    }
-		    fprintf(out, "%u %d\n", t, agg_id);
 		}
 	    }
+	}
+	if (outtype == OT_GNUPLOT && strval[0]) {
+	    fprintf(out, "%u %s\ne\n", t, strval);
 	}
     }
 
