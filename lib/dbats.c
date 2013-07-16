@@ -358,10 +358,17 @@ dbats_handler *dbats_open(const char *path,
 	dbats_log(LOG_INFO, "cfg: %s = %u", #field, handler->cfg.field); \
     } while (0)
 
+    initcfg(uint32_t, version,           DBATS_DB_VERSION);
     initcfg(uint32_t, num_keys,          0);
     initcfg(uint32_t, period,            period);
     initcfg(uint16_t, values_per_entry,  values_per_entry);
     initcfg(uint16_t, num_aggs,          1);
+
+    if (handler->cfg.version > DBATS_DB_VERSION) {
+	dbats_log(LOG_ERROR, "database version %d > %d", handler->cfg.version,
+	    DBATS_DB_VERSION);
+	return NULL;
+    }
 
     if (handler->cfg.num_aggs > MAX_NUM_AGGS) {
 	dbats_log(LOG_ERROR, "num_aggs %d > %d", handler->cfg.num_aggs,

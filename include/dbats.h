@@ -20,6 +20,8 @@
 
 /* ************************************************** */
 
+#define DBATS_DB_VERSION     1
+
 // Flags
 #define DBATS_CREATE         0x01 // create database if it doesn't exist
 #define DBATS_PRELOAD        0x04 // load fragments when tslice is selected
@@ -48,6 +50,7 @@ typedef struct {
 } dbats_agg;
 
 typedef struct {
+    uint32_t version;          // db version
     uint8_t  readonly;         // Mode used to open the db
     uint8_t  compress;         // Compress data in db?
     uint16_t num_aggs;         // Number of aggregations
