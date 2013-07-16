@@ -60,7 +60,7 @@ static void get_keys(dbats_handler *handler)
 }
 
 int main(int argc, char *argv[]) {
-    dbats_handler handler;
+    dbats_handler *handler;
     uint32_t begin = 0, end = 0;
     uint32_t run_start, elapsed;
     char *dbats_path = NULL;
@@ -104,39 +104,39 @@ int main(int argc, char *argv[]) {
 
     dbats_log(LOG_INFO, "Opening %s", dbats_path);
 
-    if (dbats_open(&handler, dbats_path, 0, 0, DBATS_READONLY) != 0)
-	return(-1);
+    handler = dbats_open(dbats_path, 0, 0, DBATS_READONLY);
+    if (!handler) return(-1);
 
-    const dbats_timerange_t *times = dbats_get_agg_times(&handler, 0);
+    const dbats_timerange_t *times = dbats_get_agg_times(handler, 0);
     if (begin == 0) begin = times->start;
     if (end == 0) end = times->end;
 
     if (keyfile_path)
-	load_keys(&handler, keyfile_path);
+	load_keys(handler, keyfile_path);
     else
-	get_keys(&handler);
+	get_keys(handler);
 
     tzset();
     out = stdout;
     run_start = time(NULL);
 
-    uint32_t values_per_entry = dbats_get_values_per_entry(&handler);
-    uint32_t num_aggs = dbats_get_num_aggs(&handler);
+    uint32_t values_per_entry = dbats_get_values_per_entry(handler);
+    uint32_t num_aggs = dbats_get_num_aggs(handler);
 
     for (int agg_id = 0; agg_id < num_aggs; agg_id++) {
-	for (uint32_t t = begin; t <= end; t += dbats_get_agg_period(&handler, agg_id)) {
+	for (uint32_t t = begin; t <= end; t += dbats_get_agg_period(handler, agg_id)) {
 	    int rc;
 
-	    if ((rc = dbats_goto_time(&handler, t, 0)) == -1) {
+	    if ((rc = dbats_goto_time(handler, t, 0)) == -1) {
 		dbats_log(LOG_INFO, "Unable to find time %u", t);
 		continue;
 	    }
 
-	    if (dbats_get_agg_func(&handler, agg_id) == DBATS_AGG_AVG) {
+	    if (dbats_get_agg_func(handler, agg_id) == DBATS_AGG_AVG) {
 		const double *values;
 		for (int k = 0; k < n_keys; k++) {
-		    const char *key = dbats_get_key_name(&handler, key_id[k]);
-		    rc = dbats_get_double(&handler, key_id[k], &values, agg_id);
+		    const char *key = dbats_get_key_name(handler, key_id[k]);
+		    rc = dbats_get_double(handler, key_id[k], &values, agg_id);
 		    if (rc != 0) {
 			fprintf(stdout, "error in dbats_get(%s)\n", key);
 			break;
@@ -150,8 +150,8 @@ int main(int argc, char *argv[]) {
 	    } else {
 		const dbats_value *values;
 		for (int k = 0; k < n_keys; k++) {
-		    const char *key = dbats_get_key_name(&handler, key_id[k]);
-		    rc = dbats_get(&handler, key_id[k], &values, agg_id);
+		    const char *key = dbats_get_key_name(handler, key_id[k]);
+		    rc = dbats_get(handler, key_id[k], &values, agg_id);
 		    if (rc != 0) {
 			fprintf(stdout, "error in dbats_get(%s)\n", key);
 			break;
@@ -170,7 +170,7 @@ int main(int argc, char *argv[]) {
 
     dbats_log(LOG_INFO, "Time elapsed: %u sec", elapsed);
     dbats_log(LOG_INFO, "Closing %s", dbats_path);
-    dbats_close(&handler);
+    dbats_close(handler);
     dbats_log(LOG_INFO, "Done");
     return(0);
 }

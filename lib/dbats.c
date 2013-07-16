@@ -53,13 +53,13 @@ typedef struct dbats_frag {
 
 // Logical row or "time slice", containing all the entries for a given time
 // (broken into fragments).
-struct dbats_tslice {
+typedef struct dbats_tslice {
     uint32_t time;                        // start time (unix seconds)
     uint32_t num_frags;                   // number of fragments
     uint8_t preload;                      // load frags when tslice is selected
     dbats_frag *frag[MAX_NUM_FRAGS];
     uint8_t frag_changed[MAX_NUM_FRAGS];
-};
+} dbats_tslice;
 
 #define fragsize(handler) (sizeof(dbats_frag) + ENTRIES_PER_FRAG * (handler)->entry_size)
 
@@ -69,6 +69,7 @@ typedef struct {
     uint32_t frag_id;
 } fragkey_t;
 
+typedef
 struct dbats_key_info {
     const char *key;
     uint32_t key_id;               // id of key/column
@@ -76,13 +77,45 @@ struct dbats_key_info {
     uint32_t offset;               // index within fragment
     uint32_t n_timeranges;         // number of timeranges
     dbats_timerange_t *timeranges; // When did this key actually have a value?
-};
+} dbats_key_info_t;
 
 // key_info as stored in db
 typedef struct {
     uint32_t key_id;
     dbats_timerange_t timeranges[]; // When did this key have a value? (C99 flexible array member)
 } raw_key_info_t;
+
+// Aggregation parameters
+typedef struct {
+    uint32_t func;           // aggregation function
+    uint32_t steps;          // number of primary data points in agg
+    uint32_t period;         // length of slice (seconds)
+    dbats_timerange_t times; // times of first and last flush
+} dbats_agg;
+
+struct dbats_handler {
+    uint8_t  is_open;
+    uint8_t  readonly;                   // Mode used to open the db file
+    uint8_t  compress;                   // Compress fragments?
+    uint16_t num_aggs;                   // Number of aggregations
+    uint16_t values_per_entry;           // Number of dbats_values in an entry
+    uint16_t entry_size;                 // Size of an entry (bytes)
+    uint32_t num_keys;                   // Next available key_id
+    uint32_t period;                     // length of raw time slice (sec)
+    void *state_compress;
+    void *state_decompress;
+    DB_ENV *dbenv;                        // DB environment
+    DB *dbMeta;                           // config parameters
+    DB *dbKeys;                           // key name -> key_info
+    DB *dbData;                           // {time, agg_id, frag_id} -> fragment
+    DBC *keyname_cursor;                  // for iterating over key names
+    uint32_t keyid_walker;                // for iterating over key ids
+    dbats_tslice **tslice;                // a tslice for each aggregation level
+    dbats_agg *agg;                       // parameters for each aggregation level
+    dbats_key_info_t **key_info_block;
+    uint8_t *db_get_buf;
+    size_t db_get_buf_len;
+};
 
 
 /************************************************************************
@@ -266,7 +299,7 @@ static dbats_key_info_t *new_key(dbats_handler *handler,
     return dkip;
 }
 
-int dbats_open(dbats_handler *handler, const char *path,
+dbats_handler *dbats_open(const char *path,
     uint16_t values_per_entry,
     uint32_t period,
     uint32_t flags)
@@ -276,6 +309,8 @@ int dbats_open(dbats_handler *handler, const char *path,
     uint32_t dbflags = DB_INIT_MPOOL;
     int is_new = 0;
 
+    dbats_handler *handler = emalloc(sizeof(dbats_handler), "handler");
+    if (!handler) return NULL;
     memset(handler, 0, sizeof(dbats_handler));
     handler->readonly = !!(flags & DBATS_READONLY);
     handler->compress = !(flags & DBATS_UNCOMPRESSED);
@@ -284,14 +319,14 @@ int dbats_open(dbats_handler *handler, const char *path,
     if ((ret = db_env_create(&handler->dbenv, 0)) != 0) {
 	dbats_log(LOG_ERROR, "Error creating DB env: %s",
 	    db_strerror(ret));
-	return -1;
+	return NULL;
     }
 
     if (flags & DBATS_CREATE) {
 	if (handler->readonly) {
 	    dbats_log(LOG_ERROR,
 		"DBATS_CREATE and DBATS_READONLY are not compatible");
-	    return -1;
+	    return NULL;
 	} else if (mkdir(path, 0777) == 0) {
 	    // new database dir
 	    is_new = 1;
@@ -303,18 +338,18 @@ int dbats_open(dbats_handler *handler, const char *path,
 	    // new database dir failed
 	    dbats_log(LOG_ERROR, "Error creating %s: %s",
 		path, strerror(errno));
-	    return -1;
+	    return NULL;
 	}
     }
 
     if ((ret = handler->dbenv->open(handler->dbenv, path, dbflags, dbmode)) != 0) {
 	dbats_log(LOG_ERROR, "Error opening DB %s: %s", path, db_strerror(ret));
-	return -1;
+	return NULL;
     }
 
-    if (raw_db_open(handler, &handler->dbMeta, path, "meta", flags, dbmode) != 0) return -1;
-    if (raw_db_open(handler, &handler->dbKeys, path, "keys", flags, dbmode) != 0) return -1;
-    if (raw_db_open(handler, &handler->dbData, path, "data", flags, dbmode) != 0) return -1;
+    if (raw_db_open(handler, &handler->dbMeta, path, "meta", flags, dbmode) != 0) return NULL;
+    if (raw_db_open(handler, &handler->dbKeys, path, "keys", flags, dbmode) != 0) return NULL;
+    if (raw_db_open(handler, &handler->dbData, path, "data", flags, dbmode) != 0) return NULL;
 
     handler->entry_size = sizeof(dbats_value); // for db_get_buf_len
 
@@ -331,7 +366,7 @@ int dbats_open(dbats_handler *handler, const char *path,
 		handler->field = *((type*)value); \
 	    } else { \
 		dbats_log(LOG_ERROR, "%s: missing config value %s", path, #field); \
-		return -1; \
+		return NULL; \
 	    } \
 	} \
 	dbats_log(LOG_INFO, "cfg: %s = %u", #field, handler->field); \
@@ -345,15 +380,15 @@ int dbats_open(dbats_handler *handler, const char *path,
     if (handler->num_aggs > MAX_NUM_AGGS) {
 	dbats_log(LOG_ERROR, "num_aggs %d > %d", handler->num_aggs,
 	    MAX_NUM_AGGS);
-	return -1;
+	return NULL;
     }
 
     handler->agg = emalloc(MAX_NUM_AGGS * sizeof(dbats_agg), "handler->agg");
-    if (!handler->agg) return -1;
+    if (!handler->agg) return NULL;
     handler->tslice = emalloc(MAX_NUM_AGGS * sizeof(dbats_tslice*), "handler->tslice");
-    if (!handler->tslice) return -1;
+    if (!handler->tslice) return NULL;
     handler->key_info_block = emalloc(MAX_NUM_KEYINFOBLK * sizeof(dbats_key_info_t*), "handler->key_info_block");
-    if (!handler->tslice) return -1;
+    if (!handler->tslice) return NULL;
 
     handler->entry_size = handler->values_per_entry * sizeof(dbats_value);
 
@@ -370,11 +405,11 @@ int dbats_open(dbats_handler *handler, const char *path,
 	    sprintf(keybuf, "agg%d", agg_id);
 	    if (raw_db_get(handler, handler->dbMeta, keybuf, strlen(keybuf), &value, &value_len) != 0) {
 		dbats_log(LOG_ERROR, "missing aggregation config %d", agg_id);
-		return -1;
+		return NULL;
 	    } else if (value_len != sizeof(dbats_agg)) {
 		dbats_log(LOG_ERROR, "corrupt aggregation config: size %zu != %zu",
 		    value_len, sizeof(dbats_agg));
-		return -1;
+		return NULL;
 	    }
 	    memcpy(&handler->agg[agg_id], value, value_len);
 	}
@@ -383,7 +418,7 @@ int dbats_open(dbats_handler *handler, const char *path,
     // allocate tslice for each aggregate
     for (int agg_id = 0; agg_id < handler->num_aggs; agg_id++) {
 	if (!(handler->tslice[agg_id] = emalloc(sizeof(dbats_tslice), "tslice")))
-	    return -1;
+	    return NULL;
 	memset(handler->tslice[agg_id], 0, sizeof(dbats_tslice));
     }
 
@@ -392,7 +427,7 @@ int dbats_open(dbats_handler *handler, const char *path,
     DBC *cursor;
     if ((rc = handler->dbKeys->cursor(handler->dbKeys, NULL, &cursor, 0)) != 0) {
 	dbats_log(LOG_ERROR, "Error in cursor: %s", db_strerror(rc));
-	return -1;
+	return NULL;
     }
 
     while (1) {
@@ -404,32 +439,32 @@ int dbats_open(dbats_handler *handler, const char *path,
 	    if (rc == DB_NOTFOUND)
 		break;
 	    dbats_log(LOG_ERROR, "Error in cursor->get: %s", db_strerror(rc));
-	    return -1;
+	    return NULL;
 	}
 	raw_key_info_t *rki = dbdata.data;
 	char *keycopy = emalloc(dbkey.size+1, "copy of key");
-	if (!keycopy) return -2;
+	if (!keycopy) return NULL;
 	memcpy(keycopy, dbkey.data, dbkey.size);
 	keycopy[dbkey.size] = 0; // nul-terminate
 	dbats_key_info_t *dkip = new_key(handler, rki->key_id, keycopy);
-	if (!dkip) return -1;
+	if (!dkip) return NULL;
 
 	size_t tr_size = dbdata.size - sizeof(raw_key_info_t);
 	dkip->n_timeranges = tr_size / sizeof(dbats_timerange_t);
 	if (dkip->n_timeranges) {
 	    dkip->timeranges = emalloc(tr_size, "timeranges");
-	    if (!dkip->timeranges) return -2;
+	    if (!dkip->timeranges) return NULL;
 	    memcpy(dkip->timeranges, rki->timeranges, tr_size);
 	}
     }
 
     if ((rc = cursor->close(cursor)) != 0) {
 	dbats_log(LOG_ERROR, "Error in cursor->close: %s", db_strerror(rc));
-	return -1;
+	return NULL;
     }
 
     handler->is_open = 1;
-    return 0;
+    return handler;
 }
 
 int dbats_aggregate(dbats_handler *handler, int func, int steps)

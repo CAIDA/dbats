@@ -39,14 +39,6 @@ typedef struct {
     uint32_t end;
 } dbats_timerange_t;
 
-// Aggregation parameters
-typedef struct {
-    uint32_t func;           // aggregation function
-    uint32_t steps;          // number of primary data points in agg
-    uint32_t period;         // length of slice (seconds)
-    dbats_timerange_t times; // times of first and last flush
-} dbats_agg;
-
 #if 0
 typedef uint32_t dbats_value;
 #define PRIval PRIu32
@@ -57,36 +49,11 @@ typedef uint64_t dbats_value;
 #define SCNval SCNu64
 #endif
 
-typedef struct dbats_tslice dbats_tslice;
-typedef struct dbats_key_info dbats_key_info_t;
-
-typedef struct {
-    uint8_t  is_open;
-    uint8_t  readonly;                   // Mode used to open the db file
-    uint8_t  compress;                   // Compress fragments?
-    uint16_t num_aggs;                   // Number of aggregations
-    uint16_t values_per_entry;           // Number of dbats_values in an entry
-    uint16_t entry_size;                 // Size of an entry (bytes)
-    uint32_t num_keys;                   // Next available key_id
-    uint32_t period;                     // length of raw time slice (sec)
-    void *state_compress;
-    void *state_decompress;
-    DB_ENV *dbenv;                        // DB environment
-    DB *dbMeta;                           // config parameters
-    DB *dbKeys;                           // key name -> key_info
-    DB *dbData;                           // {time, agg_id, frag_id} -> fragment
-    DBC *keyname_cursor;                  // for iterating over key names
-    uint32_t keyid_walker;                // for iterating over key ids
-    dbats_tslice **tslice;                // a tslice for each aggregation level
-    dbats_agg *agg;                       // parameters for each aggregation level
-    dbats_key_info_t **key_info_block;
-    uint8_t *db_get_buf;
-    size_t db_get_buf_len;
-} dbats_handler;
+typedef struct dbats_handler dbats_handler;
 
 /* ************************************************** */
 
-extern int dbats_open(dbats_handler *handler, const char *dbats_path,
+extern dbats_handler *dbats_open(const char *dbats_path,
     uint16_t values_per_entry,
     uint32_t period,
     uint32_t flags);

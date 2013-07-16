@@ -15,8 +15,7 @@ static void help(void) {
 
 int main(int argc, char *argv[]) {
     char *dbats_path;
-    dbats_handler handler;
-    uint16_t num_values_per_entry = 1;
+    dbats_handler *handler;
     uint32_t period = 60;
     int goto_flags = 0;
     int open_flags = DBATS_CREATE;
@@ -53,17 +52,18 @@ int main(int argc, char *argv[]) {
 	help();
     dbats_path = argv[0];
 
-    if (dbats_open(&handler, dbats_path, num_values_per_entry, period, open_flags) != 0)
-        return -1;
-    if (dbats_aggregate(&handler, DBATS_AGG_MIN, 10) != 0)
+    handler = dbats_open(dbats_path, 1, period, open_flags);
+    if (!handler) return -1;
+
+    if (dbats_aggregate(handler, DBATS_AGG_MIN, 10) != 0)
 	return -1;
-    if (dbats_aggregate(&handler, DBATS_AGG_MAX, 10) != 0)
+    if (dbats_aggregate(handler, DBATS_AGG_MAX, 10) != 0)
 	return -1;
-    if (dbats_aggregate(&handler, DBATS_AGG_AVG, 10) != 0)
+    if (dbats_aggregate(handler, DBATS_AGG_AVG, 10) != 0)
 	return -1;
-    if (dbats_aggregate(&handler, DBATS_AGG_LAST, 10) != 0)
+    if (dbats_aggregate(handler, DBATS_AGG_LAST, 10) != 0)
 	return -1;
-    if (dbats_aggregate(&handler, DBATS_AGG_SUM, 10) != 0)
+    if (dbats_aggregate(handler, DBATS_AGG_SUM, 10) != 0)
 	return -1;
 
     while (1) {
@@ -71,17 +71,17 @@ int main(int argc, char *argv[]) {
 	if (n != 3) break;
 
 	if (t != last_t) {
-	    if (dbats_goto_time(&handler, t, goto_flags) == -1)
+	    if (dbats_goto_time(handler, t, goto_flags) == -1)
 		return(-1);
 	}
 	last_t = t;
 
 	// XXX TODO: use dbats_set() instead of dbats_set_by_key()
-	if (dbats_set_by_key(&handler, key, &value) != 0)
+	if (dbats_set_by_key(handler, key, &value) != 0)
 	    return -1;
     }
 
-    dbats_close(&handler);
+    dbats_close(handler);
 
     return(0);
 }
