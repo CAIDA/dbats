@@ -69,6 +69,15 @@ typedef struct {
     uint32_t frag_id;
 } fragkey_t;
 
+struct dbats_key_info {
+    const char *key;
+    uint32_t key_id;               // id of key/column
+    uint32_t frag_id;              // fragment within timeslice
+    uint32_t offset;               // index within fragment
+    uint32_t n_timeranges;         // number of timeranges
+    dbats_timerange_t *timeranges; // When did this key actually have a value?
+};
+
 // key_info as stored in db
 typedef struct {
     uint32_t key_id;
@@ -228,16 +237,33 @@ static int raw_db_key_exists(const dbats_handler *handler, DB *db,
 
 /*************************************************************************/
 
-// allocate a key_info block if needed
-static int alloc_key_info_block(dbats_handler *handler, uint32_t block)
+static inline dbats_key_info_t *find_key(dbats_handler *handler, uint32_t key_id)
 {
+    uint32_t block = key_id / KEYINFO_PER_BLK;
+    uint32_t offset = key_id % KEYINFO_PER_BLK;
+    return &handler->key_info_block[block][offset];
+}
+
+// allocate a key_info block if needed
+static dbats_key_info_t *new_key(dbats_handler *handler,
+    uint32_t key_id, char *keycopy)
+{
+    uint32_t block = key_id / KEYINFO_PER_BLK;
+    uint32_t offset = key_id % KEYINFO_PER_BLK;
+
     if (!handler->key_info_block[block]) {
-	handler->key_info_block[block] =
-	    emalloc(sizeof(dbats_key_info_t) * KEYINFO_PER_BLK, "key_info_block");
+	size_t size = sizeof(dbats_key_info_t) * KEYINFO_PER_BLK;
+	handler->key_info_block[block] = emalloc(size, "key_info_block");
 	if (!handler->key_info_block[block])
-	    return -1;
+	    return NULL;
+	memset(handler->key_info_block[block], 0, size);
     }
-    return 0;
+    dbats_key_info_t *dkip = &handler->key_info_block[block][offset];
+    dkip->key = keycopy;
+    dkip->key_id = key_id;
+    dkip->frag_id = key_id / ENTRIES_PER_FRAG;
+    dkip->offset = key_id % ENTRIES_PER_FRAG;
+    return dkip;
 }
 
 int dbats_open(dbats_handler *handler, const char *path,
@@ -380,27 +406,21 @@ int dbats_open(dbats_handler *handler, const char *path,
 	    dbats_log(LOG_ERROR, "Error in cursor->get: %s", db_strerror(rc));
 	    return -1;
 	}
-	uint32_t key_id = ((raw_key_info_t*)dbdata.data)->key_id;
-	uint32_t block = key_id / KEYINFO_PER_BLK;
-	uint32_t offset = key_id % KEYINFO_PER_BLK;
-	if (alloc_key_info_block(handler, block) != 0)
-	    return -1;
-
-	dbats_key_info_t *dkip = &handler->key_info_block[block][offset];
 	raw_key_info_t *rki = dbdata.data;
 	char *keycopy = emalloc(dbkey.size+1, "copy of key");
 	if (!keycopy) return -2;
 	memcpy(keycopy, dbkey.data, dbkey.size);
 	keycopy[dbkey.size] = 0; // nul-terminate
-	dkip->key = keycopy;
-	dkip->key_id = rki->key_id;
-	dkip->frag_id = dkip->key_id / ENTRIES_PER_FRAG;
-	dkip->offset = dkip->key_id % ENTRIES_PER_FRAG;
+	dbats_key_info_t *dkip = new_key(handler, rki->key_id, keycopy);
+	if (!dkip) return -1;
+
 	size_t tr_size = dbdata.size - sizeof(raw_key_info_t);
 	dkip->n_timeranges = tr_size / sizeof(dbats_timerange_t);
-	dkip->timeranges = emalloc(tr_size, "timeranges");
-	if (!dkip->timeranges) return -2;
-	memcpy(dkip->timeranges, rki->timeranges, tr_size);
+	if (dkip->n_timeranges) {
+	    dkip->timeranges = emalloc(tr_size, "timeranges");
+	    if (!dkip->timeranges) return -2;
+	    memcpy(dkip->timeranges, rki->timeranges, tr_size);
+	}
     }
 
     if ((rc = cursor->close(cursor)) != 0) {
@@ -586,9 +606,7 @@ static int update_key_info(dbats_handler *handler, int next_is_far)
 	key_id, tslice->time, tr[i].start, tr[i].end, label, i, dkip->n_timeranges)
 
     for (uint32_t key_id = 0; key_id < handler->num_keys; key_id++) {
-	uint32_t block = key_id / KEYINFO_PER_BLK;
-	uint32_t offset = key_id % KEYINFO_PER_BLK;
-	dbats_key_info_t *dkip = &handler->key_info_block[block][offset];
+	dbats_key_info_t *dkip = find_key(handler, key_id);
 	dbats_timerange_t *tr = dkip->timeranges; // shorthand
 
 	int i = dkip->n_timeranges - 1;
@@ -766,9 +784,7 @@ void dbats_close(dbats_handler *handler)
     }
 
     for (uint32_t key_id = 0; key_id < handler->num_keys; key_id++) {
-	uint32_t block = key_id / KEYINFO_PER_BLK;
-	uint32_t offset = key_id % KEYINFO_PER_BLK;
-	dbats_key_info_t *dkip = &handler->key_info_block[block][offset];
+	dbats_key_info_t *dkip = find_key(handler, key_id);
 	free((void*)dkip->key);
 	dkip->key = NULL;
 	free(dkip->timeranges);
@@ -913,41 +929,30 @@ int dbats_goto_time(dbats_handler *handler, uint32_t time_value, uint32_t flags)
 
 /*************************************************************************/
 
-int dbats_get_key_info(dbats_handler *handler, const char *key,
-    dbats_key_info_t **dkipp, uint32_t flags)
+int dbats_get_key_id(dbats_handler *handler, const char *key,
+    uint32_t *key_id_p, uint32_t flags)
 {
     void *ptr;
     size_t keylen = strlen(key);
     size_t len;
 
     if (raw_db_get(handler, handler->dbKeys, key, keylen, &ptr, &len) == 0) {
-	uint32_t key_id = ((raw_key_info_t*)ptr)->key_id;
-	uint32_t block = key_id / KEYINFO_PER_BLK;
-	uint32_t offset = key_id % KEYINFO_PER_BLK;
-	*dkipp = &handler->key_info_block[block][offset];
-	// assert(strcmp((*dkipp)->key, key) == 0);
-	dbats_log(LOG_INFO, "Found key #%u: %s", key_id, key);
+	*key_id_p = ((raw_key_info_t*)ptr)->key_id;
+	// dbats_key_info_t *dkip = find_key(handler, key_id);
+	// assert(strcmp(dkip->key, key) == 0);
+	dbats_log(LOG_INFO, "Found key #%u: %s", *key_id_p, key);
 
     } else if (!(flags & DBATS_CREATE)) {
 	dbats_log(LOG_INFO, "Key not found: %s", key);
 	return -1;
 
     } else if (handler->num_keys < MAX_NUM_KEYINFOBLK * KEYINFO_PER_BLK) {
-	uint32_t key_id = handler->num_keys++;
-	uint32_t block = key_id / KEYINFO_PER_BLK;
-	uint32_t offset = key_id % KEYINFO_PER_BLK;
-	if (alloc_key_info_block(handler, block) != 0)
+	*key_id_p = handler->num_keys++;
+	dbats_key_info_t *dkip = new_key(handler, *key_id_p, strdup(key));
+	if (!dkip) return -1;
+	if (set_key_info(handler, dkip) != 0)
 	    return -1;
-	*dkipp = &handler->key_info_block[block][offset];
-	(*dkipp)->key = strdup(key);
-	(*dkipp)->key_id = key_id;
-	(*dkipp)->frag_id = (*dkipp)->key_id / ENTRIES_PER_FRAG;
-	(*dkipp)->offset = (*dkipp)->key_id % ENTRIES_PER_FRAG;
-	(*dkipp)->n_timeranges = 0;
-	(*dkipp)->timeranges = NULL;
-	if (set_key_info(handler, *dkipp) != 0)
-	    return -1;
-	dbats_log(LOG_INFO, "Assigned key #%d: %s", key_id, key);
+	dbats_log(LOG_INFO, "Assigned key #%d: %s", *key_id_p, key);
 	raw_db_set(handler, handler->dbMeta,
 	    "num_keys", strlen("num_keys"),
 	    &handler->num_keys, sizeof(handler->num_keys));
@@ -958,6 +963,13 @@ int dbats_get_key_info(dbats_handler *handler, const char *key,
     }
 
     return 0;
+}
+
+const char *dbats_get_key_name(dbats_handler *handler, uint32_t key_id)
+{
+    if (key_id >= handler->num_keys) return NULL;
+    dbats_key_info_t *dkip = find_key(handler, key_id);
+    return dkip ? dkip->key : NULL;
 }
 
 static int instantiate_frag_func(dbats_handler *handler, int agg_id, uint32_t frag_id)
@@ -1007,10 +1019,12 @@ static inline int instantiate_frag(dbats_handler *handler, int agg_id, uint32_t 
 static inline uint32_t min(uint32_t a, uint32_t b) { return a < b ? a : b; }
 static inline uint32_t max(uint32_t a, uint32_t b) { return a > b ? a : b; }
 
-int dbats_set(dbats_handler *handler, dbats_key_info_t *dkip, const dbats_value *valuep)
+int dbats_set(dbats_handler *handler, uint32_t key_id, const dbats_value *valuep)
 {
-    dbats_log(LOG_INFO, "dbats_set %u #%u = %" PRIval, handler->tslice[0]->time, dkip->key_id, valuep[0]); // XXX
+    dbats_log(LOG_INFO, "dbats_set %u #%u = %" PRIval, handler->tslice[0]->time, key_id, valuep[0]); // XXX
     int rc;
+
+    dbats_key_info_t *dkip = find_key(handler, key_id);
 
     if (!handler->is_open || handler->readonly)
 	return -1;
@@ -1199,18 +1213,18 @@ int dbats_set_by_key(dbats_handler *handler, const char *key,
     const dbats_value *valuep)
 {
     int rc;
-    dbats_key_info_t *dkip;
+    uint32_t key_id;
 
-    if ((rc = dbats_get_key_info(handler, key, &dkip, DBATS_CREATE)) != 0) {
+    if ((rc = dbats_get_key_id(handler, key, &key_id, DBATS_CREATE)) != 0) {
 	handler->readonly = 1;
 	return rc;
     }
-    return dbats_set(handler, dkip, valuep);
+    return dbats_set(handler, key_id, valuep);
 }
 
 /*************************************************************************/
 
-int dbats_get(dbats_handler *handler, dbats_key_info_t *dkip,
+int dbats_get(dbats_handler *handler, uint32_t key_id,
     const dbats_value **valuepp, int agg_id)
 {
     int rc;
@@ -1220,6 +1234,8 @@ int dbats_get(dbats_handler *handler, dbats_key_info_t *dkip,
 	*valuepp = NULL;
 	return -1;
     }
+
+    dbats_key_info_t *dkip = find_key(handler, key_id);
 
     if ((rc = instantiate_frag(handler, agg_id, dkip->frag_id)) == 0) {
 	if (!vec_test(tslice->frag[dkip->frag_id]->is_set, dkip->offset)) {
@@ -1255,7 +1271,7 @@ int dbats_get(dbats_handler *handler, dbats_key_info_t *dkip,
     return 0;
 }
 
-int dbats_get_double(dbats_handler *handler, dbats_key_info_t *dkip,
+int dbats_get_double(dbats_handler *handler, uint32_t key_id,
     const double **valuepp, int agg_id)
 {
     int rc;
@@ -1271,6 +1287,8 @@ int dbats_get_double(dbats_handler *handler, dbats_key_info_t *dkip,
 	*valuepp = NULL;
 	return -1;
     }
+
+    dbats_key_info_t *dkip = find_key(handler, key_id);
 
     if ((rc = instantiate_frag(handler, agg_id, dkip->frag_id)) == 0) {
 	if (!vec_test(tslice->frag[dkip->frag_id]->is_set, dkip->offset)) {
@@ -1298,12 +1316,12 @@ int dbats_get_by_key(dbats_handler *handler, const char *key,
     const dbats_value **valuepp, int agg_id)
 {
     int rc;
-    dbats_key_info_t *dkip;
+    uint32_t key_id;
 
-    if ((rc = dbats_get_key_info(handler, key, &dkip, 0)) != 0) {
+    if ((rc = dbats_get_key_id(handler, key, &key_id, 0)) != 0) {
 	return rc;
     }
-    return dbats_get(handler, dkip, valuepp, agg_id);
+    return dbats_get(handler, key_id, valuepp, agg_id);
 }
 
 /*************************************************************************/
@@ -1319,7 +1337,7 @@ int dbats_keywalk_start(dbats_handler *handler)
     return 0;
 }
 
-int dbats_keywalk_next(dbats_handler *handler, dbats_key_info_t **dkipp)
+int dbats_keywalk_next(dbats_handler *handler, uint32_t *key_id_p)
 {
     int rc;
     DBT dbkey, dbdata;
@@ -1329,15 +1347,9 @@ int dbats_keywalk_next(dbats_handler *handler, dbats_key_info_t **dkipp)
     if ((rc = handler->keywalk->get(handler->keywalk, &dbkey, &dbdata, DB_NEXT)) != 0) {
 	if (rc != DB_NOTFOUND)
 	    dbats_log(LOG_ERROR, "Error in dbats_keywalk_next: %s", db_strerror(rc));
-	*dkipp = NULL;
 	return -1;
     }
-
-    uint32_t key_id = ((raw_key_info_t*)dbdata.data)->key_id;
-    uint32_t block = key_id / KEYINFO_PER_BLK;
-    uint32_t offset = key_id % KEYINFO_PER_BLK;
-    *dkipp = &handler->key_info_block[block][offset];
-
+    *key_id_p = ((raw_key_info_t*)dbdata.data)->key_id;
     return 0;
 }
 

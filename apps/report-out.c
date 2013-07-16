@@ -21,7 +21,7 @@ static void help(void) {
 /* ***************************************************************** */
 
 #define MAX_KEYS 262144
-static dbats_key_info_t *keys[MAX_KEYS];
+static uint32_t key_id[MAX_KEYS];
 static int n_keys = 0;
 
 static void load_keys(dbats_handler *handler, const char *path)
@@ -35,7 +35,7 @@ static void load_keys(dbats_handler *handler, const char *path)
     while (fgets(line, sizeof(line), keyfile)) {
 	char *p = strchr(line, '\n');
 	if (p) *p = 0;
-	if (dbats_get_key_info(handler, line, &keys[n_keys], 0) != 0) {
+	if (dbats_get_key_id(handler, line, &key_id[n_keys], 0) != 0) {
 	    fprintf(stderr, "no such key: %s\n", line);
 	    exit(-1);
 	}
@@ -50,7 +50,7 @@ static void load_keys(dbats_handler *handler, const char *path)
 static void get_keys(dbats_handler *handler)
 {
     dbats_keywalk_start(handler);
-    while (dbats_keywalk_next(handler, &keys[n_keys]) == 0) {
+    while (dbats_keywalk_next(handler, &key_id[n_keys]) == 0) {
 	n_keys++;
     }
     dbats_keywalk_end(handler);
@@ -121,12 +121,13 @@ int main(int argc, char *argv[]) {
 	    if (handler.agg[agg_id].func == DBATS_AGG_AVG) {
 		const double *values;
 		for (int k = 0; k < n_keys; k++) {
-		    rc = dbats_get_double(&handler, keys[k], &values, agg_id);
+		    const char *key = dbats_get_key_name(&handler, key_id[k]);
+		    rc = dbats_get_double(&handler, key_id[k], &values, agg_id);
 		    if (rc != 0) {
-			fprintf(stdout, "error in dbats_get(%s)\n", keys[k]->key);
+			fprintf(stdout, "error in dbats_get(%s)\n", key);
 			break;
 		    }
-		    fprintf(out, "%s ", keys[k]->key);
+		    fprintf(out, "%s ", key);
 		    for (int j = 0; j < handler.values_per_entry; j++) {
 			fprintf(out, "%.3f ", values ? values[j] : 0);
 		    }
@@ -135,12 +136,13 @@ int main(int argc, char *argv[]) {
 	    } else {
 		const dbats_value *values;
 		for (int k = 0; k < n_keys; k++) {
-		    rc = dbats_get(&handler, keys[k], &values, agg_id);
+		    const char *key = dbats_get_key_name(&handler, key_id[k]);
+		    rc = dbats_get(&handler, key_id[k], &values, agg_id);
 		    if (rc != 0) {
-			fprintf(stdout, "error in dbats_get(%s)\n", keys[k]->key);
+			fprintf(stdout, "error in dbats_get(%s)\n", key);
 			break;
 		    }
-		    fprintf(out, "%s ", keys[k]->key);
+		    fprintf(out, "%s ", key);
 		    for (int j = 0; j < handler.values_per_entry; j++) {
 			fprintf(out, "%" PRIval " ", values ? values[j] : 0);
 		    }

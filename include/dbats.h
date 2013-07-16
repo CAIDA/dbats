@@ -54,20 +54,12 @@ typedef uint64_t dbats_value;
 #endif
 
 typedef struct dbats_tslice dbats_tslice;
+typedef struct dbats_key_info dbats_key_info_t;
 
 typedef struct {
     uint32_t start;
     uint32_t end;
 } dbats_timerange_t;
-
-typedef struct {
-    const char *key;
-    uint32_t key_id;               // id of key/column
-    uint32_t frag_id;              // fragment within timeslice
-    uint32_t offset;               // index within fragment
-    uint32_t n_timeranges;         // number of timeranges
-    dbats_timerange_t *timeranges; // When did this key actually have a value?
-} dbats_key_info_t;
 
 typedef struct {
     uint8_t  is_open;
@@ -109,23 +101,24 @@ extern uint32_t dbats_normalize_time(const dbats_handler *handler, int agg_id,
 extern int dbats_goto_time(dbats_handler *handler,
     uint32_t time_value, uint32_t flags);
 
-extern int dbats_get_key_info(dbats_handler *handler, const char *key,
-    dbats_key_info_t **dkipp, uint32_t flags);
+extern int dbats_get_key_id(dbats_handler *handler, const char *key,
+    uint32_t *key_id, uint32_t flags);
+extern const char *dbats_get_key_name(dbats_handler *handler, uint32_t key_id);
 
-extern int dbats_set(dbats_handler *handler, dbats_key_info_t *dkip,
+extern int dbats_set(dbats_handler *handler, uint32_t key_id,
     const dbats_value *valuep);
 extern int dbats_set_by_key (dbats_handler *handler, const char *key,
     const dbats_value *valuep);
 
-extern int dbats_get(dbats_handler *handler, dbats_key_info_t *dkip,
+extern int dbats_get(dbats_handler *handler, uint32_t key_id,
     const dbats_value **valuepp, int agg_id);
-extern int dbats_get_double(dbats_handler *handler, dbats_key_info_t *dkip,
+extern int dbats_get_double(dbats_handler *handler, uint32_t key_id,
     const double **valuepp, int agg_id);
 extern int dbats_get_by_key(dbats_handler *handler, const char *key,
     const dbats_value **valuepp, int agg_id);
 
 extern int dbats_keywalk_start(dbats_handler *handler);
-extern int dbats_keywalk_next(dbats_handler *handler, dbats_key_info_t **dkipp);
+extern int dbats_keywalk_next(dbats_handler *handler, uint32_t *key_id_p);
 extern int dbats_keywalk_end(dbats_handler *handler);
 
 extern void dbats_stat_print(const dbats_handler *handler);
