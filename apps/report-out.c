@@ -120,10 +120,9 @@ int main(int argc, char *argv[]) {
     out = stdout;
     run_start = time(NULL);
 
-    uint32_t values_per_entry = dbats_get_values_per_entry(handler);
-    uint32_t num_aggs = dbats_get_num_aggs(handler);
+    const dbats_config *cfg = dbats_get_config(handler);
 
-    for (int agg_id = 0; agg_id < num_aggs; agg_id++) {
+    for (int agg_id = 0; agg_id < cfg->num_aggs; agg_id++) {
 	const dbats_agg *agg = dbats_get_agg(handler, agg_id);
 	for (uint32_t t = begin; t <= end; t += agg->period) {
 	    int rc;
@@ -143,7 +142,7 @@ int main(int argc, char *argv[]) {
 			break;
 		    }
 		    fprintf(out, "%s ", key);
-		    for (int j = 0; j < values_per_entry; j++) {
+		    for (int j = 0; j < cfg->values_per_entry; j++) {
 			fprintf(out, "%.3f ", values ? values[j] : 0);
 		    }
 		    fprintf(out, "%u %d\n", t, agg_id);
@@ -158,7 +157,7 @@ int main(int argc, char *argv[]) {
 			break;
 		    }
 		    fprintf(out, "%s ", key);
-		    for (int j = 0; j < values_per_entry; j++) {
+		    for (int j = 0; j < cfg->values_per_entry; j++) {
 			fprintf(out, "%" PRIval " ", values ? values[j] : 0);
 		    }
 		    fprintf(out, "%u %d\n", t, agg_id);

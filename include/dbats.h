@@ -43,9 +43,19 @@ typedef struct {
 typedef struct {
     uint32_t func;           // aggregation function
     uint32_t steps;          // # of data points contributing to one agg value
-    uint32_t period;         // time covered by one agg value (seconds)
+    uint32_t period;         // time covered by one full agg value (seconds)
     dbats_timerange_t times; // times of first and last data point
 } dbats_agg;
+
+typedef struct {
+    uint8_t  readonly;         // Mode used to open the db
+    uint8_t  compress;         // Compress data in db?
+    uint16_t num_aggs;         // Number of aggregations
+    uint16_t values_per_entry; // Number of dbats_values in an entry
+    uint16_t entry_size;       // Size of an entry (bytes)
+    uint32_t num_keys;         // Number of keys
+    uint32_t period;           // length of raw time slice (seconds)
+} dbats_config;
 
 #if 0
 typedef uint32_t dbats_value;
@@ -100,8 +110,7 @@ extern int dbats_walk_keyid_start(dbats_handler *handler);
 extern int dbats_walk_keyid_next(dbats_handler *handler, uint32_t *key_id_p);
 extern int dbats_walk_keyid_end(dbats_handler *handler);
 
-extern uint32_t dbats_get_values_per_entry(dbats_handler *handler);
-extern uint32_t dbats_get_num_aggs(dbats_handler *handler);
+extern const dbats_config *dbats_get_config(dbats_handler *handler);
 extern const dbats_agg *dbats_get_agg(dbats_handler *handler, int agg_id);
 
 extern void dbats_stat_print(const dbats_handler *handler);
