@@ -103,6 +103,9 @@ struct dbats_handler {
     size_t db_get_buf_len;
 };
 
+const char *dbats_agg_func_label[] = {
+    "data", "min", "max", "avg", "last", "sum"
+};
 
 /************************************************************************
  * utilities

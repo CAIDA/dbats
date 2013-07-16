@@ -36,6 +36,8 @@
 #define DBATS_AGG_LAST   4
 #define DBATS_AGG_SUM    5
 
+extern const char *dbats_agg_func_label[];
+
 typedef struct {
     uint32_t start;
     uint32_t end;
