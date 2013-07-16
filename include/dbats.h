@@ -34,13 +34,17 @@
 #define DBATS_AGG_LAST   4
 #define DBATS_AGG_SUM    5
 
+typedef struct {
+    uint32_t start;
+    uint32_t end;
+} dbats_timerange_t;
+
 // Aggregation parameters
 typedef struct {
-    int func;               // aggregation function
-    int steps;              // number of primary data points in agg
-    uint32_t period;        // length of slice (seconds)
-    uint32_t first_flush;   // time of earliest flush
-    uint32_t last_flush;    // time of latest flush
+    int func;                // aggregation function
+    int steps;               // number of primary data points in agg
+    uint32_t period;         // length of slice (seconds)
+    dbats_timerange_t times; // times of first and last flush
 } dbats_agg;
 
 #if 0
@@ -55,11 +59,6 @@ typedef uint64_t dbats_value;
 
 typedef struct dbats_tslice dbats_tslice;
 typedef struct dbats_key_info dbats_key_info_t;
-
-typedef struct {
-    uint32_t start;
-    uint32_t end;
-} dbats_timerange_t;
 
 typedef struct {
     uint8_t  is_open;
@@ -125,5 +124,7 @@ extern int dbats_walk_keyname_end(dbats_handler *handler);
 extern int dbats_walk_keyid_start(dbats_handler *handler);
 extern int dbats_walk_keyid_next(dbats_handler *handler, uint32_t *key_id_p);
 extern int dbats_walk_keyid_end(dbats_handler *handler);
+
+extern const dbats_timerange_t *dbats_get_agg_times(dbats_handler *handler, int agg_id);
 
 extern void dbats_stat_print(const dbats_handler *handler);

@@ -9,12 +9,15 @@ static char *progname = 0;
 /* *********************************** */
 
 static void help(void) {
-    fprintf(stderr, "%s [{options}] {dbats_path} {begin} {end}\n",
-	progname);
+    fprintf(stderr, "%s [{options}] {dbats_path}\n", progname);
     fprintf(stderr, "options:\n");
     fprintf(stderr, "-v{0|1|2|3}    verbosity level\n");
     fprintf(stderr, "-k{path}       load list of keys from {path}\n");
     fprintf(stderr, "               (default: use all keys in db)\n");
+    fprintf(stderr, "-b{begin}      begin time\n");
+    fprintf(stderr, "               (default: first time in db)\n");
+    fprintf(stderr, "-e{end}        end time\n");
+    fprintf(stderr, "               (default: last time in db)\n");
     exit(-1);
 }
 
@@ -67,13 +70,19 @@ int main(int argc, char *argv[]) {
     dbats_log_level = 1;
 
     int c;
-    while ((c = getopt(argc, argv, "v:k:")) != -1) {
+    while ((c = getopt(argc, argv, "v:k:b:e:")) != -1) {
 	switch (c) {
 	case 'v':
 	    dbats_log_level = atoi(optarg);
 	    break;
 	case 'k':
 	    keyfile_path = strdup(optarg);
+	    break;
+	case 'b':
+	    begin = atol(optarg);
+	    break;
+	case 'e':
+	    end = atol(optarg);
 	    break;
 	default:
 	    help();
@@ -84,21 +93,23 @@ int main(int argc, char *argv[]) {
     argc -= optind;
 
 
-    if (argc != 3)
+    if (argc != 1)
 	help();
 
     dbats_path = argv[0];
-    begin = atol(argv[1]);
-    end = atol(argv[2]);
 
     dbats_log(LOG_INFO, "begin=%"PRId32 " end=%"PRId32, begin, end);
-    if ((begin <= 0) || (end < begin))
+    if (end < begin)
 	help();
 
     dbats_log(LOG_INFO, "Opening %s", dbats_path);
 
     if (dbats_open(&handler, dbats_path, 0, 0, DBATS_READONLY) != 0)
 	return(-1);
+
+    const dbats_timerange_t *times = dbats_get_agg_times(&handler, 0);
+    if (begin == 0) begin = times->start;
+    if (end == 0) end = times->end;
 
     if (keyfile_path)
 	load_keys(&handler, keyfile_path);

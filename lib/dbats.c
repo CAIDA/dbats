@@ -520,14 +520,14 @@ static void dbats_flush_tslice(dbats_handler *handler, int agg_id)
 
     if (!handler->readonly) {
 	int changed = 0;
-	if (handler->agg[agg_id].first_flush == 0 ||
-	    handler->agg[agg_id].first_flush > handler->tslice[agg_id]->time)
+	if (handler->agg[agg_id].times.start == 0 ||
+	    handler->agg[agg_id].times.start > handler->tslice[agg_id]->time)
 	{
-	    handler->agg[agg_id].last_flush = handler->tslice[agg_id]->time;
+	    handler->agg[agg_id].times.start = handler->tslice[agg_id]->time;
 	    changed = 1;
 	}
-	if (handler->agg[agg_id].last_flush < handler->tslice[agg_id]->time) {
-	    handler->agg[agg_id].last_flush = handler->tslice[agg_id]->time;
+	if (handler->agg[agg_id].times.end < handler->tslice[agg_id]->time) {
+	    handler->agg[agg_id].times.end = handler->tslice[agg_id]->time;
 	    changed = 1;
 	}
 	if (changed) {
@@ -594,10 +594,10 @@ static int update_key_info(dbats_handler *handler, int next_is_far)
     dbats_agg *agg0 = &handler->agg[0];
     dbats_tslice *tslice = handler->tslice[0];
     if (handler->readonly || tslice->time == 0) return 0;
-    int is_last = tslice->time >= agg0->last_flush;
+    int is_last = tslice->time >= agg0->times.end;
     dbats_log(LOG_INFO,
 	"update_key_info: t=%u, last_flush=%u, is_last=%d, next_is_far=%d",
-	tslice->time, agg0->last_flush, is_last, next_is_far); // XXX
+	tslice->time, agg0->times.end, is_last, next_is_far); // XXX
 
 #define debugUKI(first, label, i) \
     dbats_log(LOG_INFO, \
@@ -619,7 +619,7 @@ static int update_key_info(dbats_handler *handler, int next_is_far)
 	    // Terminate the current (unterminated) timerange.
 	    tr_changed++;
 	    debugUKI(1, "next_is_far", i); // XXX
-	    tr[i].end = agg0->last_flush;
+	    tr[i].end = agg0->times.end;
 	    debugUKI(0, "next_is_far", i); // XXX
 	}
 
@@ -627,14 +627,14 @@ static int update_key_info(dbats_handler *handler, int next_is_far)
 
 	if (!tslice->frag[dkip->frag_id]) {
 	    // Fragment wasn't loaded, so value's state could not have changed.
-	    if (tslice->time > agg0->last_flush) {
+	    if (tslice->time > agg0->times.end) {
 		// This is the first visit to the current timeslice, so the
 		// value in this timeslice could never have been set before.
 		if (i >= 0 && tr[i].end == 0) {
 		    // Key has a current timerange; we must terminate it.
 		    tr_changed++;
 		    debugUKI(1, "terminate", i);
-		    tr[i].end = agg0->last_flush;
+		    tr[i].end = agg0->times.end;
 		    debugUKI(0, "terminate", i);
 		}
 	    }
@@ -643,7 +643,7 @@ static int update_key_info(dbats_handler *handler, int next_is_far)
 	    // Value is set.
 	    if (i >= 0 && tr[i].end == 0 && tslice->time >= tr[i].start) {
 		// active time is within or after current range
-		if (tslice->time <= agg0->last_flush + agg0->period) {
+		if (tslice->time <= agg0->times.end + agg0->period) {
 		    // Common case: active time is within current (unterminated)
 		    // range and is no more than 1 step past the last flush.
 		    // No change to timerange.
@@ -654,7 +654,7 @@ static int update_key_info(dbats_handler *handler, int next_is_far)
 		    // current range.
 		    tr_changed++;
 		    debugUKI(1, "post-current", i); // XXX
-		    tr[i].end = agg0->last_flush;
+		    tr[i].end = agg0->times.end;
 		    debugUKI(0, "post-current", i); // XXX
 		    if (!(tr = timerange_insert(dkip, ++i, tslice->time, 0)))
 			return -1;
@@ -716,7 +716,7 @@ static int update_key_info(dbats_handler *handler, int next_is_far)
 		// current timerange matches; terminate it
 		tr_changed++;
 		debugUKI(1, "unset current", i); // XXX
-		tr[i].end = agg0->last_flush;
+		tr[i].end = agg0->times.end;
 		debugUKI(0, "unset current", i); // XXX
 	    } else {
 		// search for historic timerange (possible only if we allow
@@ -1063,7 +1063,7 @@ int dbats_set(dbats_handler *handler, uint32_t key_id, const dbats_value *valuep
 	    // timerange overlaps aggregate; count overlapping steps
 	    uint32_t overlap_start = max(aggstart, tr[tri].start);
 	    uint32_t tr_end = tr[tri].end != 0 ?
-		tr[tri].end : handler->agg[0].last_flush;
+		tr[tri].end : handler->agg[0].times.end;
 	    uint32_t overlap_end = min(aggend, tr_end);
 	    // Note:  Usually (overlap_end >= overlap_start), but in the first
 	    // tslice of agg period, (overlap_end == overlap_start - period),
@@ -1126,7 +1126,7 @@ int dbats_set(dbats_handler *handler, uint32_t key_id, const dbats_value *valuep
 	    for (int i = 0; i < handler->values_per_entry; i++) {
 		if (was_set && valuep[i] == oldvaluep[i]) {
 		    // value did not change; no need to change agg value
-		} else if (handler->tslice[0]->time >= handler->agg[0].last_flush) {
+		} else if (handler->tslice[0]->time >= handler->agg[0].times.end) {
 		    // common case: value is latest ever seen
 		    aggval[i] = valuep[i];
 		    changed = 1;
@@ -1141,7 +1141,7 @@ int dbats_set(dbats_handler *handler, uint32_t key_id, const dbats_value *valuep
 			changed = 1;
 		    } else {
 			uint32_t tr_end = tr[tri].end != 0 ?
-			    tr[tri].end : handler->agg[0].last_flush;
+			    tr[tri].end : handler->agg[0].times.end;
 			uint32_t overlap_end = min(aggend, tr_end);
 			if (handler->tslice[0]->time >= overlap_end) {
 			    // no timerange overlaps agg, or active time >= overlap_end
@@ -1388,6 +1388,13 @@ int dbats_walk_keyid_next(dbats_handler *handler, uint32_t *key_id_p)
 int dbats_walk_keyid_end(dbats_handler *handler)
 {
     return 0;
+}
+
+/*************************************************************************/
+
+const dbats_timerange_t *dbats_get_agg_times(dbats_handler *handler, int agg_id)
+{
+    return &handler->agg[agg_id].times;
 }
 
 /*************************************************************************/
