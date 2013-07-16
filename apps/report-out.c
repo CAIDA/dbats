@@ -120,8 +120,11 @@ int main(int argc, char *argv[]) {
     out = stdout;
     run_start = time(NULL);
 
-    for (int agg_id = 0; agg_id < handler.num_aggs; agg_id++) {
-	for (uint32_t t = begin; t <= end; t += handler.agg[agg_id].period) {
+    uint32_t values_per_entry = dbats_get_values_per_entry(&handler);
+    uint32_t num_aggs = dbats_get_num_aggs(&handler);
+
+    for (int agg_id = 0; agg_id < num_aggs; agg_id++) {
+	for (uint32_t t = begin; t <= end; t += dbats_get_agg_period(&handler, agg_id)) {
 	    int rc;
 
 	    if ((rc = dbats_goto_time(&handler, t, 0)) == -1) {
@@ -129,7 +132,7 @@ int main(int argc, char *argv[]) {
 		continue;
 	    }
 
-	    if (handler.agg[agg_id].func == DBATS_AGG_AVG) {
+	    if (dbats_get_agg_func(&handler, agg_id) == DBATS_AGG_AVG) {
 		const double *values;
 		for (int k = 0; k < n_keys; k++) {
 		    const char *key = dbats_get_key_name(&handler, key_id[k]);
@@ -139,7 +142,7 @@ int main(int argc, char *argv[]) {
 			break;
 		    }
 		    fprintf(out, "%s ", key);
-		    for (int j = 0; j < handler.values_per_entry; j++) {
+		    for (int j = 0; j < values_per_entry; j++) {
 			fprintf(out, "%.3f ", values ? values[j] : 0);
 		    }
 		    fprintf(out, "%u %d\n", t, agg_id);
@@ -154,7 +157,7 @@ int main(int argc, char *argv[]) {
 			break;
 		    }
 		    fprintf(out, "%s ", key);
-		    for (int j = 0; j < handler.values_per_entry; j++) {
+		    for (int j = 0; j < values_per_entry; j++) {
 			fprintf(out, "%" PRIval " ", values ? values[j] : 0);
 		    }
 		    fprintf(out, "%u %d\n", t, agg_id);

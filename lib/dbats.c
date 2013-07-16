@@ -1392,10 +1392,20 @@ int dbats_walk_keyid_end(dbats_handler *handler)
 
 /*************************************************************************/
 
+uint32_t dbats_get_values_per_entry(dbats_handler *handler)
+    { return handler->values_per_entry; }
+
+uint32_t dbats_get_num_aggs(dbats_handler *handler)
+    { return handler->num_aggs; }
+
 const dbats_timerange_t *dbats_get_agg_times(dbats_handler *handler, int agg_id)
-{
-    return &handler->agg[agg_id].times;
-}
+    { return &handler->agg[agg_id].times; }
+
+uint32_t dbats_get_agg_period(dbats_handler *handler, int agg_id)
+    { return handler->agg[agg_id].period; }
+
+uint32_t dbats_get_agg_func(dbats_handler *handler, int agg_id)
+    { return handler->agg[agg_id].func; }
 
 /*************************************************************************/
 

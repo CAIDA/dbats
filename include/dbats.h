@@ -41,8 +41,8 @@ typedef struct {
 
 // Aggregation parameters
 typedef struct {
-    int func;                // aggregation function
-    int steps;               // number of primary data points in agg
+    uint32_t func;           // aggregation function
+    uint32_t steps;          // number of primary data points in agg
     uint32_t period;         // length of slice (seconds)
     dbats_timerange_t times; // times of first and last flush
 } dbats_agg;
@@ -125,6 +125,10 @@ extern int dbats_walk_keyid_start(dbats_handler *handler);
 extern int dbats_walk_keyid_next(dbats_handler *handler, uint32_t *key_id_p);
 extern int dbats_walk_keyid_end(dbats_handler *handler);
 
+extern uint32_t dbats_get_values_per_entry(dbats_handler *handler);
+extern uint32_t dbats_get_num_aggs(dbats_handler *handler);
 extern const dbats_timerange_t *dbats_get_agg_times(dbats_handler *handler, int agg_id);
+extern uint32_t dbats_get_agg_period(dbats_handler *handler, int agg_id);
+extern uint32_t dbats_get_agg_func(dbats_handler *handler, int agg_id);
 
 extern void dbats_stat_print(const dbats_handler *handler);
