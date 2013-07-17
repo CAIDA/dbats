@@ -101,6 +101,7 @@ struct dbats_handler {
     dbats_key_info_t **key_info_block;
     uint8_t *db_get_buf;
     size_t db_get_buf_len;
+    DB_TXN *txn;
 };
 
 const char *dbats_agg_func_label[] = {
@@ -127,6 +128,32 @@ static void *emalloc(size_t size, const char *msg)
  * DB wrappers
  ************************************************************************/
 
+static int begin_transaction(dbats_handler *handler)
+{
+    int rc;
+    if ((rc = handler->dbenv->txn_begin(handler->dbenv, NULL, &handler->txn, 0)) != 0)
+	dbats_log(LOG_ERROR, "begin transaction: %s", db_strerror(rc));
+    return rc;
+}
+
+static int commit_transaction(dbats_handler *handler)
+{
+    int rc;
+    if ((rc = handler->txn->commit(handler->txn, 0)) != 0)
+	dbats_log(LOG_ERROR, "commit transaction: %s", db_strerror(rc));
+    handler->txn = NULL;
+    return rc;
+}
+
+static int abort_transaction(dbats_handler *handler)
+{
+    int rc;
+    if ((rc = handler->txn->abort(handler->txn)) != 0)
+	dbats_log(LOG_ERROR, "abort transaction: %s", db_strerror(rc));
+    handler->txn = NULL;
+    return rc;
+}
+
 static int raw_db_open(dbats_handler *handler, DB **dbp, const char *envpath,
     const char *dbname, uint32_t flags, int mode)
 {
@@ -138,7 +165,7 @@ static int raw_db_open(dbats_handler *handler, DB **dbp, const char *envpath,
 	return -1;
     }
 
-    uint32_t dbflags = 0;
+    uint32_t dbflags = DB_THREAD;
     if (flags & DBATS_CREATE)
 	dbflags |= DB_CREATE;
     if (flags & DBATS_READONLY)
@@ -288,6 +315,9 @@ static dbats_key_info_t *new_key(dbats_handler *handler,
     return dkip;
 }
 
+// Warning: never open the same db more than once in the same process, because
+// there must be only one DB_ENV per db per process.
+// http://docs.oracle.com/cd/E17076_02/html/programmer_reference/transapp_app.html
 dbats_handler *dbats_open(const char *path,
     uint16_t values_per_entry,
     uint32_t period,
@@ -295,7 +325,8 @@ dbats_handler *dbats_open(const char *path,
 {
     int ret;
     int dbmode = 00666;
-    uint32_t dbflags = DB_INIT_MPOOL;
+    uint32_t dbflags = DB_INIT_MPOOL | DB_INIT_LOCK | DB_INIT_LOG |
+	DB_INIT_TXN | DB_THREAD | DB_REGISTER | DB_RECOVER | DB_CREATE;
     int is_new = 0;
 
     dbats_handler *handler = emalloc(sizeof(dbats_handler), "handler");
@@ -336,9 +367,11 @@ dbats_handler *dbats_open(const char *path,
 	return NULL;
     }
 
-    if (raw_db_open(handler, &handler->dbMeta, path, "meta", flags, dbmode) != 0) return NULL;
-    if (raw_db_open(handler, &handler->dbKeys, path, "keys", flags, dbmode) != 0) return NULL;
-    if (raw_db_open(handler, &handler->dbData, path, "data", flags, dbmode) != 0) return NULL;
+    if (begin_transaction(handler) != 0) return NULL;
+
+    if (raw_db_open(handler, &handler->dbMeta, path, "meta", flags, dbmode) != 0) goto abort;
+    if (raw_db_open(handler, &handler->dbKeys, path, "keys", flags, dbmode) != 0) goto abort;
+    if (raw_db_open(handler, &handler->dbData, path, "data", flags, dbmode) != 0) goto abort;
 
     handler->cfg.entry_size = sizeof(dbats_value); // for db_get_buf_len
 
@@ -355,7 +388,7 @@ dbats_handler *dbats_open(const char *path,
 		handler->cfg.field = *((type*)value); \
 	    } else { \
 		dbats_log(LOG_ERROR, "%s: missing config value %s", path, #field); \
-		return NULL; \
+		goto abort; \
 	    } \
 	} \
 	dbats_log(LOG_INFO, "cfg: %s = %u", #field, handler->cfg.field); \
@@ -366,6 +399,8 @@ dbats_handler *dbats_open(const char *path,
     initcfg(uint32_t, period,            period);
     initcfg(uint16_t, values_per_entry,  values_per_entry);
     initcfg(uint16_t, num_aggs,          1);
+
+    if (commit_transaction(handler) != 0) goto abort;
 
     if (handler->cfg.version > DBATS_DB_VERSION) {
 	dbats_log(LOG_ERROR, "database version %d > %d", handler->cfg.version,
@@ -461,6 +496,10 @@ dbats_handler *dbats_open(const char *path,
 
     handler->is_open = 1;
     return handler;
+
+abort:
+    abort_transaction(handler);
+    return NULL;
 }
 
 int dbats_aggregate(dbats_handler *handler, int func, int steps)
@@ -620,12 +659,13 @@ static dbats_timerange_t *timerange_insert(dbats_key_info_t *dkip, int i,
 }
 
 // Update the timeranges associated with each key.
-static int update_key_info(dbats_handler *handler, int next_is_far)
+static int update_key_info(dbats_handler *handler, uint32_t next_time)
 {
     dbats_agg *agg0 = &handler->agg[0];
     dbats_tslice *tslice = handler->tslice[0];
     if (handler->cfg.readonly || tslice->time == 0) return 0;
     int is_last = tslice->time >= agg0->times.end;
+    int next_is_far = next_time > tslice->time + agg0->period;
     dbats_log(LOG_INFO,
 	"update_key_info: t=%u, last_flush=%u, is_last=%d, next_is_far=%d",
 	tslice->time, agg0->times.end, is_last, next_is_far); // XXX
@@ -795,21 +835,33 @@ static int update_key_info(dbats_handler *handler, int next_is_far)
     return 0;
 }
 
+static int dbats_commit(dbats_handler *handler)
+{
+    if (!handler->txn) return 0;
+
+    dbats_log(LOG_INFO, "commit %u", handler->tslice[0]->time);
+
+    if (update_key_info(handler, 0) != 0)
+	return -1;
+
+    for (int agg_id = 0; agg_id < handler->cfg.num_aggs; agg_id++) {
+	dbats_flush_tslice(handler, agg_id);
+    }
+
+    return commit_transaction(handler);
+}
+
 /*************************************************************************/
 
 void dbats_close(dbats_handler *handler)
 {
-    if (!handler->is_open) {
+    if (!handler->is_open)
 	return;
-    }
     handler->is_open = 0;
 
-    if (!handler->cfg.readonly)
-	dbats_log(LOG_INFO, "Flushing database changes...");
+    dbats_commit(handler);
 
-    update_key_info(handler, 0);
-    for (int agg_id = handler->cfg.num_aggs - 1; agg_id >= 0; agg_id--) {
-	dbats_flush_tslice(handler, agg_id);
+    for (int agg_id = 0; agg_id < handler->cfg.num_aggs; agg_id++) {
 	free(handler->tslice[agg_id]);
 	handler->tslice[agg_id] = NULL;
     }
@@ -912,11 +964,17 @@ static int load_frag(dbats_handler *handler, uint32_t t, int agg_id,
     return 0;
 }
 
-int dbats_goto_time(dbats_handler *handler, uint32_t time_value, uint32_t flags)
+int dbats_select_time(dbats_handler *handler, uint32_t time_value, uint32_t flags)
 {
     int rc;
 
-    dbats_log(LOG_INFO, "goto_time %u", time_value);
+    dbats_log(LOG_INFO, "select_time %u", time_value);
+
+    if ((rc = dbats_commit(handler)) != 0)
+	return rc;
+
+    if ((rc = begin_transaction(handler)) != 0)
+	return rc;
 
     for (int agg_id = 0; agg_id < handler->cfg.num_aggs; agg_id++) {
 	dbats_tslice *tslice = handler->tslice[agg_id];
@@ -924,18 +982,9 @@ int dbats_goto_time(dbats_handler *handler, uint32_t time_value, uint32_t flags)
 
 	dbats_normalize_time(handler, agg_id, &t);
 	if (tslice->time == t) {
-	    dbats_log(LOG_INFO, "goto_time %u, agg_id=%d: already loaded", t, agg_id);
+	    dbats_log(LOG_INFO, "select_time %u, agg_id=%d: already loaded", t, agg_id);
 	    continue;
 	}
-
-	if (agg_id == 0) {
-	    int next_is_far = t > tslice->time + handler->agg[0].period;
-	    if (update_key_info(handler, next_is_far) != 0)
-		return -1;
-	}
-
-	// Flush tslice if loaded
-	dbats_flush_tslice(handler, agg_id);
 
 	tslice->preload = !!(flags & DBATS_PRELOAD);
 	tslice->time = t;
@@ -952,9 +1001,10 @@ int dbats_goto_time(dbats_handler *handler, uint32_t time_value, uint32_t flags)
 	    if (tslice->frag[frag_id])
 		loaded++;
 	}
-	dbats_log(LOG_INFO, "goto_time %u: agg_id=%d, loaded %u/%u fragments",
+	dbats_log(LOG_INFO, "select_time %u: agg_id=%d, loaded %u/%u fragments",
 	    time_value, agg_id, loaded, tslice->num_frags);
     }
+
     return 0;
 }
 
