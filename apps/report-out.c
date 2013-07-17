@@ -168,7 +168,7 @@ int main(int argc, char *argv[]) {
 	for (t = begin; t <= end; t += agg->period) {
 	    int rc;
 
-	    if ((rc = dbats_goto_time(handler, t, 0)) == -1) {
+	    if ((rc = dbats_select_time(handler, t, 0)) == -1) {
 		dbats_log(LOG_INFO, "Unable to find time %u", t);
 		continue;
 	    }

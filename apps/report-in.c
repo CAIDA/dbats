@@ -17,7 +17,7 @@ int main(int argc, char *argv[]) {
     char *dbats_path;
     dbats_handler *handler;
     uint32_t period = 60;
-    int goto_flags = 0;
+    int select_flags = 0;
     int open_flags = DBATS_CREATE;
     progname = argv[0];
 
@@ -35,7 +35,7 @@ int main(int argc, char *argv[]) {
 	    dbats_log_level = atoi(optarg);
 	    break;
 	case 'p':
-	    goto_flags |= DBATS_PRELOAD;
+	    select_flags |= DBATS_PRELOAD;
 	    break;
 	case 'Z':
 	    open_flags |= DBATS_UNCOMPRESSED;
@@ -71,7 +71,7 @@ int main(int argc, char *argv[]) {
 	if (n != 3) break;
 
 	if (t != last_t) {
-	    if (dbats_goto_time(handler, t, goto_flags) == -1)
+	    if (dbats_select_time(handler, t, select_flags) == -1)
 		return(-1);
 	}
 	last_t = t;

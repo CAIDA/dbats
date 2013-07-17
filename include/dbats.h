@@ -88,7 +88,7 @@ extern void dbats_close(dbats_handler *handler);
 extern uint32_t dbats_normalize_time(const dbats_handler *handler, int agg_id,
     uint32_t *time);
 
-extern int dbats_goto_time(dbats_handler *handler,
+extern int dbats_select_time(dbats_handler *handler,
     uint32_t time_value, uint32_t flags);
 
 extern int dbats_get_key_id(dbats_handler *handler, const char *key,
