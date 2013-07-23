@@ -62,15 +62,9 @@ typedef struct {
     uint32_t period;           // length of raw time slice (seconds)
 } dbats_config;
 
-#if 0
-typedef uint32_t dbats_value;
-#define PRIval PRIu32
-#define SCNval SCNu32
-#else
 typedef uint64_t dbats_value;
 #define PRIval PRIu64
 #define SCNval SCNu64
-#endif
 
 typedef struct dbats_handler dbats_handler;
 
