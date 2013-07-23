@@ -1476,10 +1476,10 @@ int dbats_walk_keyid_end(dbats_handler *handler)
 
 /*************************************************************************/
 
-const dbats_config *dbats_get_config(dbats_handler *handler)
+const volatile dbats_config *dbats_get_config(dbats_handler *handler)
     { return &handler->cfg; }
 
-const dbats_agg *dbats_get_agg(dbats_handler *handler, int agg_id)
+const volatile dbats_agg *dbats_get_agg(dbats_handler *handler, int agg_id)
     { return &handler->agg[agg_id]; }
 
 /*************************************************************************/

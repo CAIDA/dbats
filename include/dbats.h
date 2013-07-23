@@ -109,7 +109,7 @@ extern int dbats_walk_keyid_start(dbats_handler *handler);
 extern int dbats_walk_keyid_next(dbats_handler *handler, uint32_t *key_id_p);
 extern int dbats_walk_keyid_end(dbats_handler *handler);
 
-extern const dbats_config *dbats_get_config(dbats_handler *handler);
-extern const dbats_agg *dbats_get_agg(dbats_handler *handler, int agg_id);
+extern const volatile dbats_config *dbats_get_config(dbats_handler *handler);
+extern const volatile dbats_agg *dbats_get_agg(dbats_handler *handler, int agg_id);
 
 extern void dbats_stat_print(const dbats_handler *handler);

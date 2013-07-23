@@ -122,7 +122,7 @@ int main(int argc, char *argv[]) {
     handler = dbats_open(dbats_path, 0, 0, DBATS_READONLY);
     if (!handler) return(-1);
 
-    const dbats_agg *agg0 = dbats_get_agg(handler, 0);
+    const volatile dbats_agg *agg0 = dbats_get_agg(handler, 0);
     if (begin == 0) begin = agg0->times.start;
     if (end == 0) end = agg0->times.end;
 
@@ -135,13 +135,13 @@ int main(int argc, char *argv[]) {
     out = stdout;
     run_start = time(NULL);
 
-    const dbats_config *cfg = dbats_get_config(handler);
+    const volatile dbats_config *cfg = dbats_get_config(handler);
 
     if (outtype == OT_GNUPLOT) {
 	fprintf(out, "set style data steps\n");
 	fprintf(out, "set xrange [%" PRIu32 ":%" PRIu32 "]\n",
 	    0, end + agg0->period - begin);
-	const dbats_agg *agg;
+	const volatile dbats_agg *agg;
 	if (cfg->num_aggs > 0) {
 	    agg = dbats_get_agg(handler, 1);
 	    fprintf(out, "set xtics %d\n", agg->period);
@@ -161,7 +161,7 @@ int main(int argc, char *argv[]) {
     }
 
     for (int agg_id = 0; agg_id < cfg->num_aggs; agg_id++) {
-	const dbats_agg *agg = dbats_get_agg(handler, agg_id);
+	const volatile dbats_agg *agg = dbats_get_agg(handler, agg_id);
 	char strval[64];
 	strval[0] = '\0';
 	uint32_t t;
