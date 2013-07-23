@@ -128,7 +128,7 @@ static void *emalloc(size_t size, const char *msg)
  * DB wrappers
  ************************************************************************/
 
-static int begin_transaction(dbats_handler *handler)
+static inline int begin_transaction(dbats_handler *handler)
 {
     int rc;
     if ((rc = handler->dbenv->txn_begin(handler->dbenv, NULL, &handler->txn, 0)) != 0)
@@ -136,7 +136,7 @@ static int begin_transaction(dbats_handler *handler)
     return rc;
 }
 
-static int commit_transaction(dbats_handler *handler)
+static inline int commit_transaction(dbats_handler *handler)
 {
     int rc;
     if ((rc = handler->txn->commit(handler->txn, 0)) != 0)
@@ -145,7 +145,7 @@ static int commit_transaction(dbats_handler *handler)
     return rc;
 }
 
-static int abort_transaction(dbats_handler *handler)
+static inline int abort_transaction(dbats_handler *handler)
 {
     int rc;
     if ((rc = handler->txn->abort(handler->txn)) != 0)
@@ -217,7 +217,8 @@ static void raw_db_set(const dbats_handler *handler, DB *db,
 #define QLZ_OVERHEAD 400
 
 static int raw_db_get(dbats_handler *handler, DB* db,
-    const void *key, uint32_t key_len, void **value, size_t *value_len)
+    const void *key, uint32_t key_len, void **value, size_t *value_len,
+    int writelock)
 {
     DBT key_data, data;
     int rc;
@@ -238,7 +239,9 @@ static int raw_db_get(dbats_handler *handler, DB* db,
     data.data = handler->db_get_buf;
     data.ulen = handler->db_get_buf_len;
     data.flags = DB_DBT_USERMEM;
-    if ((rc = db->get(db, NULL, &key_data, &data, 0)) == 0) {
+    uint32_t dbflags = 0;
+    if (writelock) dbflags |= DB_RMW;
+    if ((rc = db->get(db, NULL, &key_data, &data, dbflags)) == 0) {
 	*value = data.data;
 	*value_len = data.size;
 	return 0;
@@ -384,7 +387,7 @@ dbats_handler *dbats_open(const char *path,
 	} else { \
 	    void *value; \
 	    size_t value_len; \
-	    if (raw_db_get(handler, handler->dbMeta, #field, strlen(#field), &value, &value_len) == 0) { \
+	    if (raw_db_get(handler, handler->dbMeta, #field, strlen(#field), &value, &value_len, 0) == 0) { \
 		handler->cfg.field = *((type*)value); \
 	    } else { \
 		dbats_log(LOG_ERROR, "%s: missing config value %s", path, #field); \
@@ -434,7 +437,7 @@ dbats_handler *dbats_open(const char *path,
 	char keybuf[32];
 	for (int agg_id = 0; agg_id < handler->cfg.num_aggs; agg_id++) {
 	    sprintf(keybuf, "agg%d", agg_id);
-	    if (raw_db_get(handler, handler->dbMeta, keybuf, strlen(keybuf), &value, &value_len) != 0) {
+	    if (raw_db_get(handler, handler->dbMeta, keybuf, strlen(keybuf), &value, &value_len, 0) != 0) {
 		dbats_log(LOG_ERROR, "missing aggregation config %d", agg_id);
 		return NULL;
 	    } else if (value_len != sizeof(dbats_agg)) {
@@ -920,7 +923,7 @@ static int load_frag(dbats_handler *handler, uint32_t t, int agg_id,
     dbkey.agg_id = agg_id;
     dbkey.frag_id = frag_id;
     int rc = raw_db_get(handler, handler->dbData, &dbkey, sizeof(dbkey),
-	&value, &value_len);
+	&value, &value_len, !handler->cfg.readonly);
     dbats_log(LOG_INFO, "load_frag t=%u, agg_id=%u, frag_id=%u: "
 	"raw_db_get = %d", t, agg_id, frag_id, rc);
     if (rc != 0)
@@ -1017,7 +1020,7 @@ int dbats_get_key_id(dbats_handler *handler, const char *key,
     size_t keylen = strlen(key);
     size_t len;
 
-    if (raw_db_get(handler, handler->dbKeys, key, keylen, &ptr, &len) == 0) {
+    if (raw_db_get(handler, handler->dbKeys, key, keylen, &ptr, &len, 0) == 0) {
 	*key_id_p = ((raw_key_info_t*)ptr)->key_id;
 	// dbats_key_info_t *dkip = find_key(handler, key_id);
 	// assert(strcmp(dkip->key, key) == 0);
