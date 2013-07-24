@@ -12,6 +12,7 @@ static void help(void) {
     fprintf(stderr, "%s [{options}] {dbats_path}\n", progname);
     fprintf(stderr, "options:\n");
     fprintf(stderr, "-v{0|1|2|3}    verbosity level\n");
+    fprintf(stderr, "-x             obtain exclusive lock on db\n");
     fprintf(stderr, "-k{path}       load list of keys from {path}\n");
     fprintf(stderr, "               (default: use all keys in db)\n");
     fprintf(stderr, "-b{begin}      begin time\n");
@@ -73,12 +74,16 @@ int main(int argc, char *argv[]) {
     progname = argv[0];
     dbats_log_level = 1;
     int outtype = OT_TEXT;
+    int open_flags = DBATS_READONLY;
 
     int c;
-    while ((c = getopt(argc, argv, "v:k:b:e:o:")) != -1) {
+    while ((c = getopt(argc, argv, "v:xk:b:e:o:")) != -1) {
 	switch (c) {
 	case 'v':
 	    dbats_log_level = atoi(optarg);
+	    break;
+	case 'x':
+	    open_flags |= DBATS_EXCLUSIVE;
 	    break;
 	case 'k':
 	    keyfile_path = strdup(optarg);
@@ -119,7 +124,7 @@ int main(int argc, char *argv[]) {
 
     dbats_log(LOG_INFO, "Opening %s", dbats_path);
 
-    handler = dbats_open(dbats_path, 0, 0, DBATS_READONLY);
+    handler = dbats_open(dbats_path, 0, 0, open_flags);
     if (!handler) return(-1);
 
     const volatile dbats_agg *agg0 = dbats_get_agg(handler, 0);

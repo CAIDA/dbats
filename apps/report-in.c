@@ -8,6 +8,7 @@ static void help(void) {
     fprintf(stderr, "%s [{options}] {dbats_path} < report.metrics\n", progname);
     fprintf(stderr, "options:\n");
     fprintf(stderr, "-v{0|1|2|3}    verbosity level\n");
+    fprintf(stderr, "-x             obtain exclusive lock on db\n");
     fprintf(stderr, "-p             preload timeslices\n");
     fprintf(stderr, "-Z             don't compress db\n");
     exit(-1);
@@ -29,10 +30,13 @@ int main(int argc, char *argv[]) {
     char key[128];
 
     int c;
-    while ((c = getopt(argc, argv, "v:pZ")) != -1) {
+    while ((c = getopt(argc, argv, "v:xpZ")) != -1) {
 	switch (c) {
 	case 'v':
 	    dbats_log_level = atoi(optarg);
+	    break;
+	case 'x':
+	    open_flags |= DBATS_EXCLUSIVE;
 	    break;
 	case 'p':
 	    select_flags |= DBATS_PRELOAD;
