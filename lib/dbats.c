@@ -26,6 +26,8 @@
 #define MAX_NUM_KEYINFOBLK  16384 // max number of key_info blocks
 #define MAX_NUM_AGGS           16 // max number of aggregations
 
+#define HAVE_SET_LK_EXCLUSIVE 0
+
 /*************************************************************************/
 // compile-time assertion (works anywhere a declaration is allowed)
 #define ct_assert(expr, label)  enum { ASSERTION_ERROR__##label = 1/(!!(expr)) };
@@ -100,7 +102,8 @@ struct dbats_handler {
     dbats_key_info_t **key_info_block;
     uint8_t *db_get_buf;
     size_t db_get_buf_len;
-    DB_TXN *txn;
+    DB_TXN *txn;                          // normal transaction
+    DB_TXN *outer_txn;                    // used to emulate set_lk_exclusive()
 };
 
 const char *dbats_agg_func_label[] = {
@@ -127,29 +130,31 @@ static void *emalloc(size_t size, const char *msg)
  * DB wrappers
  ************************************************************************/
 
-static inline int begin_transaction(dbats_handler *handler)
+static inline int begin_transaction(dbats_handler *handler, DB_TXN **txnp,
+    const char *name)
 {
     int rc;
-    if ((rc = handler->dbenv->txn_begin(handler->dbenv, NULL, &handler->txn, 0)) != 0)
+    if ((rc = handler->dbenv->txn_begin(handler->dbenv, NULL, txnp, 0)) != 0)
 	dbats_log(LOG_ERROR, "begin transaction: %s", db_strerror(rc));
+    (*txnp)->set_name((*txnp), name);
     return rc;
 }
 
-static inline int commit_transaction(dbats_handler *handler)
+static inline int commit_transaction(dbats_handler *handler, DB_TXN **txnp)
 {
     int rc;
-    if ((rc = handler->txn->commit(handler->txn, 0)) != 0)
+    if ((rc = (*txnp)->commit(*txnp, 0)) != 0)
 	dbats_log(LOG_ERROR, "commit transaction: %s", db_strerror(rc));
-    handler->txn = NULL;
+    *txnp = NULL;
     return rc;
 }
 
-static inline int abort_transaction(dbats_handler *handler)
+static inline int abort_transaction(dbats_handler *handler, DB_TXN **txnp)
 {
     int rc;
-    if ((rc = handler->txn->abort(handler->txn)) != 0)
+    if ((rc = (*txnp)->abort(*txnp)) != 0)
 	dbats_log(LOG_ERROR, "abort transaction: %s", db_strerror(rc));
-    handler->txn = NULL;
+    *txnp = NULL;
     return rc;
 }
 
@@ -387,7 +392,8 @@ dbats_handler *dbats_open(const char *path,
 	return NULL;
     }
 
-    if (begin_transaction(handler) != 0) return NULL;
+    if (begin_transaction(handler, &handler->outer_txn, "outer txn") != 0)
+	return NULL;
 
     if (raw_db_open(handler, &handler->dbMeta, path, "meta", flags, dbmode) != 0) goto abort;
     if (raw_db_open(handler, &handler->dbKeys, path, "keys", flags, dbmode) != 0) goto abort;
@@ -404,10 +410,10 @@ dbats_handler *dbats_open(const char *path,
 	} else { \
 	    void *value; \
 	    size_t value_len; \
-	    if (raw_db_get(handler, handler->dbMeta, #field, strlen(#field), &value, &value_len, 0) == 0) { \
+	    if (raw_db_get(handler, handler->dbMeta, #field, strlen(#field), &value, &value_len, !handler->cfg.readonly) == 0) { \
 		handler->cfg.field = *((type*)value); \
 	    } else { \
-		dbats_log(LOG_ERROR, "%s: missing config value %s", path, #field); \
+		dbats_log(LOG_ERROR, "%s: missing config value: %s", path, #field); \
 		goto abort; \
 	    } \
 	} \
@@ -420,7 +426,11 @@ dbats_handler *dbats_open(const char *path,
     initcfg(uint16_t, values_per_entry,  values_per_entry);
     initcfg(uint16_t, num_aggs,          1);
 
-    if (commit_transaction(handler) != 0) goto abort;
+    if (!HAVE_SET_LK_EXCLUSIVE && handler->cfg.exclusive) {
+	// emulate exclusive lock by leaving this transaction open
+    } else {
+	if (commit_transaction(handler, &handler->outer_txn) != 0) goto abort;
+    }
 
     if (handler->cfg.version > DBATS_DB_VERSION) {
 	dbats_log(LOG_ERROR, "database version %d > %d", handler->cfg.version,
@@ -517,7 +527,7 @@ dbats_handler *dbats_open(const char *path,
     return handler;
 
 abort:
-    abort_transaction(handler);
+    abort_transaction(handler, &handler->outer_txn);
     return NULL;
 }
 
@@ -871,7 +881,7 @@ static int dbats_commit(dbats_handler *handler)
 	dbats_flush_tslice(handler, agg_id);
     }
 
-    return commit_transaction(handler);
+    return commit_transaction(handler, &handler->txn);
 }
 
 /*************************************************************************/
@@ -883,6 +893,11 @@ void dbats_close(dbats_handler *handler)
     handler->is_open = 0;
 
     dbats_commit(handler);
+
+    if (!HAVE_SET_LK_EXCLUSIVE && handler->cfg.exclusive) {
+	// commit the outer transaction used to emulate exclusive locking
+	commit_transaction(handler, &handler->outer_txn);
+    }
 
     for (int agg_id = 0; agg_id < handler->cfg.num_aggs; agg_id++) {
 	free(handler->tslice[agg_id]);
@@ -918,6 +933,7 @@ void dbats_close(dbats_handler *handler)
 	free(handler->state_decompress);
     if (handler->state_compress)
 	free(handler->state_compress);
+    free(handler);
 }
 
 /*************************************************************************/
@@ -961,12 +977,12 @@ static int load_frag(dbats_handler *handler, uint32_t t, int agg_id,
 
     if (compressed) {
 	// decompress fragment
-	// assert(len == fragsize(handler));
 	if (!handler->state_decompress) {
 	    handler->state_decompress = emalloc(sizeof(qlz_state_decompress), "qlz_state_decompress");
 	    if (!handler->state_decompress) return -2;
 	}
 	len = qlz_decompress((void*)((uint8_t*)value+1), ptr, handler->state_decompress);
+	// assert(len == fragsize(handler));
 	dbats_log(LOG_INFO, "decompressed frag t=%u, agg_id=%u, frag_id=%u: "
 	    "%u -> %u (%.1f%%)",
 	    t, agg_id, frag_id, value_len, len, len*100.0/value_len);
@@ -996,7 +1012,7 @@ int dbats_select_time(dbats_handler *handler, uint32_t time_value, uint32_t flag
     if ((rc = dbats_commit(handler)) != 0)
 	return rc;
 
-    if ((rc = begin_transaction(handler)) != 0)
+    if ((rc = begin_transaction(handler, &handler->txn, "inner txn")) != 0)
 	return rc;
 
     for (int agg_id = 0; agg_id < handler->cfg.num_aggs; agg_id++) {
