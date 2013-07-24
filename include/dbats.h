@@ -27,6 +27,7 @@
 #define DBATS_PRELOAD        0x04 // load fragments when tslice is selected
 #define DBATS_READONLY       0x08 // don't allow writing
 #define DBATS_UNCOMPRESSED   0x10 // don't compress data written to db
+#define DBATS_EXCLUSIVE      0x20 // obtain exclusive lock on whole db
 
 // Aggregation functions
 #define DBATS_AGG_NONE   0
@@ -53,8 +54,9 @@ typedef struct {
 
 typedef struct {
     uint32_t version;          // db version
-    uint8_t  readonly;         // Mode used to open the db
-    uint8_t  compress;         // Compress data in db?
+    uint8_t readonly;          // Mode used to open the db
+    uint8_t compress;          // Compress data in db?
+    uint8_t exclusive;         // Obtain exclusive lock on whole db
     uint16_t num_aggs;         // Number of aggregations
     uint16_t values_per_entry; // Number of dbats_values in an entry
     uint16_t entry_size;       // Size of an entry (bytes)

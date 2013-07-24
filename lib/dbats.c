@@ -26,7 +26,6 @@
 #define MAX_NUM_KEYINFOBLK  16384 // max number of key_info blocks
 #define MAX_NUM_AGGS           16 // max number of aggregations
 
-
 /*************************************************************************/
 // compile-time assertion (works anywhere a declaration is allowed)
 #define ct_assert(expr, label)  enum { ASSERTION_ERROR__##label = 1/(!!(expr)) };
@@ -157,24 +156,39 @@ static inline int abort_transaction(dbats_handler *handler)
 static int raw_db_open(dbats_handler *handler, DB **dbp, const char *envpath,
     const char *dbname, uint32_t flags, int mode)
 {
-    int ret;
+    int rc;
 
-    if ((ret = db_create(dbp, handler->dbenv, 0)) != 0) {
-	dbats_log(LOG_ERROR, "Error creating DB handler %s: %s",
-	    dbname, db_strerror(ret));
+    if ((rc = db_create(dbp, handler->dbenv, 0)) != 0) {
+	dbats_log(LOG_ERROR, "Error creating DB handler %s/%s: %s",
+	    envpath, dbname, db_strerror(rc));
 	return -1;
     }
 
-    uint32_t dbflags = DB_THREAD;
+    if (handler->cfg.exclusive) {
+#if HAVE_SET_LK_EXCLUSIVE
+	if ((rc = (*dbp)->set_lk_exclusive(*dbp, 1)) != 0) {
+	    dbats_log(LOG_ERROR, "Error obtaining exclusive lock on %s/%s: %s",
+		envpath, dbname, db_strerror(rc));
+	    return -1;
+	}
+#else
+	dbats_log(LOG_WARNING, "Full database locking is not supported.");
+	return ENOSYS;
+#endif
+    }
+
+    uint32_t dbflags = 0;
+    if (!handler->cfg.exclusive)
+	dbflags |= DB_THREAD;
     if (flags & DBATS_CREATE)
 	dbflags |= DB_CREATE;
     if (flags & DBATS_READONLY)
 	dbflags |= DB_RDONLY;
 
-    ret = (*dbp)->open(*dbp, NULL, dbname, NULL, DB_BTREE, dbflags, mode);
-    if (ret != 0) {
+    rc = (*dbp)->open(*dbp, NULL, dbname, NULL, DB_BTREE, dbflags, mode);
+    if (rc != 0) {
 	dbats_log(LOG_ERROR, "Error opening DB %s/%s (mode=%o): %s",
-	    envpath, dbname, mode, db_strerror(ret));
+	    envpath, dbname, mode, db_strerror(rc));
 	return -1;
     }
     return 0;
@@ -185,7 +199,7 @@ static void raw_db_set(const dbats_handler *handler, DB *db,
     const void *value, uint32_t value_len)
 {
     DBT key_data, data;
-    int ret;
+    int rc;
 
     if (db == handler->dbData) {
 	fragkey_t *fragkey = (fragkey_t*)key;
@@ -210,8 +224,8 @@ static void raw_db_set(const dbats_handler *handler, DB *db,
     data.size = value_len;
     data.flags = DB_DBT_USERMEM;
 
-    if ((ret = db->put(db, NULL, &key_data, &data, 0)) != 0)
-	dbats_log(LOG_WARNING, "Error in raw_db_set: %s", db_strerror(ret));
+    if ((rc = db->put(db, NULL, &key_data, &data, 0)) != 0)
+	dbats_log(LOG_WARNING, "Error in raw_db_set: %s", db_strerror(rc));
 }
 
 #define QLZ_OVERHEAD 400
@@ -326,7 +340,9 @@ dbats_handler *dbats_open(const char *path,
     uint32_t period,
     uint32_t flags)
 {
-    int ret;
+    dbats_log(LOG_INFO, "%s", db_full_version(NULL, NULL, NULL, NULL, NULL));
+
+    int rc;
     int dbmode = 00666;
     uint32_t dbflags = DB_INIT_MPOOL | DB_INIT_LOCK | DB_INIT_LOG |
 	DB_INIT_TXN | DB_THREAD | DB_REGISTER | DB_RECOVER | DB_CREATE;
@@ -337,11 +353,12 @@ dbats_handler *dbats_open(const char *path,
     memset(handler, 0, sizeof(dbats_handler));
     handler->cfg.readonly = !!(flags & DBATS_READONLY);
     handler->cfg.compress = !(flags & DBATS_UNCOMPRESSED);
+    handler->cfg.exclusive = !!(flags & DBATS_EXCLUSIVE);
     handler->cfg.values_per_entry = 1;
 
-    if ((ret = db_env_create(&handler->dbenv, 0)) != 0) {
+    if ((rc = db_env_create(&handler->dbenv, 0)) != 0) {
 	dbats_log(LOG_ERROR, "Error creating DB env: %s",
-	    db_strerror(ret));
+	    db_strerror(rc));
 	return NULL;
     }
 
@@ -365,8 +382,8 @@ dbats_handler *dbats_open(const char *path,
 	}
     }
 
-    if ((ret = handler->dbenv->open(handler->dbenv, path, dbflags, dbmode)) != 0) {
-	dbats_log(LOG_ERROR, "Error opening DB %s: %s", path, db_strerror(ret));
+    if ((rc = handler->dbenv->open(handler->dbenv, path, dbflags, dbmode)) != 0) {
+	dbats_log(LOG_ERROR, "Error opening DB %s: %s", path, db_strerror(rc));
 	return NULL;
     }
 
@@ -457,7 +474,6 @@ dbats_handler *dbats_open(const char *path,
     }
 
     // load key_info for every key
-    int rc;
     DBC *cursor;
     if ((rc = handler->dbKeys->cursor(handler->dbKeys, NULL, &cursor, 0)) != 0) {
 	dbats_log(LOG_ERROR, "Error in cursor: %s", db_strerror(rc));
@@ -587,8 +603,10 @@ static void dbats_flush_tslice(dbats_handler *handler, int agg_id)
 	}
 
 	handler->tslice[agg_id]->frag_changed[f] = 0;
-	free(handler->tslice[agg_id]->frag[f]);
-	handler->tslice[agg_id]->frag[f] = 0;
+	if (!handler->cfg.exclusive) {
+	    free(handler->tslice[agg_id]->frag[f]);
+	    handler->tslice[agg_id]->frag[f] = 0;
+	}
     }
 
     if (!handler->cfg.readonly) {
@@ -611,7 +629,9 @@ static void dbats_flush_tslice(dbats_handler *handler, int agg_id)
 	}
     }
 
-    memset(handler->tslice[agg_id], 0, sizeof(dbats_tslice));
+    if (!handler->cfg.exclusive) {
+	memset(handler->tslice[agg_id], 0, sizeof(dbats_tslice));
+    }
     if (buf) free(buf);
 }
 
@@ -984,9 +1004,19 @@ int dbats_select_time(dbats_handler *handler, uint32_t time_value, uint32_t flag
 	uint32_t t = time_value;
 
 	dbats_normalize_time(handler, agg_id, &t);
-	if (tslice->time == t) {
-	    dbats_log(LOG_INFO, "select_time %u, agg_id=%d: already loaded", t, agg_id);
-	    continue;
+
+	if (handler->cfg.exclusive) {
+	    if (tslice->time == t) {
+		dbats_log(LOG_INFO, "select_time %u, agg_id=%d: already loaded", t, agg_id);
+		continue;
+	    }
+	    // free obsolete fragments
+	    for (int f = 0; f < tslice->num_frags; f++) {
+		if (!tslice->frag[f]) continue;
+		free(tslice->frag[f]);
+		tslice->frag[f] = 0;
+	    }
+	    memset(tslice, 0, sizeof(dbats_tslice));
 	}
 
 	tslice->preload = !!(flags & DBATS_PRELOAD);
