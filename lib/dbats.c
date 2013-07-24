@@ -176,9 +176,6 @@ static int raw_db_open(dbats_handler *handler, DB **dbp, const char *envpath,
 		envpath, dbname, db_strerror(rc));
 	    return -1;
 	}
-#else
-	dbats_log(LOG_WARNING, "Full database locking is not supported.");
-	return ENOSYS;
 #endif
     }
 
