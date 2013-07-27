@@ -237,19 +237,17 @@ static void raw_db_set(const dbats_handler *handler, DB *db,
 
 #define QLZ_OVERHEAD 400
 
+// Get a value from the database.
+// Before the call, *value_len must contain the length of the memory pointed
+// to by value.
+// After the call, *value_len will contain the length of data written into
+// the memory pointed to by value.
 static int raw_db_get(dbats_handler *handler, DB* db,
-    const void *key, uint32_t key_len, void **value, size_t *value_len,
+    const void *key, uint32_t key_len, void *value, size_t *value_len,
     int writelock)
 {
     DBT key_data, data;
     int rc;
-
-    if (handler->db_get_buf_len < fragsize(handler) + QLZ_OVERHEAD) {
-	if (handler->db_get_buf) free(handler->db_get_buf);
-	handler->db_get_buf_len = fragsize(handler) + QLZ_OVERHEAD;
-	handler->db_get_buf = emalloc(handler->db_get_buf_len, "get buffer");
-	if (!handler->db_get_buf) return -2;
-    }
 
     memset(&key_data, 0, sizeof(key_data));
     memset(&data, 0, sizeof(data));
@@ -257,13 +255,12 @@ static int raw_db_get(dbats_handler *handler, DB* db,
     key_data.data = (void*)key; // assumption: DB won't write to *key_data.data
     key_data.size = key_len;
     key_data.flags = DB_DBT_USERMEM;
-    data.data = handler->db_get_buf;
-    data.ulen = handler->db_get_buf_len;
+    data.data = value;
+    data.ulen = *value_len;
     data.flags = DB_DBT_USERMEM;
     uint32_t dbflags = 0;
     if (writelock) dbflags |= DB_RMW;
     if ((rc = db->get(db, NULL, &key_data, &data, dbflags)) == 0) {
-	*value = data.data;
 	*value_len = data.size;
 	return 0;
     }
@@ -294,17 +291,6 @@ static void raw_db_delete(const dbats_handler *handler, DB *db,
 
     if (db->del(db, NULL, &key_data, 0) != 0)
 	dbats_log(LOG_WARNING, "Error while deleting key");
-}
-*/
-
-/*
-static int raw_db_key_exists(const dbats_handler *handler, DB *db,
-    const void *key, size_t key_len)
-{
-    void *value;
-    size_t value_len;
-
-    return (raw_db_get(handler, db, key, key_len, &value, &value_len) == 0);
 }
 */
 
@@ -411,11 +397,8 @@ dbats_handler *dbats_open(const char *path,
 	    raw_db_set(handler, handler->dbMeta, #field, strlen(#field), \
 		&handler->cfg.field, sizeof(type)); \
 	} else { \
-	    void *value; \
-	    size_t value_len; \
-	    if (raw_db_get(handler, handler->dbMeta, #field, strlen(#field), &value, &value_len, !handler->cfg.readonly) == 0) { \
-		handler->cfg.field = *((type*)value); \
-	    } else { \
+	    size_t value_len = sizeof(handler->cfg.field); \
+	    if (raw_db_get(handler, handler->dbMeta, #field, strlen(#field), &handler->cfg.field, &value_len, !handler->cfg.readonly) != 0) { \
 		dbats_log(LOG_ERROR, "%s: missing config value: %s", path, #field); \
 		goto abort; \
 	    } \
@@ -465,12 +448,14 @@ dbats_handler *dbats_open(const char *path,
 	handler->agg[0].steps = 1;
 	handler->agg[0].period = handler->cfg.period;
     } else {
-	void *value;
 	size_t value_len;
 	char keybuf[32];
 	for (int agg_id = 0; agg_id < handler->cfg.num_aggs; agg_id++) {
 	    sprintf(keybuf, "agg%d", agg_id);
-	    if (raw_db_get(handler, handler->dbMeta, keybuf, strlen(keybuf), &value, &value_len, 0) != 0) {
+	    value_len = sizeof(handler->agg[agg_id]);
+	    if (raw_db_get(handler, handler->dbMeta, keybuf, strlen(keybuf),
+		&handler->agg[agg_id], &value_len, 0) != 0)
+	    {
 		dbats_log(LOG_ERROR, "missing aggregation config %d", agg_id);
 		return NULL;
 	    } else if (value_len != sizeof(dbats_agg)) {
@@ -478,7 +463,6 @@ dbats_handler *dbats_open(const char *path,
 		    value_len, sizeof(dbats_agg));
 		return NULL;
 	    }
-	    memcpy(&handler->agg[agg_id], value, value_len);
 	}
     }
 
@@ -664,18 +648,6 @@ static void dbats_flush_tslice(dbats_handler *handler, int agg_id)
 
 /*************************************************************************/
 
-static int set_key_info(const dbats_handler *handler, dbats_key_info_t *dkip)
-{
-    size_t rki_size = sizeof(raw_key_info_t);
-    raw_key_info_t *rki = emalloc(rki_size, dkip->key);
-    if (!rki) return -1;
-    rki->key_id = dkip->key_id;
-    raw_db_set(handler, handler->dbKeys, dkip->key, strlen(dkip->key), rki, rki_size);
-    free(rki);
-    dbats_log(LOG_INFO, "Write key #%u: %s", dkip->key_id, dkip->key);
-    return 0;
-}
-
 static int dbats_commit(dbats_handler *handler)
 {
     if (!handler->txn) return 0;
@@ -774,16 +746,14 @@ uint32_t dbats_normalize_time(const dbats_handler *handler, int agg_id, uint32_t
 static int load_isset(dbats_handler *handler, fragkey_t *dbkey, uint8_t **dest)
 {
     int rc;
-    void *value;
-    size_t value_len;
+    size_t value_len = vec_size(ENTRIES_PER_FRAG);
 
-    // XXX TODO: don't memcpy; get directly into is_set[frag_id]
     *dest = emalloc(vec_size(ENTRIES_PER_FRAG), "is_set");
     if (!*dest)
 	return -2; // error
 
     rc = raw_db_get(handler, handler->dbIsSet, dbkey, sizeof(*dbkey),
-	&value, &value_len, !handler->cfg.readonly);
+	*dest, &value_len, !handler->cfg.readonly);
     // assert(value_len == vec_size(ENTRIES_PER_FRAG));
     dbats_log(LOG_INFO, "load_frag t=%u, agg_id=%u, frag_id=%u: "
 	"raw_db_get(is_set) = %d", dbkey->time, dbkey->agg_id, dbkey->frag_id, rc);
@@ -791,7 +761,6 @@ static int load_isset(dbats_handler *handler, fragkey_t *dbkey, uint8_t **dest)
 	memset(*dest, 0, vec_size(ENTRIES_PER_FRAG));
 	return 0; // no match
     }
-    memcpy(*dest, value, value_len);
     return 0; // ok
 }
 
@@ -800,8 +769,6 @@ static int load_frag(dbats_handler *handler, uint32_t t, int agg_id,
 {
     // load fragment
     fragkey_t dbkey;
-    void *value;
-    size_t value_len;
     dbkey.time = t;
     dbkey.agg_id = agg_id;
     dbkey.frag_id = frag_id;
@@ -811,16 +778,24 @@ static int load_frag(dbats_handler *handler, uint32_t t, int agg_id,
     if (load_isset(handler, &dbkey, &handler->tslice[agg_id]->is_set[frag_id]) != 0)
 	return 0; // no match
 
+    if (handler->db_get_buf_len < fragsize(handler) + QLZ_OVERHEAD) {
+	if (handler->db_get_buf) free(handler->db_get_buf);
+	handler->db_get_buf_len = fragsize(handler) + QLZ_OVERHEAD;
+	handler->db_get_buf = emalloc(handler->db_get_buf_len, "get buffer");
+	if (!handler->db_get_buf) return -2;
+    }
+
+    size_t value_len = handler->db_get_buf_len;
     rc = raw_db_get(handler, handler->dbData, &dbkey, sizeof(dbkey),
-	&value, &value_len, !handler->cfg.readonly);
+	handler->db_get_buf, &value_len, !handler->cfg.readonly);
     dbats_log(LOG_INFO, "load_frag t=%u, agg_id=%u, frag_id=%u: "
 	"raw_db_get(frag) = %d", t, agg_id, frag_id, rc);
     if (rc != 0)
 	return 0; // no match
 
-    int compressed = *(uint8_t*)value;
+    int compressed = ((dbats_frag*)handler->db_get_buf)->compressed;
     size_t len = !compressed ? fragsize(handler) :
-	qlz_size_decompressed((void*)((uint8_t*)value+1));
+	qlz_size_decompressed((void*)(handler->db_get_buf+1));
     void *ptr = malloc(len);
     if (!ptr) {
 	dbats_log(LOG_ERROR, "Can't allocate %zu bytes for frag "
@@ -835,7 +810,7 @@ static int load_frag(dbats_handler *handler, uint32_t t, int agg_id,
 	    memset(handler->state_decompress, 0, sizeof(qlz_state_decompress));
 	    if (!handler->state_decompress) return -2;
 	}
-	len = qlz_decompress((void*)((uint8_t*)value+1), ptr, handler->state_decompress);
+	len = qlz_decompress((void*)(handler->db_get_buf+1), ptr, handler->state_decompress);
 	// assert(len == fragsize(handler));
 	dbats_log(LOG_INFO, "decompressed frag t=%u, agg_id=%u, frag_id=%u: "
 	    "%u -> %u (%.1f%%)",
@@ -844,7 +819,7 @@ static int load_frag(dbats_handler *handler, uint32_t t, int agg_id,
     } else {
 	// copy fragment
 	// XXX TODO: don't memcpy; get directly into ptr
-	memcpy(ptr, (uint8_t*)value, len);
+	memcpy(ptr, handler->db_get_buf, len);
 	dbats_log(LOG_INFO, "copied frag t=%u, agg_id=%u, frag_id=%u",
 	    t, agg_id, frag_id);
     }
@@ -982,12 +957,12 @@ int dbats_select_time(dbats_handler *handler, uint32_t time_value, uint32_t flag
 int dbats_get_key_id(dbats_handler *handler, const char *key,
     uint32_t *key_id_p, uint32_t flags)
 {
-    void *ptr;
     size_t keylen = strlen(key);
-    size_t len;
+    raw_key_info_t rki;
+    size_t len = sizeof(rki);
 
-    if (raw_db_get(handler, handler->dbKeys, key, keylen, &ptr, &len, 0) == 0) {
-	*key_id_p = ((raw_key_info_t*)ptr)->key_id;
+    if (raw_db_get(handler, handler->dbKeys, key, keylen, &rki, &len, 0) == 0) {
+	*key_id_p = rki.key_id;
 	// dbats_key_info_t *dkip = find_key(handler, key_id);
 	// assert(strcmp(dkip->key, key) == 0);
 	dbats_log(LOG_INFO, "Found key #%u: %s", *key_id_p, key);
@@ -1000,9 +975,9 @@ int dbats_get_key_id(dbats_handler *handler, const char *key,
 	*key_id_p = handler->cfg.num_keys++;
 	dbats_key_info_t *dkip = new_key(handler, *key_id_p, strdup(key));
 	if (!dkip) return -1;
-	if (set_key_info(handler, dkip) != 0)
-	    return -1;
-	dbats_log(LOG_INFO, "Assigned key #%d: %s", *key_id_p, key);
+	rki.key_id = dkip->key_id;
+	raw_db_set(handler, handler->dbKeys, dkip->key, strlen(dkip->key), &rki, sizeof(rki));
+	dbats_log(LOG_INFO, "Assigned key #%u: %s", *key_id_p, key);
 	raw_db_set(handler, handler->dbMeta,
 	    "num_keys", strlen("num_keys"),
 	    &handler->cfg.num_keys, sizeof(handler->cfg.num_keys));
