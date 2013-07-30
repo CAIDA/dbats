@@ -101,7 +101,7 @@ struct dbats_handler {
     dbats_key_info_t **key_info_block;
     uint8_t *db_get_buf;
     size_t db_get_buf_len;
-    DB_TXN *txn;                       // normal transaction
+    DB_TXN *txn;                       // current transaction
     DB_TXN *outer_txn;                 // used to emulate set_lk_exclusive()
     uint32_t active_start;             // first timestamp in active period
     uint32_t active_end;               // last timestamp in active period
@@ -123,43 +123,59 @@ static inline uint32_t max(uint32_t a, uint32_t b) { return a > b ? a : b; }
 static void *emalloc(size_t size, const char *msg)
 {
     void *ptr = malloc(size);
-    if (!ptr)
-	dbats_log(LOG_ERROR, "Can't allocate %zu bytes for %s", size, msg);
+    if (!ptr) {
+	int err = errno;
+	dbats_log(LOG_WARNING, "Can't allocate %zu bytes for %s", size, msg);
+	errno = err;
+    }
+    return ptr;
+}
+
+static void *ecalloc(size_t n, size_t size, const char *msg)
+{
+    void *ptr = calloc(n, size);
+    if (!ptr) {
+	int err = errno;
+	dbats_log(LOG_WARNING, "Can't allocate %zu * %zu bytes for %s", n, size, msg);
+	errno = err;
+    }
     return ptr;
 }
 #else
 # define emalloc(size, msg) xmalloc(size)
+# define ecalloc(n, size, msg) xmalloc(n, size)
 #endif
 
 /************************************************************************
  * DB wrappers
  ************************************************************************/
 
-static inline int begin_transaction(dbats_handler *handler, DB_TXN **txnp,
-    const char *name)
+static inline int begin_transaction(dbats_handler *handler, const char *name)
 {
     int rc;
-    if ((rc = handler->dbenv->txn_begin(handler->dbenv, NULL, txnp, 0)) != 0)
+    if ((rc = handler->dbenv->txn_begin(handler->dbenv, NULL, &handler->txn, 0)) != 0) {
 	dbats_log(LOG_ERROR, "begin transaction: %s", db_strerror(rc));
-    (*txnp)->set_name((*txnp), name);
-    return rc;
+	return rc;
+    }
+    handler->txn->set_name(handler->txn, name);
+    return 0;
 }
 
-static inline int commit_transaction(dbats_handler *handler, DB_TXN **txnp)
+static inline int commit_transaction(dbats_handler *handler)
 {
     int rc;
-    if ((rc = (*txnp)->commit(*txnp, 0)) != 0)
+    if ((rc = handler->txn->commit(handler->txn, 0)) != 0)
 	dbats_log(LOG_ERROR, "commit transaction: %s", db_strerror(rc));
-    *txnp = NULL;
+    handler->txn = NULL;
     return rc;
 }
 
-static inline int abort_transaction(dbats_handler *handler, DB_TXN **txnp)
+static inline int abort_transaction(dbats_handler *handler)
 {
     int rc;
-    if ((rc = (*txnp)->abort(*txnp)) != 0)
+    if ((rc = handler->txn->abort(handler->txn)) != 0)
 	dbats_log(LOG_ERROR, "abort transaction: %s", db_strerror(rc));
-    *txnp = NULL;
+    handler->txn = NULL;
     return rc;
 }
 
@@ -171,7 +187,7 @@ static int raw_db_open(dbats_handler *handler, DB **dbp, const char *envpath,
     if ((rc = db_create(dbp, handler->dbenv, 0)) != 0) {
 	dbats_log(LOG_ERROR, "Error creating DB handler %s/%s: %s",
 	    envpath, dbname, db_strerror(rc));
-	return -1;
+	return rc;
     }
 
     if (handler->cfg.exclusive) {
@@ -179,7 +195,7 @@ static int raw_db_open(dbats_handler *handler, DB **dbp, const char *envpath,
 	if ((rc = (*dbp)->set_lk_exclusive(*dbp, 1)) != 0) {
 	    dbats_log(LOG_ERROR, "Error obtaining exclusive lock on %s/%s: %s",
 		envpath, dbname, db_strerror(rc));
-	    return -1;
+	    return rc;
 	}
 #endif
     }
@@ -192,16 +208,17 @@ static int raw_db_open(dbats_handler *handler, DB **dbp, const char *envpath,
     if (flags & DBATS_READONLY)
 	dbflags |= DB_RDONLY;
 
-    rc = (*dbp)->open(*dbp, NULL, dbname, NULL, DB_BTREE, dbflags, mode);
+    rc = (*dbp)->open(*dbp, handler->txn, dbname, NULL, DB_BTREE, dbflags, mode);
     if (rc != 0) {
 	dbats_log(LOG_ERROR, "Error opening DB %s/%s (mode=%o): %s",
 	    envpath, dbname, mode, db_strerror(rc));
-	return -1;
+	(*dbp)->close(*dbp, 0);
+	return rc;
     }
     return 0;
 }
 
-static void raw_db_set(const dbats_handler *handler, DB *db,
+static int raw_db_set(const dbats_handler *handler, DB *db,
     const void *key, uint32_t key_len,
     const void *value, uint32_t value_len)
 {
@@ -216,10 +233,10 @@ static void raw_db_set(const dbats_handler *handler, DB *db,
 
     if (handler->cfg.readonly) {
 	const char *dbname;
-	db->get_dbname(db, NULL, &dbname);
+	db->get_dbname(db, &dbname, NULL);
 	dbats_log(LOG_WARNING, "Unable to set value in database \"%s\" "
 	    "(read-only mode)", dbname);
-	return;
+	return EPERM;
     }
 
     memset(&key_data, 0, sizeof(key_data));
@@ -231,8 +248,14 @@ static void raw_db_set(const dbats_handler *handler, DB *db,
     data.size = value_len;
     data.flags = DB_DBT_USERMEM;
 
-    if ((rc = db->put(db, NULL, &key_data, &data, 0)) != 0)
-	dbats_log(LOG_WARNING, "Error in raw_db_set: %s", db_strerror(rc));
+    if ((rc = db->put(db, handler->txn, &key_data, &data, 0)) != 0) {
+	const char *dbname;
+	db->get_dbname(db, &dbname, NULL);
+	dbats_log(LOG_WARNING, "Error in raw_db_set: %s: %s",
+	    dbname, db_strerror(rc));
+	return rc;
+    }
+    return 0;
 }
 
 #define QLZ_OVERHEAD 400
@@ -260,7 +283,7 @@ static int raw_db_get(dbats_handler *handler, DB* db,
     data.flags = DB_DBT_USERMEM;
     uint32_t dbflags = 0;
     if (writelock) dbflags |= DB_RMW;
-    if ((rc = db->get(db, NULL, &key_data, &data, dbflags)) == 0) {
+    if ((rc = db->get(db, handler->txn, &key_data, &data, dbflags)) == 0) {
 	*value_len = data.size;
 	return 0;
     }
@@ -270,7 +293,7 @@ static int raw_db_get(dbats_handler *handler, DB* db,
 	dbats_log(LOG_WARNING, "raw_db_get: had %" PRIu32 ", needed %" PRIu32,
 	    data.ulen, data.size);
     }
-    return -1;
+    return rc;
 }
 
 /*
@@ -281,7 +304,7 @@ static void raw_db_delete(const dbats_handler *handler, DB *db,
 
     if (handler->cfg.readonly) {
 	dbats_log(LOG_WARNING, "Unable to delete value (read-only mode)");
-	return;
+	return EPERM;
     }
 
     memset(&key_data, 0, sizeof(key_data));
@@ -311,11 +334,10 @@ static dbats_key_info_t *new_key(dbats_handler *handler,
     uint32_t offset = key_id % KEYINFO_PER_BLK;
 
     if (!handler->key_info_block[block]) {
-	size_t size = sizeof(dbats_key_info_t) * KEYINFO_PER_BLK;
-	handler->key_info_block[block] = emalloc(size, "key_info_block");
+	handler->key_info_block[block] =
+	    ecalloc(KEYINFO_PER_BLK, sizeof(dbats_key_info_t), "key_info_block");
 	if (!handler->key_info_block[block])
 	    return NULL;
-	memset(handler->key_info_block[block], 0, size);
     }
     dbats_key_info_t *dkip = &handler->key_info_block[block][offset];
     dkip->key = keycopy;
@@ -341,9 +363,8 @@ dbats_handler *dbats_open(const char *path,
 	DB_INIT_TXN | DB_THREAD | DB_REGISTER | DB_RECOVER | DB_CREATE;
     int is_new = 0;
 
-    dbats_handler *handler = emalloc(sizeof(dbats_handler), "handler");
+    dbats_handler *handler = ecalloc(1, sizeof(dbats_handler), "handler");
     if (!handler) return NULL;
-    memset(handler, 0, sizeof(dbats_handler));
     handler->cfg.readonly = !!(flags & DBATS_READONLY);
     handler->cfg.compress = !(flags & DBATS_UNCOMPRESSED);
     handler->cfg.exclusive = !!(flags & DBATS_EXCLUSIVE);
@@ -354,6 +375,12 @@ dbats_handler *dbats_open(const char *path,
 	    db_strerror(rc));
 	return NULL;
     }
+
+    handler->dbenv->set_errpfx(handler->dbenv, path);
+    handler->dbenv->set_errfile(handler->dbenv, stderr);
+
+    handler->dbenv->set_verbose(handler->dbenv, DB_VERB_FILEOPS | DB_VERB_RECOVERY | DB_VERB_REGISTER, 1);
+    handler->dbenv->set_msgfile(handler->dbenv, stderr);
 
     if (flags & DBATS_CREATE) {
 	if (handler->cfg.readonly) {
@@ -375,12 +402,22 @@ dbats_handler *dbats_open(const char *path,
 	}
     }
 
+    if ((rc = handler->dbenv->set_lk_max_locks(handler->dbenv, 20000)) != 0) {
+	dbats_log(LOG_ERROR, "Error in set_lk_max_locks: %s: %s", path, db_strerror(rc));
+	return NULL;
+    }
+
+    if ((rc = handler->dbenv->set_lk_max_objects(handler->dbenv, 20000)) != 0) {
+	dbats_log(LOG_ERROR, "Error in set_lk_max_objects: %s: %s", path, db_strerror(rc));
+	return NULL;
+    }
+
     if ((rc = handler->dbenv->open(handler->dbenv, path, dbflags, dbmode)) != 0) {
 	dbats_log(LOG_ERROR, "Error opening DB %s: %s", path, db_strerror(rc));
 	return NULL;
     }
 
-    if (begin_transaction(handler, &handler->outer_txn, "outer txn") != 0)
+    if (begin_transaction(handler, "outer txn") != 0)
 	return NULL;
 
     if (raw_db_open(handler, &handler->dbMeta,  path, "meta",   flags, dbmode) != 0) goto abort;
@@ -390,15 +427,19 @@ dbats_handler *dbats_open(const char *path,
 
     handler->cfg.entry_size = sizeof(dbats_value); // for db_get_buf_len
 
-#define initcfg(type, field, defaultval) \
+#define initcfg(field, defaultval) \
     do { \
+	size_t value_len = sizeof(handler->cfg.field); \
 	if (is_new) { \
 	    handler->cfg.field = (defaultval); \
-	    raw_db_set(handler, handler->dbMeta, #field, strlen(#field), \
-		&handler->cfg.field, sizeof(type)); \
+	    if (raw_db_set(handler, handler->dbMeta, #field, strlen(#field), \
+		&handler->cfg.field, value_len) != 0) \
+		    goto abort; \
 	} else { \
-	    size_t value_len = sizeof(handler->cfg.field); \
-	    if (raw_db_get(handler, handler->dbMeta, #field, strlen(#field), &handler->cfg.field, &value_len, !handler->cfg.readonly) != 0) { \
+	    int writelock = !handler->cfg.readonly || handler->cfg.exclusive; \
+	    if (raw_db_get(handler, handler->dbMeta, #field, strlen(#field), \
+		&handler->cfg.field, &value_len, writelock) != 0) \
+	    { \
 		dbats_log(LOG_ERROR, "%s: missing config value: %s", path, #field); \
 		goto abort; \
 	    } \
@@ -406,16 +447,18 @@ dbats_handler *dbats_open(const char *path,
 	dbats_log(LOG_INFO, "cfg: %s = %u", #field, handler->cfg.field); \
     } while (0)
 
-    initcfg(uint32_t, version,           DBATS_DB_VERSION);
-    initcfg(uint32_t, num_keys,          0);
-    initcfg(uint32_t, period,            period);
-    initcfg(uint16_t, values_per_entry,  values_per_entry);
-    initcfg(uint16_t, num_aggs,          1);
+    initcfg(version,           DBATS_DB_VERSION);
+    initcfg(num_keys,          0);
+    initcfg(period,            period);
+    initcfg(values_per_entry,  values_per_entry);
+    initcfg(num_aggs,          1);
 
     if (!HAVE_SET_LK_EXCLUSIVE && handler->cfg.exclusive) {
 	// emulate exclusive lock by leaving this transaction open
+	handler->outer_txn = handler->txn;
+	handler->txn = NULL;
     } else {
-	if (commit_transaction(handler, &handler->outer_txn) != 0) goto abort;
+	if (commit_transaction(handler) != 0) goto abort;
     }
 
     if (handler->cfg.version > DBATS_DB_VERSION) {
@@ -434,10 +477,8 @@ dbats_handler *dbats_open(const char *path,
     if (!handler->agg) return NULL;
     handler->tslice = emalloc(MAX_NUM_AGGS * sizeof(dbats_tslice*), "handler->tslice");
     if (!handler->tslice) return NULL;
-    size_t len = MAX_NUM_KEYINFOBLK * sizeof(dbats_key_info_t*);
-    handler->key_info_block = emalloc(len, "handler->key_info_block");
+    handler->key_info_block = ecalloc(MAX_NUM_KEYINFOBLK, sizeof(dbats_key_info_t*), "handler->key_info_block");
     if (!handler->key_info_block) return NULL;
-    memset(handler->key_info_block, 0, len);
 
     handler->cfg.entry_size = handler->cfg.values_per_entry * sizeof(dbats_value);
 
@@ -468,20 +509,18 @@ dbats_handler *dbats_open(const char *path,
 
     // allocate tslice for each aggregate
     for (int agg_id = 0; agg_id < handler->cfg.num_aggs; agg_id++) {
-	if (!(handler->tslice[agg_id] = emalloc(sizeof(dbats_tslice), "tslice")))
+	if (!(handler->tslice[agg_id] = ecalloc(1, sizeof(dbats_tslice), "tslice")))
 	    return NULL;
-	memset(handler->tslice[agg_id], 0, sizeof(dbats_tslice));
     }
 
     if (handler->cfg.compress && !handler->cfg.readonly) {
-	handler->state_compress = emalloc(sizeof(qlz_state_compress), "qlz_state_compress");
-	memset(handler->state_compress, 0, sizeof(qlz_state_compress));
+	handler->state_compress = ecalloc(1, sizeof(qlz_state_compress), "qlz_state_compress");
 	if (!handler->state_compress) return NULL;
     }
 
     // load key_info for every key
     DBC *cursor;
-    if ((rc = handler->dbKeys->cursor(handler->dbKeys, NULL, &cursor, 0)) != 0) {
+    if ((rc = handler->dbKeys->cursor(handler->dbKeys, handler->txn, &cursor, 0)) != 0) {
 	dbats_log(LOG_ERROR, "Error in cursor: %s", db_strerror(rc));
 	return NULL;
     }
@@ -515,12 +554,14 @@ dbats_handler *dbats_open(const char *path,
     return handler;
 
 abort:
-    abort_transaction(handler, &handler->outer_txn);
+    abort_transaction(handler);
     return NULL;
 }
 
 int dbats_aggregate(dbats_handler *handler, int func, int steps)
 {
+    int rc;
+
     if (handler->tslice[0]->time > 0) {
 	// XXX fix this?
 	dbats_log(LOG_ERROR,
@@ -530,14 +571,13 @@ int dbats_aggregate(dbats_handler *handler, int func, int steps)
 
     if (handler->cfg.num_aggs >= MAX_NUM_AGGS) {
 	dbats_log(LOG_ERROR, "Too many aggregations (%d)", MAX_NUM_AGGS);
-	return -1;
+	return ENOMEM;
     }
 
     int agg_id = handler->cfg.num_aggs++;
 
-    if (!(handler->tslice[agg_id] = emalloc(sizeof(dbats_tslice), "tslice")))
-	return -1;
-    memset(handler->tslice[agg_id], 0, sizeof(dbats_tslice));
+    if (!(handler->tslice[agg_id] = ecalloc(1, sizeof(dbats_tslice), "tslice")))
+	return errno ? errno : ENOMEM;
 
     memset(&handler->agg[agg_id], 0, sizeof(dbats_agg));
     handler->agg[agg_id].func = func;
@@ -546,10 +586,12 @@ int dbats_aggregate(dbats_handler *handler, int func, int steps)
 
     char keybuf[32];
     sprintf(keybuf, "agg%d", agg_id);
-    raw_db_set(handler, handler->dbMeta, keybuf, strlen(keybuf),
+    rc = raw_db_set(handler, handler->dbMeta, keybuf, strlen(keybuf),
 	&handler->agg[agg_id], sizeof(dbats_agg));
-    raw_db_set(handler, handler->dbMeta, "num_aggs", strlen("num_aggs"),
+    if (rc != 0) return rc;
+    rc = raw_db_set(handler, handler->dbMeta, "num_aggs", strlen("num_aggs"),
 	&handler->cfg.num_aggs, sizeof(handler->cfg.num_aggs));
+    if (rc != 0) return rc;
 
     return 0;
 }
@@ -558,12 +600,13 @@ int dbats_aggregate(dbats_handler *handler, int func, int steps)
 
 // Writes tslice to db (unless db is readonly).
 // Also cleans up in-memory tslice, even if db is readonly.
-static void dbats_flush_tslice(dbats_handler *handler, int agg_id)
+static int dbats_flush_tslice(dbats_handler *handler, int agg_id)
 {
     dbats_log(LOG_INFO, "Flush t=%u agg_id=%d", handler->tslice[agg_id]->time, agg_id);
     size_t frag_size = fragsize(handler);
     fragkey_t dbkey;
     char *buf = NULL;
+    int rc;
 
     // Write fragments to the DB
     dbkey.time = handler->tslice[agg_id]->time;
@@ -579,7 +622,7 @@ static void dbats_flush_tslice(dbats_handler *handler, int agg_id)
 	    if (handler->cfg.compress) {
 		if (!buf) {
 		    buf = (char*)emalloc(1 + frag_size + QLZ_OVERHEAD, "compression buffer");
-		    if (!buf) return;
+		    if (!buf) return errno ? errno : ENOMEM;
 		}
 		buf[0] = 1; // compression flag
 		handler->tslice[agg_id]->frag[f]->compressed = 1;
@@ -587,24 +630,24 @@ static void dbats_flush_tslice(dbats_handler *handler, int agg_id)
 		    buf+1, frag_size, handler->state_compress);
 		dbats_log(LOG_INFO, "Frag %d compression: %zu -> %zu (%.1f %%)",
 		    f, frag_size, compressed_len, compressed_len*100.0/frag_size);
-		raw_db_set(handler, handler->dbData, &dbkey, sizeof(dbkey),
+		rc = raw_db_set(handler, handler->dbData, &dbkey, sizeof(dbkey),
 		    buf, compressed_len + 1);
-		// XXX error handling
+		if (rc != 0) goto abort;
 		handler->tslice[agg_id]->frag_changed[f] = 0;
 	    } else {
 		if (!buf)
 		    buf = (char*)emalloc(frag_size + 1, "write buffer");
 		handler->tslice[agg_id]->frag[f]->compressed = 0;
 		dbats_log(LOG_INFO, "Frag %d write: %zu", f, frag_size);
-		raw_db_set(handler, handler->dbData, &dbkey, sizeof(dbkey),
+		rc = raw_db_set(handler, handler->dbData, &dbkey, sizeof(dbkey),
 		    handler->tslice[agg_id]->frag[f], frag_size);
-		// XXX error handling
+		if (rc != 0) goto abort;
 		handler->tslice[agg_id]->frag_changed[f] = 0;
 	    }
 
-	    raw_db_set(handler, handler->dbIsSet, &dbkey, sizeof(dbkey),
+	    rc = raw_db_set(handler, handler->dbIsSet, &dbkey, sizeof(dbkey),
 		handler->tslice[agg_id]->is_set[f], vec_size(ENTRIES_PER_FRAG));
-	    // XXX error handling
+	    if (rc != 0) goto abort;
 	}
 
 	if (!handler->cfg.exclusive || !handler->is_open) {
@@ -634,8 +677,9 @@ static void dbats_flush_tslice(dbats_handler *handler, int agg_id)
 	if (changed) {
 	    char keybuf[32];
 	    sprintf(keybuf, "agg%d", agg_id);
-	    raw_db_set(handler, handler->dbMeta, keybuf, strlen(keybuf),
+	    rc = raw_db_set(handler, handler->dbMeta, keybuf, strlen(keybuf),
 		&handler->agg[agg_id], sizeof(dbats_agg));
+	    if (rc != 0) goto abort;
 	}
     }
 
@@ -644,6 +688,11 @@ static void dbats_flush_tslice(dbats_handler *handler, int agg_id)
 	memset(handler->tslice[agg_id], 0, sizeof(dbats_tslice));
     }
     if (buf) free(buf);
+    return 0;
+
+abort:
+    abort_transaction(handler);
+    return rc;
 }
 
 /*************************************************************************/
@@ -674,10 +723,14 @@ static int dbats_commit(dbats_handler *handler)
     }
 
     for (int agg_id = 0; agg_id < handler->cfg.num_aggs; agg_id++) {
-	dbats_flush_tslice(handler, agg_id);
+	int rc = dbats_flush_tslice(handler, agg_id);
+	if (rc != 0) {
+	    abort_transaction(handler);
+	    return rc;
+	}
     }
 
-    return commit_transaction(handler, &handler->txn);
+    return commit_transaction(handler);
 }
 
 /*************************************************************************/
@@ -692,7 +745,9 @@ void dbats_close(dbats_handler *handler)
 
     if (!HAVE_SET_LK_EXCLUSIVE && handler->cfg.exclusive) {
 	// commit the outer transaction used to emulate exclusive locking
-	commit_transaction(handler, &handler->outer_txn);
+	handler->txn = handler->outer_txn;
+	handler->outer_txn = NULL;
+	commit_transaction(handler);
     }
 
     for (int agg_id = 0; agg_id < handler->cfg.num_aggs; agg_id++) {
@@ -750,7 +805,7 @@ static int load_isset(dbats_handler *handler, fragkey_t *dbkey, uint8_t **dest)
 
     *dest = emalloc(vec_size(ENTRIES_PER_FRAG), "is_set");
     if (!*dest)
-	return -2; // error
+	return errno ? errno : ENOMEM; // error
 
     rc = raw_db_get(handler, handler->dbIsSet, dbkey, sizeof(*dbkey),
 	*dest, &value_len, !handler->cfg.readonly);
@@ -759,7 +814,9 @@ static int load_isset(dbats_handler *handler, fragkey_t *dbkey, uint8_t **dest)
 	"raw_db_get(is_set) = %d", dbkey->time, dbkey->agg_id, dbkey->frag_id, rc);
     if (rc != 0) {
 	memset(*dest, 0, vec_size(ENTRIES_PER_FRAG));
-	return 0; // no match
+	if (rc == DB_NOTFOUND) return 0; // no match
+	abort_transaction(handler);
+	return rc; // error
     }
     return 0; // ok
 }
@@ -782,7 +839,7 @@ static int load_frag(dbats_handler *handler, uint32_t t, int agg_id,
 	if (handler->db_get_buf) free(handler->db_get_buf);
 	handler->db_get_buf_len = fragsize(handler) + QLZ_OVERHEAD;
 	handler->db_get_buf = emalloc(handler->db_get_buf_len, "get buffer");
-	if (!handler->db_get_buf) return -2;
+	if (!handler->db_get_buf) return errno ? errno : ENOMEM;
     }
 
     size_t value_len = handler->db_get_buf_len;
@@ -790,25 +847,27 @@ static int load_frag(dbats_handler *handler, uint32_t t, int agg_id,
 	handler->db_get_buf, &value_len, !handler->cfg.readonly);
     dbats_log(LOG_INFO, "load_frag t=%u, agg_id=%u, frag_id=%u: "
 	"raw_db_get(frag) = %d", t, agg_id, frag_id, rc);
-    if (rc != 0)
-	return 0; // no match
+    if (rc != 0) {
+	if (rc == DB_NOTFOUND) return 0; // no match
+	return rc; // error
+    }
 
     int compressed = ((dbats_frag*)handler->db_get_buf)->compressed;
     size_t len = !compressed ? fragsize(handler) :
 	qlz_size_decompressed((void*)(handler->db_get_buf+1));
     void *ptr = malloc(len);
     if (!ptr) {
+	rc = errno;
 	dbats_log(LOG_ERROR, "Can't allocate %zu bytes for frag "
 	    "t=%u, agg_id=%u, frag_id=%u", len, t, agg_id, frag_id);
-	return -2; // error
+	return rc; // error
     }
 
     if (compressed) {
 	// decompress fragment
 	if (!handler->state_decompress) {
-	    handler->state_decompress = emalloc(sizeof(qlz_state_decompress), "qlz_state_decompress");
-	    memset(handler->state_decompress, 0, sizeof(qlz_state_decompress));
-	    if (!handler->state_decompress) return -2;
+	    handler->state_decompress = ecalloc(1, sizeof(qlz_state_decompress), "qlz_state_decompress");
+	    if (!handler->state_decompress) return errno ? errno : ENOMEM;
 	}
 	len = qlz_decompress((void*)(handler->db_get_buf+1), ptr, handler->state_decompress);
 	// assert(len == fragsize(handler));
@@ -834,15 +893,16 @@ static int load_frag(dbats_handler *handler, uint32_t t, int agg_id,
 }
 
 // Instantiate handler->is_set[*][frag_id]
-static void instantiate_isset_frags(dbats_handler *handler, int frag_id)
+static int instantiate_isset_frags(dbats_handler *handler, int frag_id)
 {
     if (handler->cfg.readonly)
-	return;
+	return 0; // handler->is_set is never needed in readonly mode
 
     int tn = (handler->active_end - handler->active_start) / handler->agg[0].period + 1;
 
     if (!handler->is_set) {
-	handler->is_set = calloc(tn, sizeof(uint8_t**)); // XXX error check
+	handler->is_set = ecalloc(tn, sizeof(uint8_t**), "handler->is_set");
+	if (!handler->is_set) return errno ? errno : ENOMEM;
     }
 
     uint32_t t = handler->active_start;
@@ -850,8 +910,10 @@ static void instantiate_isset_frags(dbats_handler *handler, int frag_id)
 	fragkey_t dbkey;
 	dbkey.time = t;
 	dbkey.agg_id = 0;
-	if (!handler->is_set[ti])
-	    handler->is_set[ti] = calloc(MAX_NUM_FRAGS, sizeof(uint8_t*)); // XXX error check
+	if (!handler->is_set[ti]) {
+	    handler->is_set[ti] = ecalloc(MAX_NUM_FRAGS, sizeof(uint8_t*), "handler->is_set[ti]");
+	    if (!handler->is_set[ti]) return errno ? errno : ENOMEM;
+	}
 
 	if (t == handler->tslice[0]->time && handler->tslice[0]->is_set[frag_id]) {
 	    assert(!handler->is_set[ti][frag_id]);
@@ -866,6 +928,7 @@ static void instantiate_isset_frags(dbats_handler *handler, int frag_id)
 	    }
 	}
     }
+    return 0;
 }
 
 int dbats_select_time(dbats_handler *handler, uint32_t time_value, uint32_t flags)
@@ -877,7 +940,7 @@ int dbats_select_time(dbats_handler *handler, uint32_t time_value, uint32_t flag
     if ((rc = dbats_commit(handler)) != 0)
 	return rc;
 
-    if ((rc = begin_transaction(handler, &handler->txn, "inner txn")) != 0)
+    if ((rc = begin_transaction(handler, "select time")) != 0)
 	return rc;
 
     handler->preload = !!(flags & DBATS_PRELOAD);
@@ -960,34 +1023,48 @@ int dbats_get_key_id(dbats_handler *handler, const char *key,
     size_t keylen = strlen(key);
     raw_key_info_t rki;
     size_t len = sizeof(rki);
+    int rc;
 
-    if (raw_db_get(handler, handler->dbKeys, key, keylen, &rki, &len, 0) == 0) {
+    rc = raw_db_get(handler, handler->dbKeys, key, keylen, &rki, &len, 0);
+    if (rc == 0) {
+	// found it
 	*key_id_p = rki.key_id;
-	// dbats_key_info_t *dkip = find_key(handler, key_id);
-	// assert(strcmp(dkip->key, key) == 0);
 	dbats_log(LOG_INFO, "Found key #%u: %s", *key_id_p, key);
+	return 0;
+
+    } else if (rc != DB_NOTFOUND) {
+	// error
+	goto abort;
 
     } else if (!(flags & DBATS_CREATE)) {
+	// didn't find, and can't create
 	dbats_log(LOG_INFO, "Key not found: %s", key);
-	return -1;
+	return rc;
 
-    } else if (handler->cfg.num_keys < MAX_NUM_KEYINFOBLK * KEYINFO_PER_BLK) {
-	*key_id_p = handler->cfg.num_keys++;
-	dbats_key_info_t *dkip = new_key(handler, *key_id_p, strdup(key));
-	if (!dkip) return -1;
-	rki.key_id = dkip->key_id;
-	raw_db_set(handler, handler->dbKeys, dkip->key, strlen(dkip->key), &rki, sizeof(rki));
-	dbats_log(LOG_INFO, "Assigned key #%u: %s", *key_id_p, key);
-	raw_db_set(handler, handler->dbMeta,
-	    "num_keys", strlen("num_keys"),
-	    &handler->cfg.num_keys, sizeof(handler->cfg.num_keys));
+    } else if (handler->cfg.num_keys >= MAX_NUM_KEYINFOBLK * KEYINFO_PER_BLK) {
+	// out of space
+	dbats_log(LOG_ERROR, "Out of space for key %s", key);
+	return rc;
 
     } else {
-	dbats_log(LOG_ERROR, "Out of space for key %s", key);
-	return -2;
+	// create
+	*key_id_p = handler->cfg.num_keys++;
+	dbats_key_info_t *dkip = new_key(handler, *key_id_p, strdup(key));
+	if (!dkip) return errno ? errno : ENOMEM;
+	rki.key_id = dkip->key_id;
+	rc = raw_db_set(handler, handler->dbKeys, dkip->key, strlen(dkip->key), &rki, sizeof(rki));
+	if (rc != 0) goto abort;
+	dbats_log(LOG_INFO, "Assigned key #%u: %s", *key_id_p, key);
+	rc = raw_db_set(handler, handler->dbMeta,
+	    "num_keys", strlen("num_keys"),
+	    &handler->cfg.num_keys, sizeof(handler->cfg.num_keys));
+	if (rc != 0) goto abort;
+	return 0;
     }
 
-    return 0;
+abort:
+    abort_transaction(handler);
+    return rc;
 }
 
 const char *dbats_get_key_name(dbats_handler *handler, uint32_t key_id)
@@ -1008,24 +1085,22 @@ static int instantiate_frag_func(dbats_handler *handler, int agg_id, uint32_t fr
 	int rc = load_frag(handler, tslice->time, agg_id, frag_id);
 	if (rc != 0) // error
 	    return rc;
-	if (tslice->frag[frag_id]) {// found it
+	if (tslice->frag[frag_id]) { // found it
 	    if (agg_id == 0)
-		instantiate_isset_frags(handler, frag_id);
-	    return 0;
+		rc = instantiate_isset_frags(handler, frag_id);
+	    return rc;
 	}
 	if (handler->cfg.readonly) // didn't find it and can't create it
-	    return 1; // fragment not found
+	    return DB_NOTFOUND; // fragment not found
     }
 
     // Allocate a new fragment.
-    dbats_log(LOG_NORMAL, "grow tslice for time %u, agg_id %d, frag_id %u",
+    dbats_log(LOG_INFO, "grow tslice for time %u, agg_id %d, frag_id %u",
 	tslice->time, agg_id, frag_id);
 
     size_t len = fragsize(handler);
-    if (!(tslice->frag[frag_id] = calloc(1, len))) {
-	dbats_log(LOG_WARNING, "Can't allocate %u bytes for frag at "
-	    "time=%u agg_id=%d frag_id=%u", len, tslice->time, agg_id, frag_id);
-	return -2;
+    if (!(tslice->frag[frag_id] = ecalloc(1, len, "tslice->frag[frag_id]"))) {
+	return errno ? errno : ENOMEM;
     }
 
     assert(tslice->is_set[frag_id]);
@@ -1059,9 +1134,12 @@ int dbats_set(dbats_handler *handler, uint32_t key_id, const dbats_value *valuep
 
     dbats_key_info_t *dkip = find_key(handler, key_id);
 
-    if (!handler->is_open || handler->cfg.readonly)
+    if (!handler->is_open || handler->cfg.readonly) {
+	dbats_log(LOG_ERROR, "is_open=%d, readonly=%d", handler->is_open, handler->cfg.readonly);
 	return -1;
+    }
     if ((rc = instantiate_frag(handler, 0, dkip->frag_id)) != 0) {
+	abort_transaction(handler);
 	handler->cfg.readonly = 1;
 	return rc;
     }
@@ -1072,6 +1150,7 @@ int dbats_set(dbats_handler *handler, uint32_t key_id, const dbats_value *valuep
     // For each agg_id, aggregate *valuep into tslice[agg_id].
     for (int agg_id = 1; agg_id < handler->cfg.num_aggs; agg_id++) {
 	if ((rc = instantiate_frag(handler, agg_id, dkip->frag_id)) != 0) {
+	    abort_transaction(handler);
 	    handler->cfg.readonly = 1;
 	    return rc;
 	}
@@ -1112,7 +1191,7 @@ int dbats_set(dbats_handler *handler, uint32_t key_id, const dbats_value *valuep
 		    changed = 1;
 		} else if (was_set && oldvaluep[i] == aggval[i]) {
 		    // XXX TODO: Find the min value among all the steps.
-		    failed = 1;
+		    failed = ENOSYS; // XXX
 		}
 	    }
 	    break;
@@ -1125,7 +1204,7 @@ int dbats_set(dbats_handler *handler, uint32_t key_id, const dbats_value *valuep
 		    changed = 1;
 		} else if (was_set && oldvaluep[i] == aggval[i]) {
 		    // XXX TODO: Find the max value among all the steps.
-		    failed = 1;
+		    failed = ENOSYS; // XXX
 		}
 	    }
 	    break;
@@ -1211,7 +1290,7 @@ int dbats_set(dbats_handler *handler, uint32_t key_id, const dbats_value *valuep
 	    handler->tslice[agg_id]->frag_changed[dkip->frag_id] = 1;
 	} else if (failed) {
 	    handler->cfg.readonly = 1;
-	    return -1;
+	    return failed;
 	}
     }
 
@@ -1260,14 +1339,14 @@ int dbats_get(dbats_handler *handler, uint32_t key_id,
 	    dbats_log(LOG_WARNING, "Value unset (v): %u %d %s",
 		tslice->time, agg_id, dkip->key);
 	    *valuepp = NULL;
-	    return 1;
+	    return 666;
 	}
 	if (handler->agg[agg_id].func == DBATS_AGG_AVG) {
 	    double *dval = (double*)valueptr(handler, agg_id, dkip->frag_id, dkip->offset);
 	    static dbats_value *avg_buf = NULL;
 	    if (!avg_buf) {
 		avg_buf = emalloc(handler->cfg.entry_size * handler->cfg.values_per_entry, "avg_buf");
-		if (!avg_buf) return -2;
+		if (!avg_buf) return errno ? errno : ENOMEM;
 	    }
 	    for (int i = 0; i < handler->cfg.values_per_entry; i++)
 		avg_buf[i] = dval[i] + 0.5;
@@ -1279,7 +1358,7 @@ int dbats_get(dbats_handler *handler, uint32_t key_id,
 	    dkip->offset, handler->cfg.entry_size);
 
     } else {
-	if (rc == 1)
+	if (rc == DB_NOTFOUND)
 	    dbats_log(LOG_WARNING, "Value unset (f): %u %d %s",
 		tslice->time, agg_id, dkip->key);
 	*valuepp = NULL;
@@ -1320,7 +1399,7 @@ int dbats_get_double(dbats_handler *handler, uint32_t key_id,
 	    dkip->offset, handler->cfg.entry_size);
 
     } else {
-	if (rc == 1)
+	if (rc == DB_NOTFOUND)
 	    dbats_log(LOG_WARNING, "Value unset (f): %u %d %s",
 		tslice->time, agg_id, dkip->key);
 	*valuepp = NULL;
@@ -1348,7 +1427,7 @@ int dbats_walk_keyname_start(dbats_handler *handler)
 {
     int rc;
 
-    if ((rc = handler->dbKeys->cursor(handler->dbKeys, NULL, &handler->keyname_cursor, 0)) != 0) {
+    if ((rc = handler->dbKeys->cursor(handler->dbKeys, handler->txn, &handler->keyname_cursor, 0)) != 0) {
 	dbats_log(LOG_ERROR, "Error in dbats_walk_keyname_start: %s", db_strerror(rc));
 	return -1;
     }
