@@ -15,7 +15,6 @@
 #include <limits.h>
 #include <sys/types.h>
 #include <db.h>
-#undef NDEBUG
 #include <assert.h>
 
 #include "dbats.h"
@@ -152,8 +151,9 @@ static void *ecalloc(size_t n, size_t size, const char *msg)
 
 static inline int begin_transaction(dbats_handler *handler, const char *name)
 {
+    if (handler->cfg.no_txn) return 0;
     int rc;
-    if ((rc = handler->dbenv->txn_begin(handler->dbenv, NULL, &handler->txn, 0)) != 0) {
+    if ((rc = handler->dbenv->txn_begin(handler->dbenv, handler->outer_txn, &handler->txn, DB_TXN_BULK)) != 0) {
 	dbats_log(LOG_ERROR, "begin transaction: %s", db_strerror(rc));
 	return rc;
     }
@@ -163,6 +163,7 @@ static inline int begin_transaction(dbats_handler *handler, const char *name)
 
 static inline int commit_transaction(dbats_handler *handler)
 {
+    if (handler->cfg.no_txn) return 0;
     int rc;
     if ((rc = handler->txn->commit(handler->txn, 0)) != 0)
 	dbats_log(LOG_ERROR, "commit transaction: %s", db_strerror(rc));
@@ -172,6 +173,7 @@ static inline int commit_transaction(dbats_handler *handler)
 
 static inline int abort_transaction(dbats_handler *handler)
 {
+    if (handler->cfg.no_txn) return 0;
     int rc;
     if ((rc = handler->txn->abort(handler->txn)) != 0)
 	dbats_log(LOG_ERROR, "abort transaction: %s", db_strerror(rc));
@@ -368,6 +370,7 @@ dbats_handler *dbats_open(const char *path,
     handler->cfg.readonly = !!(flags & DBATS_READONLY);
     handler->cfg.compress = !(flags & DBATS_UNCOMPRESSED);
     handler->cfg.exclusive = !!(flags & DBATS_EXCLUSIVE);
+    handler->cfg.no_txn = !!(flags & DBATS_NO_TXN);
     handler->cfg.values_per_entry = 1;
 
     if ((rc = db_env_create(&handler->dbenv, 0)) != 0) {
@@ -699,7 +702,7 @@ abort:
 
 static int dbats_commit(dbats_handler *handler)
 {
-    if (!handler->txn) return 0;
+    if (!handler->cfg.no_txn && !handler->txn) return 0;
 
     dbats_log(LOG_INFO, "commit %u", handler->tslice[0]->time);
 
