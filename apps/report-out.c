@@ -27,22 +27,25 @@ static void help(void) {
 /* ***************************************************************** */
 
 #define MAX_KEYS 262144
-static uint32_t key_id[MAX_KEYS];
+struct keyinfo {
+    uint32_t keyid;
+    char key[DBATS_KEYLEN];
+};
+static struct keyinfo keys[MAX_KEYS];
 static int n_keys = 0;
 
 static void load_keys(dbats_handler *handler, const char *path)
 {
-    char line[128];
     FILE *keyfile = fopen(path, "r");
     if (!keyfile) {
 	fprintf(stderr, "%s: %s\n", path, strerror(errno));
 	exit(-1);
     }
-    while (fgets(line, sizeof(line), keyfile)) {
-	char *p = strchr(line, '\n');
+    while (fgets(keys[n_keys].key, sizeof(keys[n_keys].key), keyfile)) {
+	char *p = strchr(keys[n_keys].key, '\n');
 	if (p) *p = 0;
-	if (dbats_get_key_id(handler, line, &key_id[n_keys], 0) != 0) {
-	    fprintf(stderr, "no such key: %s\n", line);
+	if (dbats_get_key_id(handler, keys[n_keys].key, &keys[n_keys].keyid, 0) != 0) {
+	    fprintf(stderr, "no such key: %s\n", keys[n_keys].key);
 	    exit(-1);
 	}
 	n_keys++;
@@ -56,7 +59,7 @@ static void load_keys(dbats_handler *handler, const char *path)
 static void get_keys(dbats_handler *handler)
 {
     dbats_walk_keyid_start(handler);
-    while (dbats_walk_keyid_next(handler, &key_id[n_keys]) == 0) {
+    while (dbats_walk_keyid_next(handler, &keys[n_keys].keyid, keys[n_keys].key) == 0) {
 	n_keys++;
     }
     dbats_walk_keyid_end(handler);
@@ -181,15 +184,14 @@ int main(int argc, char *argv[]) {
 	    if (agg->func == DBATS_AGG_AVG) {
 		const double *values;
 		for (int k = 0; k < n_keys; k++) {
-		    const char *key = dbats_get_key_name(handler, key_id[k]);
-		    rc = dbats_get_double(handler, key_id[k], &values, agg_id);
+		    rc = dbats_get_double(handler, keys[k].keyid, &values, agg_id);
 		    if (rc != 0) {
-			fprintf(stdout, "error in dbats_get(%s)\n", key);
+			fprintf(stderr, "error in dbats_get(%s): rc=%d\n", keys[k].key, rc);
 			break;
 		    }
 		    switch (outtype) {
 		    case OT_TEXT:
-			fprintf(out, "%s ", key);
+			fprintf(out, "%s ", keys[k].key);
 			for (int j = 0; j < cfg->values_per_entry; j++) {
 			    fprintf(out, "%.3f ", values ? values[j] : 0);
 			}
@@ -204,15 +206,14 @@ int main(int argc, char *argv[]) {
 	    } else {
 		const dbats_value *values;
 		for (int k = 0; k < n_keys; k++) {
-		    const char *key = dbats_get_key_name(handler, key_id[k]);
-		    rc = dbats_get(handler, key_id[k], &values, agg_id);
+		    rc = dbats_get(handler, keys[k].keyid, &values, agg_id);
 		    if (rc != 0) {
-			fprintf(stdout, "error in dbats_get(%s)\n", key);
+			fprintf(stderr, "error in dbats_get(%s): rc=%d\n", keys[k].key, rc);
 			break;
 		    }
 		    switch (outtype) {
 		    case OT_TEXT:
-			fprintf(out, "%s ", key);
+			fprintf(out, "%s ", keys[k].key);
 			for (int j = 0; j < cfg->values_per_entry; j++) {
 			    fprintf(out, "%" PRIval " ", values ? values[j] : 0);
 			}
