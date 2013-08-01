@@ -9,6 +9,7 @@ static void help(void) {
     fprintf(stderr, "options:\n");
     fprintf(stderr, "-v{0|1|2|3}    verbosity level\n");
     fprintf(stderr, "-x             obtain exclusive lock on db\n");
+    fprintf(stderr, "-t             don't use transactions (fast, but unsafe)\n");
     fprintf(stderr, "-p             preload timeslices\n");
     fprintf(stderr, "-Z             don't compress db\n");
     exit(-1);
@@ -22,7 +23,7 @@ int main(int argc, char *argv[]) {
     int open_flags = DBATS_CREATE;
     progname = argv[0];
 
-    dbats_log_level = 1;
+    dbats_log_level = LOG_NORMAL;
 
     uint32_t last_t = 0;
     uint32_t t;
@@ -30,13 +31,16 @@ int main(int argc, char *argv[]) {
     char key[128];
 
     int c;
-    while ((c = getopt(argc, argv, "v:xpZ")) != -1) {
+    while ((c = getopt(argc, argv, "v:xtpZ")) != -1) {
 	switch (c) {
 	case 'v':
 	    dbats_log_level = atoi(optarg);
 	    break;
 	case 'x':
 	    open_flags |= DBATS_EXCLUSIVE;
+	    break;
+	case 't':
+	    open_flags |= DBATS_NO_TXN;
 	    break;
 	case 'p':
 	    select_flags |= DBATS_PRELOAD;
@@ -56,9 +60,11 @@ int main(int argc, char *argv[]) {
 	help();
     dbats_path = argv[0];
 
+    dbats_log(LOG_NORMAL, "report-in: open");
     handler = dbats_open(dbats_path, 1, period, open_flags);
     if (!handler) return -1;
 
+    dbats_log(LOG_NORMAL, "report-in: config aggs");
     if (dbats_aggregate(handler, DBATS_AGG_MIN, 10) != 0)
 	return -1;
     if (dbats_aggregate(handler, DBATS_AGG_MAX, 10) != 0)
@@ -75,6 +81,7 @@ int main(int argc, char *argv[]) {
 	if (n != 3) break;
 
 	if (t != last_t) {
+	    dbats_log(LOG_NORMAL, "report-in: select time %u", t);
 	    if (dbats_select_time(handler, t, select_flags) == -1)
 		return(-1);
 	}
