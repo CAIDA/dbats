@@ -22,6 +22,8 @@
 
 #define DBATS_DB_VERSION     1
 
+#define DBATS_KEYLEN         128 // max length of key name
+
 // Flags
 #define DBATS_CREATE         0x01 // create database if it doesn't exist
 #define DBATS_PRELOAD        0x04 // load fragments when tslice is selected
@@ -91,7 +93,8 @@ extern int dbats_select_time(dbats_handler *handler,
 
 extern int dbats_get_key_id(dbats_handler *handler, const char *key,
     uint32_t *key_id, uint32_t flags);
-extern const char *dbats_get_key_name(dbats_handler *handler, uint32_t key_id);
+extern int dbats_get_key_name(dbats_handler *handler, uint32_t key_id,
+    char *namebuf);
 
 extern int dbats_set(dbats_handler *handler, uint32_t key_id,
     const dbats_value *valuep);
@@ -106,11 +109,13 @@ extern int dbats_get_by_key(dbats_handler *handler, const char *key,
     const dbats_value **valuepp, int agg_id);
 
 extern int dbats_walk_keyname_start(dbats_handler *handler);
-extern int dbats_walk_keyname_next(dbats_handler *handler, uint32_t *key_id_p);
+extern int dbats_walk_keyname_next(dbats_handler *handler, uint32_t *key_id_p,
+    char *namebuf);
 extern int dbats_walk_keyname_end(dbats_handler *handler);
 
 extern int dbats_walk_keyid_start(dbats_handler *handler);
-extern int dbats_walk_keyid_next(dbats_handler *handler, uint32_t *key_id_p);
+extern int dbats_walk_keyid_next(dbats_handler *handler, uint32_t *key_id_p,
+    char *namebuf);
 extern int dbats_walk_keyid_end(dbats_handler *handler);
 
 extern const volatile dbats_config *dbats_get_config(dbats_handler *handler);
