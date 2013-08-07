@@ -986,7 +986,7 @@ int dbats_get_key_id(dbats_handler *handler, const char *key,
 	DBT_out(dbt_keyrecno, &recno, sizeof(recno)); // put() will fill in recno
 	rc = handler->dbKeyid->put(handler->dbKeyid, handler->txn, &dbt_keyrecno, &dbt_keyname, DB_APPEND);
 	if (rc != 0) {
-	    dbats_log(LOG_ERROR, "Error creating keyid %s: %s", key, db_strerror(rc));
+	    dbats_log(LOG_ERROR, "Error creating keyid for %s: %s", key, db_strerror(rc));
 	    goto abort;
 	}
 	*key_id_p = recno - 1;
@@ -997,9 +997,9 @@ int dbats_get_key_id(dbats_handler *handler, const char *key,
 	}
 
 	DBT_in(dbt_keyid, key_id_p, sizeof(*key_id_p));
-	rc = handler->dbKeyname->put(handler->dbKeyname, handler->txn, &dbt_keyname, &dbt_keyid, 0);
+	rc = handler->dbKeyname->put(handler->dbKeyname, handler->txn, &dbt_keyname, &dbt_keyid, DB_NOOVERWRITE);
 	if (rc != 0) {
-	    dbats_log(LOG_ERROR, "Error creating keyname %s: %s", key, db_strerror(rc));
+	    dbats_log(LOG_ERROR, "Error creating keyname %s -> %u: %s", key, *key_id_p, db_strerror(rc));
 	    goto abort;
 	}
 	dbats_log(LOG_INFO, "Assigned key #%u: %s", *key_id_p, key);
