@@ -492,11 +492,12 @@ int dbats_aggregate(dbats_handler *handler, int func, int steps)
 {
     int rc;
 
-    if (handler->tslice[0]->time > 0) {
-	// XXX fix this?
+    if (handler->agg[0].times.start > 0) {
 	dbats_log(LOG_ERROR,
 	    "Adding a new aggregation to existing data is not yet supported.");
 	return -1;
+	// If we're going to allow this, we have to make all references to
+	// agg[] and num_aggs read them from the db.
     }
 
     if (handler->cfg.num_aggs >= MAX_NUM_AGGS) {
@@ -849,7 +850,7 @@ static int instantiate_isset_frags(dbats_handler *handler, int frag_id)
     return 0;
 }
 
-static int count_keys(dbats_handler *handler, uint32_t *num_keys)
+int dbats_num_keys(dbats_handler *handler, uint32_t *num_keys)
 {
     int rc;
 
@@ -933,7 +934,7 @@ int dbats_select_time(dbats_handler *handler, uint32_t time_value, uint32_t flag
 	return 0;
 
     uint32_t num_keys;
-    if ((rc = count_keys(handler, &num_keys)) != 0)
+    if ((rc = dbats_num_keys(handler, &num_keys)) != 0)
 	return rc;
 
     for (int agg_id = 0; agg_id < handler->cfg.num_aggs; agg_id++) {
