@@ -848,25 +848,18 @@ static int instantiate_isset_frags(dbats_handler *handler, int frag_id)
 int dbats_num_keys(dbats_handler *handler, uint32_t *num_keys)
 {
     int rc;
+    DB_BTREE_STAT *stats;
 
-    if ((rc = dbats_walk_keyid_start(handler)) != 0)
-	return rc;
-
-    db_recno_t recno;
-    DBT_out(dbt_keyrecno, &recno, sizeof(recno));
-    DBT_out(dbt_keyname, NULL, 0); // we don't need the name
-
-    rc = handler->keyid_cursor->get(handler->keyid_cursor, &dbt_keyrecno, &dbt_keyname, DB_LAST);
+    rc = handler->dbKeyid->stat(handler->dbKeyid, handler->txn, &stats, DB_FAST_STAT);
     if (rc != 0) {
 	dbats_log(LOG_ERROR, "Error getting key count: %s", db_strerror(rc));
 	return rc;
     }
-    *num_keys = recno - 1 + 1;
-    if ((rc = dbats_walk_keyid_end(handler)) != 0)
-	return rc;
+
+    *num_keys = stats->bt_nkeys;
+    free(stats);
     return 0;
 }
-
 
 int dbats_select_time(dbats_handler *handler, uint32_t time_value, uint32_t flags)
 {

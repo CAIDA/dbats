@@ -75,7 +75,6 @@ int main(int argc, char *argv[]) {
     char *keyfile_path = NULL;
     FILE *out;
     progname = argv[0];
-    dbats_log_level = 1;
     int outtype = OT_TEXT;
     int open_flags = DBATS_READONLY;
 
@@ -180,6 +179,7 @@ int main(int argc, char *argv[]) {
 		dbats_log(LOG_INFO, "Unable to find time %u", t);
 		continue;
 	    }
+	    dbats_log(LOG_NORMAL, "select time %u %d", t, agg_id);
 
 	    if (agg->func == DBATS_AGG_AVG) {
 		const double *values;
