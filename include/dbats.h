@@ -13,8 +13,27 @@
  *  with this program; if not, write to the Free Software Foundation, Inc.,
  *  51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
  */
+
 /** @file dbats.h
-    @brief DBATS API header file
+ *  DBATS API header file.
+ *
+ *  Typical usage:
+ *  - Open a database with dbats_open().
+ *  - If this is a new database, define aggregate time series with
+ *    dbats_aggregate().
+ *  - loop:
+ *    - Select a working time slice with dbats_select_time().
+ *    - write primary values for multiple keys with dbats_set(), and/or
+ *    - read primary and/or aggregate values for multiple keys with dbats_get()
+ *    - optionally, dbats_commit()
+ *  - Close the database with dbats_close()
+ *
+ *  Functions that return an int will return one of the following types of
+ *  values:
+ *    - 0 for success
+ *    - a (positive) E* constant defined in <errno.h> for a system error
+ *    - a (negative) DB_* constant defined in <db.h> for a DB error
+ *    - -1 for other error
 */
 
 #include <inttypes.h>
@@ -83,7 +102,7 @@ typedef uint64_t dbats_value;  ///< A value stored in a DBATS database.
 #define PRIval PRIu64          ///< printf() conversion specifier for dbats_value
 #define SCNval SCNu64          ///< scanf() conversion specifier for dbats_value
 
-typedef struct dbats_handler dbats_handler; ///< opaque DBATS handle
+typedef struct dbats_handler dbats_handler; ///< Opaque handle for a DBATS db
 
 /* ************************************************** */
 
@@ -93,11 +112,11 @@ typedef struct dbats_handler dbats_handler; ///< opaque DBATS handle
  *    dbats_get() or written by dbats_set().
  *  @param[in] period the number of seconds between data values
  *  @param[in] flags a bitwise-OR combination of any of the following:
- *    - TSDB_CREATE - create the database if it doesn't already exist
- *    - TSDB_READONLY - do not allow writing to the database
- *    - TSDB_UNCOMPRESSED - do not compress written timeseries data
- *    - TSDB_EXCLUSIVE - do not allow any other process to access the database
- *    - TSDB_NO_TXN - do not use transactions (unsafe)
+ *    -	DBATS_CREATE - create the database if it doesn't already exist
+ *    -	DBATS_READONLY - do not allow writing to the database
+ *    -	DBATS_UNCOMPRESSED - do not compress written timeseries data
+ *    -	DBATS_EXCLUSIVE - do not allow any other process to access the database
+ *    -	DBATS_NO_TXN - do not use transactions (unsafe)
  *  @return On success, returns a pointer to an opaque dbats_handler that
  *  must be passed to all subsequent calls on this database.  On failure,
  *  returns NULL.
@@ -108,6 +127,8 @@ extern dbats_handler *dbats_open(const char *dbats_path,
     uint32_t flags);
 
 /** Close a database opened by dbats_open().
+ *  Automatically calls dbats_commit() if needed to commit any operations since
+ *  the last call to dbats_select_time().
  *  @param[in] handler A dbats_handler created by dbats_open().
  */
 extern void dbats_close(dbats_handler *handler);
@@ -142,7 +163,7 @@ extern uint32_t dbats_normalize_time(const dbats_handler *handler, int agg_id,
 
 /** Select a time period to operate on in subsequent calls to dbats_get() and
  *  dbats_set().
- *  Automatically calls dbats_commit() if needed to commit any writes since
+ *  Automatically calls dbats_commit() if needed to commit any operations since
  *  the last call to dbats_select_time().
  *  @param[in] handler A dbats_handler created by dbats_open().
  *  @param[in] time_value the desired time, which will be rounded down by
@@ -156,7 +177,7 @@ extern int dbats_select_time(dbats_handler *handler,
     uint32_t time_value, uint32_t flags);
 
 /** Commit pending writes to the on-disk database and release any associated
- *  database locks.
+ *  database locks and other resources.
  *  Calling this directly is useful if there will be a delay before your next
  *  call to dbats_select_time().
  *  @param[in] handler A dbats_handler created by dbats_open().
@@ -171,7 +192,8 @@ extern int dbats_commit(dbats_handler *handler);
  *    written.
  *  @param[in] flags a bitwise-OR combination of any of the following:
  *    - DBATS_CREATE - create the key if it does not already exist.
- *  @return 0 for success, nonzero for error.
+ *  @return 0 for success, DB_NOTFOUND if the key does not exist and
+ *    DBATS_CREATE flag was not set, or other nonzero value for error.
  */
 extern int dbats_get_key_id(dbats_handler *handler, const char *key,
     uint32_t *key_id_p, uint32_t flags);
@@ -267,10 +289,13 @@ extern int dbats_get_by_key(dbats_handler *handler, const char *key,
 extern int dbats_num_keys(dbats_handler *handler, uint32_t *num_keys);
 
 /** Prepare to iterate over the list of keys ordered by name.
+ *  You must call dbats_walk_keyname_end() before calling dbats_commit(),
+ *  dbats_select_time(), or dbats_close().
  *  @param[in] handler A dbats_handler created by dbats_open().
  *  @return 0 for success, nonzero for error.
  */
 extern int dbats_walk_keyname_start(dbats_handler *handler);
+
 /** Get the next key id and key name in the sequence started by
  *  dbats_walk_keyname_start().
  *  @param[in] handler A dbats_handler created by dbats_open().
@@ -291,6 +316,8 @@ extern int dbats_walk_keyname_end(dbats_handler *handler);
 
 /** Prepare to iterate over the list of keys ordered by id (which is the same
  *  order the keys were defined).
+ *  You must call dbats_walk_keyid_end() before calling dbats_commit(),
+ *  dbats_select_time(), or dbats_close().
  *  @param[in] handler A dbats_handler created by dbats_open().
  *  @return 0 for success, nonzero for error.
  */
