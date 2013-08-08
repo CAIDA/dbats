@@ -76,6 +76,7 @@ struct dbats_handler {
     const char *path;          // path of BDB environment directory
     uint8_t is_open;
     uint8_t preload;           // load frags when tslice is selected
+    uint8_t needs_commit;
     void *state_compress;
     void *state_decompress;
     DB_ENV *dbenv;             // DB environment
@@ -520,6 +521,7 @@ int dbats_aggregate(dbats_handler *handler, int func, int steps)
 	&handler->cfg.num_aggs, sizeof(handler->cfg.num_aggs));
     if (rc != 0) return rc;
 
+    handler->needs_commit = 1;
     return 0;
 }
 
@@ -624,9 +626,9 @@ abort:
 
 /*************************************************************************/
 
-static int dbats_commit(dbats_handler *handler)
+int dbats_commit(dbats_handler *handler)
 {
-    if (!handler->cfg.no_txn && !handler->txn) return 0;
+    if (!handler->needs_commit) return 0;
 
     dbats_log(LOG_INFO, "commit %u", handler->tslice[0]->time);
 
@@ -657,6 +659,7 @@ static int dbats_commit(dbats_handler *handler)
 	}
     }
 
+    handler->needs_commit = 0;
     return commit_transaction(handler);
 }
 
@@ -1255,6 +1258,7 @@ int dbats_set(dbats_handler *handler, uint32_t key_id, const dbats_value *valuep
 	"agg_id=%d frag_id=%u offset=%" PRIu32 " value_len=%u value=%" PRIval,
 	0, frag_id, offset, handler->cfg.entry_size, valuep[0]);
 
+    handler->needs_commit = 1;
     return 0;
 }
 

@@ -105,6 +105,11 @@ extern dbats_handler *dbats_open(const char *dbats_path,
     uint32_t period,
     uint32_t flags);
 
+/** Close a database opened by dbats_open().
+ *  @param[in] handler A dbats_handler created by dbats_open().
+ */
+extern void dbats_close(dbats_handler *handler);
+
 /** Defines an aggregate.
  *  @param[in] handler A dbats_handler created by dbats_open().
  *  @param[in] func one of the following values indicating which aggregation
@@ -118,11 +123,6 @@ extern dbats_handler *dbats_open(const char *dbats_path,
  *  @return 0 for success, nonzero for error.
  */
 extern int dbats_aggregate(dbats_handler *handler, int func, int steps);
-
-/** Close a database opened by dbats_open().
- *  @param[in] handler A dbats_handler created by dbats_open().
- */
-extern void dbats_close(dbats_handler *handler);
 
 /** Round a time value down to a multiple of period.
  *  @param[in] handler A dbats_handler created by dbats_open().
@@ -139,16 +139,27 @@ extern uint32_t dbats_normalize_time(const dbats_handler *handler, int agg_id,
 
 /** Select a time period to operate on in subsequent calls to dbats_get() and
  *  dbats_set().
+ *  Automatically calls dbats_commit() if needed to commit any writes since
+ *  the last call to dbats_select_time().
  *  @param[in] handler A dbats_handler created by dbats_open().
- *  @param[in] time_value the desired time, which will be rounded down as
- *    by dbats_normalize_time(handler, 0, &time_value).
+ *  @param[in] time_value the desired time, which will be rounded down by
+ *    \ref dbats_normalize_time (handler, 0, &time_value).
  *  @param[in] flags a bitwise-OR combination of any of the following:
  *    - DBATS_PRELOAD - load data immediately instead of waiting until it's
- *      needed
+ *      needed (rarely useful)
  *  @return 0 for success, nonzero for error.
  */
 extern int dbats_select_time(dbats_handler *handler,
     uint32_t time_value, uint32_t flags);
+
+/** Commit pending writes to the on-disk database and release any associated
+ *  database locks.
+ *  Calling this directly is useful if there will be a delay before your next
+ *  call to dbats_select_time().
+ *  @param[in] handler A dbats_handler created by dbats_open().
+ *  @return 0 for success, nonzero for error.
+ */
+extern int dbats_commit(dbats_handler *handler);
 
 /** Get the id of a key.
  *  @param[in] handler A dbats_handler created by dbats_open().
