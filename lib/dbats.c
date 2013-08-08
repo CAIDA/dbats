@@ -564,8 +564,10 @@ static int dbats_flush_tslice(dbats_handler *handler, int agg_id)
 		if (rc != 0) goto abort;
 		handler->tslice[agg_id]->frag_changed[f] = 0;
 	    } else {
-		if (!buf)
-		    buf = (char*)emalloc(frag_size + 1, "write buffer");
+		if (!buf) {
+		    buf = (char*)emalloc(1 + frag_size, "write buffer");
+		    if (!buf) return errno ? errno : ENOMEM;
+		}
 		handler->tslice[agg_id]->frag[f]->compressed = 0;
 		dbats_log(LOG_INFO, "Frag %d write: %zu", f, frag_size);
 		rc = raw_db_set(handler, handler->dbData, &dbkey, sizeof(dbkey),
@@ -590,6 +592,7 @@ static int dbats_flush_tslice(dbats_handler *handler, int agg_id)
 	    }
 	}
     }
+    if (buf) free(buf);
 
     if (!handler->cfg.readonly) {
 	int changed = 0;
@@ -616,7 +619,6 @@ static int dbats_flush_tslice(dbats_handler *handler, int agg_id)
 	assert(!handler->tslice[agg_id]->is_set[0]);
 	memset(handler->tslice[agg_id], 0, sizeof(dbats_tslice));
     }
-    if (buf) free(buf);
     return 0;
 
 abort:
