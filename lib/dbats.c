@@ -170,11 +170,13 @@ static inline int begin_transaction(dbats_handler *handler, const char *name)
 
 static inline int commit_transaction(dbats_handler *handler)
 {
-    if (handler->cfg.no_txn) return 0;
-    int rc;
-    if ((rc = handler->txn->commit(handler->txn, 0)) != 0)
-	dbats_log(LOG_ERROR, "commit transaction: %s", db_strerror(rc));
-    handler->txn = NULL;
+    int rc = 0;
+    if (handler->txn) {
+	if ((rc = handler->txn->commit(handler->txn, 0)) != 0)
+	    dbats_log(LOG_ERROR, "commit transaction: %s", db_strerror(rc));
+	handler->txn = NULL;
+    }
+    handler->needs_commit = 0;
     return rc;
 }
 
@@ -659,7 +661,6 @@ int dbats_commit(dbats_handler *handler)
 	}
     }
 
-    handler->needs_commit = 0;
     return commit_transaction(handler);
 }
 
