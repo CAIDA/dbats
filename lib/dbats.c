@@ -1169,54 +1169,46 @@ int dbats_set(dbats_handler *handler, uint32_t key_id, const dbats_value *valuep
 	dbats_log(LOG_INFO, "agg %d: aggval=%" PRIval " n=%d",
 	    agg_id, aggval[0], n); // XXX
 
-	switch (handler->agg[agg_id].func) {
-	case DBATS_AGG_MIN:
-	    for (int i = 0; i < handler->cfg.values_per_entry; i++) {
-		if (was_set && valuep[i] == oldvaluep[i]) {
-		    // value did not change; no need to change agg value
-		} else if (n == 1 || valuep[i] <= aggval[i]) {
+	for (int i = 0; i < handler->cfg.values_per_entry; i++) {
+	    if (was_set && valuep[i] == oldvaluep[i]) {
+		continue; // value did not change; no need to change agg value
+	    }
+	    switch (handler->agg[agg_id].func) {
+	    case DBATS_AGG_MIN:
+		if (n == 1 || valuep[i] <= aggval[i]) {
 		    aggval[i] = valuep[i];
 		    changed = 1;
 		} else if (was_set && oldvaluep[i] == aggval[i]) {
 		    // XXX TODO: Find the min value among all the steps.
 		    failed = ENOSYS; // XXX
 		}
-	    }
-	    break;
-	case DBATS_AGG_MAX:
-	    for (int i = 0; i < handler->cfg.values_per_entry; i++) {
-		if (was_set && valuep[i] == oldvaluep[i]) {
-		    // value did not change; no need to change agg value
-		} else if (n == 1 || valuep[i] >= aggval[i]) {
+		break;
+	    case DBATS_AGG_MAX:
+		if (n == 1 || valuep[i] >= aggval[i]) {
 		    aggval[i] = valuep[i];
 		    changed = 1;
 		} else if (was_set && oldvaluep[i] == aggval[i]) {
 		    // XXX TODO: Find the max value among all the steps.
 		    failed = ENOSYS; // XXX
 		}
-	    }
-	    break;
-	case DBATS_AGG_AVG:
-	    for (int i = 0; i < handler->cfg.values_per_entry; i++) {
-		double *daggval = ((double*)&aggval[i]);
-		if (was_set && valuep[i] == oldvaluep[i]) {
-		    // value did not change; no need to change agg value
-		} else if (n == 1) {
-		    *daggval = valuep[i];
-		    changed = 1;
-		} else if (*daggval != valuep[i]) {
-		    if (was_set)
-			*daggval -= (oldvaluep[i] - *daggval) / n;
-		    *daggval += (valuep[i] - *daggval) / n;
-		    changed = 1;
+		break;
+	    case DBATS_AGG_AVG:
+		{
+		    double *daggval = ((double*)&aggval[i]);
+		    if (n == 1) {
+			*daggval = valuep[i];
+			changed = 1;
+		    } else {
+			double old_daggval = *daggval;
+			if (was_set)
+			    *daggval -= (oldvaluep[i] - *daggval) / n;
+			*daggval += (valuep[i] - *daggval) / n;
+			changed = (*daggval != old_daggval);
+		    }
 		}
-	    }
-	    break;
-	case DBATS_AGG_LAST:
-	    for (int i = 0; i < handler->cfg.values_per_entry; i++) {
-		if (was_set && valuep[i] == oldvaluep[i]) {
-		    // value did not change; no need to change agg value
-		} else if (handler->tslice[0]->time >= handler->active_last_data) {
+		break;
+	    case DBATS_AGG_LAST:
+		if (handler->tslice[0]->time >= handler->active_last_data) {
 		    // common case: value is latest ever seen
 		    aggval[i] = valuep[i];
 		    changed = 1;
@@ -1238,23 +1230,19 @@ int dbats_set(dbats_handler *handler, uint32_t key_id, const dbats_value *valuep
 			ti--;
 		    }
 		}
-	    }
-	    break;
-	case DBATS_AGG_SUM:
-	    for (int i = 0; i < handler->cfg.values_per_entry; i++) {
-		if (was_set && valuep[i] == oldvaluep[i]) {
-		    // value did not change; no need to change agg value
-		} else if (n == 1) {
+		break;
+	    case DBATS_AGG_SUM:
+		if (n == 1) {
 		    aggval[i] = valuep[i];
 		    changed = 1;
-		} else {
+		} else if (was_set || valuep[i] != 0) {
 		    if (was_set)
 			aggval[i] -= oldvaluep[i];
 		    aggval[i] += valuep[i];
 		    changed = 1;
 		}
+		break;
 	    }
-	    break;
 	}
 
 	if (changed || failed) {
