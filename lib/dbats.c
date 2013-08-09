@@ -93,8 +93,11 @@ struct dbats_handler {
     DB_TXN *txn;               // current transaction
     DB_TXN *outer_txn;         // used to emulate set_lk_exclusive()
     uint32_t active_start;     // first timestamp in active period
+                               // (corresponding to is_set[0])
     uint32_t active_end;       // last timestamp in active period
-    uint8_t ***is_set;         // bitvectors: which cols have values
+    uint32_t active_last_data; // last timestamp in active period with data
+    uint8_t ***is_set;         // each is_set[timeindex][fragid] is a bitvector
+                               // indicating which cols have values
 };
 
 const char *dbats_agg_func_label[] = {
@@ -454,14 +457,15 @@ dbats_handler *dbats_open(const char *path,
 	for (int agg_id = 0; agg_id < handler->cfg.num_aggs; agg_id++) {
 	    sprintf(keybuf, "agg%d", agg_id);
 	    value_len = sizeof(handler->agg[agg_id]);
-	    if (raw_db_get(handler, handler->dbMeta, keybuf, strlen(keybuf),
-		&handler->agg[agg_id], &value_len, 0) != 0)
+	    if ((rc = raw_db_get(handler, handler->dbMeta, keybuf, strlen(keybuf),
+		&handler->agg[agg_id], &value_len, 0)) != 0)
 	    {
-		dbats_log(LOG_ERROR, "missing aggregation config %d", agg_id);
+		dbats_log(LOG_ERROR, "error reading %s: %s",
+		    keybuf, db_strerror(rc));
 		return NULL;
 	    } else if (value_len != sizeof(dbats_agg)) {
-		dbats_log(LOG_ERROR, "corrupt aggregation config: size %zu != %zu",
-		    value_len, sizeof(dbats_agg));
+		dbats_log(LOG_ERROR, "corrupt %s: size %zu != %zu",
+		    keybuf, value_len, sizeof(dbats_agg));
 		return NULL;
 	    }
 	}
@@ -473,9 +477,15 @@ dbats_handler *dbats_open(const char *path,
 	    return NULL;
     }
 
-    if (handler->cfg.compress && !handler->cfg.readonly) {
-	handler->state_compress = ecalloc(1, sizeof(qlz_state_compress), "qlz_state_compress");
-	if (!handler->state_compress) return NULL;
+    if (!handler->cfg.readonly) {
+	if (handler->cfg.compress) {
+	    handler->state_compress = ecalloc(1, sizeof(qlz_state_compress), "qlz_state_compress");
+	    if (!handler->state_compress) return NULL;
+	}
+
+	rc = raw_db_set(handler, handler->dbMeta, "agg0", strlen("agg0"),
+	    &handler->agg[0], sizeof(dbats_agg));
+	if (rc != 0) goto abort;
     }
 
     handler->is_open = 1;
@@ -490,12 +500,21 @@ int dbats_aggregate(dbats_handler *handler, int func, int steps)
 {
     int rc;
 
-    if (handler->agg[0].times.start > 0) {
+    DB_BTREE_STAT *stats;
+    rc = handler->dbIsSet->stat(handler->dbIsSet, handler->txn, &stats, DB_FAST_STAT);
+    if (rc != 0) {
+	dbats_log(LOG_ERROR, "Error getting stats for is_set: %s", db_strerror(rc));
+	return rc;
+    }
+    int empty = (stats->bt_pagecnt > stats->bt_empty_pg);
+    free(stats);
+
+    if (!empty) {
 	dbats_log(LOG_ERROR,
 	    "Adding a new aggregation to existing data is not yet supported.");
 	return -1;
 	// If we're going to allow this, we have to make all references to
-	// agg[] and num_aggs read them from the db.
+	// agg[] and num_aggs read from db instead of memory.
     }
 
     if (handler->cfg.num_aggs >= MAX_NUM_AGGS) {
@@ -594,7 +613,22 @@ static int dbats_flush_tslice(dbats_handler *handler, int agg_id)
     }
     if (buf) free(buf);
 
+    // We read and write agg.times as the last step of a transaction to
+    // minimize the time that the lock is held.
     if (!handler->cfg.readonly) {
+	// get updated agg times from db
+	size_t value_len;
+	char keybuf[32];
+	sprintf(keybuf, "agg%d", agg_id);
+	value_len = sizeof(dbats_agg);
+	if ((rc = raw_db_get(handler, handler->dbMeta, keybuf, strlen(keybuf),
+	    &handler->agg[agg_id], &value_len, 1)) != 0)
+	{
+	    dbats_log(LOG_ERROR, "error getting %s: %s", keybuf, db_strerror(rc));
+	    goto abort;
+	}
+
+	// write new agg times to db if needed
 	int changed = 0;
 	if (handler->agg[agg_id].times.start == 0 ||
 	    handler->agg[agg_id].times.start > handler->tslice[agg_id]->time)
@@ -607,11 +641,12 @@ static int dbats_flush_tslice(dbats_handler *handler, int agg_id)
 	    changed = 1;
 	}
 	if (changed) {
-	    char keybuf[32];
-	    sprintf(keybuf, "agg%d", agg_id);
 	    rc = raw_db_set(handler, handler->dbMeta, keybuf, strlen(keybuf),
 		&handler->agg[agg_id], sizeof(dbats_agg));
-	    if (rc != 0) goto abort;
+	    if (rc != 0) {
+		dbats_log(LOG_ERROR, "error updating %s: %s", keybuf, db_strerror(rc));
+		goto abort;
+	    }
 	}
     }
 
@@ -726,14 +761,20 @@ static int load_isset(dbats_handler *handler, fragkey_t *dbkey, uint8_t **dest)
     rc = raw_db_get(handler, handler->dbIsSet, dbkey, sizeof(*dbkey),
 	*dest, &value_len, !handler->cfg.readonly);
     // assert(value_len == vec_size(ENTRIES_PER_FRAG));
-    dbats_log(LOG_INFO, "load_frag t=%u, agg_id=%u, frag_id=%u: "
+    dbats_log(LOG_INFO, "load_isset t=%u, agg_id=%u, frag_id=%u: "
 	"raw_db_get(is_set) = %d", dbkey->time, dbkey->agg_id, dbkey->frag_id, rc);
     if (rc != 0) {
+	// XXX TODO: set *dest = NULL, and save the malloc'd memory for the
+	// next load_isset() (and change vec_test() to allow a NULL pointer)
 	memset(*dest, 0, vec_size(ENTRIES_PER_FRAG));
-	if (rc == DB_NOTFOUND) return 0; // no match
+	if (rc == DB_NOTFOUND) return rc; // no match
 	abort_transaction(handler);
 	return rc; // error
     }
+
+    if (dbkey->agg_id == 0 && handler->active_last_data < dbkey->time)
+	handler->active_last_data = dbkey->time;
+
     return 0; // ok
 }
 
@@ -748,8 +789,9 @@ static int load_frag(dbats_handler *handler, uint32_t t, int agg_id,
     int rc;
 
     assert(!handler->tslice[agg_id]->is_set[frag_id]);
-    if (load_isset(handler, &dbkey, &handler->tslice[agg_id]->is_set[frag_id]) != 0)
-	return 0; // no match
+    rc = load_isset(handler, &dbkey, &handler->tslice[agg_id]->is_set[frag_id]);
+    if (rc == DB_NOTFOUND) return 0; // no match
+    if (rc != 0) return rc; // error
 
     if (handler->db_get_buf_len < fragsize(handler) + QLZ_OVERHEAD) {
 	if (handler->db_get_buf) free(handler->db_get_buf);
@@ -837,7 +879,9 @@ static int instantiate_isset_frags(dbats_handler *handler, int frag_id)
 	} else if (!handler->is_set[ti][frag_id]) {
 	    dbkey.frag_id = frag_id;
 	    assert(!handler->is_set[ti][frag_id]);
-	    load_isset(handler, &dbkey, &handler->is_set[ti][frag_id]); // XXX error check
+	    int rc = load_isset(handler, &dbkey, &handler->is_set[ti][frag_id]);
+	    if (rc != 0 && rc != DB_NOTFOUND)
+		return rc; // error
 	    if (t == handler->tslice[0]->time) {
 		assert(!handler->tslice[0]->is_set[frag_id]);
 		handler->tslice[0]->is_set[frag_id] = handler->is_set[ti][frag_id]; // share
@@ -854,7 +898,7 @@ int dbats_num_keys(dbats_handler *handler, uint32_t *num_keys)
 
     rc = handler->dbKeyid->stat(handler->dbKeyid, handler->txn, &stats, DB_FAST_STAT);
     if (rc != 0) {
-	dbats_log(LOG_ERROR, "Error getting key count: %s", db_strerror(rc));
+	dbats_log(LOG_ERROR, "Error getting stats for keys: %s", db_strerror(rc));
 	return rc;
     }
 
@@ -907,13 +951,12 @@ int dbats_select_time(dbats_handler *handler, uint32_t time_value, uint32_t flag
 	}
 
 	tslice->time = t;
+	if (agg_id == 0)
+	    handler->active_last_data = t;
 
 	if (!min_time || t < min_time)
 	    min_time = t;
-	if (t < handler->agg[0].times.end) {
-	    t = min(handler->agg[0].times.end,
-		t + handler->agg[agg_id].period - handler->agg[0].period);
-	}
+	t += handler->agg[agg_id].period - handler->agg[0].period;
 	if (t > max_time)
 	    max_time = t;
     }
@@ -1105,19 +1148,17 @@ int dbats_set(dbats_handler *handler, uint32_t key_id, const dbats_value *valuep
 	uint8_t changed = 0;
 	uint8_t failed = 0;
 	dbats_value *aggval = valueptr(handler, agg_id, frag_id, offset);
-
-	//uint32_t aggstart = handler->tslice[agg_id]->time;
-	//uint32_t aggend = aggstart + (handler->agg[agg_id].steps - 1) * handler->agg[0].period;
+	uint32_t aggstart = handler->tslice[agg_id]->time;
+	uint32_t aggend = min(handler->active_last_data,
+	    aggstart + handler->agg[agg_id].period - handler->agg[0].period);
 
 	// Count the number of steps contributing to the aggregate.
 	int n = 0;
 	{
-	    uint32_t t = handler->tslice[agg_id]->time;
-	    int ti = (t - handler->active_start) / handler->agg[0].period;
-	    while (t <= handler->active_end &&
-		t < handler->tslice[agg_id]->time + handler->agg[agg_id].period)
-	    {
-		if (handler->tslice[0]->time == t ||
+	    int ti = (aggstart - handler->active_start) / handler->agg[0].period;
+	    uint32_t t = aggstart;
+	    while (t <= aggend) {
+		if (t == handler->tslice[0]->time ||
 		    vec_test(handler->is_set[ti][frag_id], offset))
 			n++;
 		ti++;
@@ -1175,16 +1216,15 @@ int dbats_set(dbats_handler *handler, uint32_t key_id, const dbats_value *valuep
 	    for (int i = 0; i < handler->cfg.values_per_entry; i++) {
 		if (was_set && valuep[i] == oldvaluep[i]) {
 		    // value did not change; no need to change agg value
-		} else if (handler->tslice[0]->time >= handler->agg[0].times.end) {
+		} else if (handler->tslice[0]->time >= handler->active_last_data) {
 		    // common case: value is latest ever seen
 		    aggval[i] = valuep[i];
 		    changed = 1;
 		} else {
-		    // find time of last sample within this agg period
-		    uint32_t t = min(handler->active_end,
-			handler->tslice[agg_id]->time + handler->agg[agg_id].period - handler->agg[0].period);
+		    // find time of last sample for this key within agg period
+		    uint32_t t = aggend;
 		    int ti = (t - handler->active_start) / handler->agg[0].period;
-		    while (t >= handler->tslice[agg_id]->time) {
+		    while (t >= aggstart) {
 			if (t == handler->tslice[0]->time) {
 			    // the new value is the last
 			    aggval[i] = valuep[i];
