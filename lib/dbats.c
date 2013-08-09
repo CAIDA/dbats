@@ -555,6 +555,7 @@ static int dbats_flush_tslice(dbats_handler *handler, int agg_id)
     fragkey_t dbkey;
     char *buf = NULL;
     int rc;
+    int changed = 0;
 
     // Write fragments to the DB
     dbkey.time = handler->tslice[agg_id]->time;
@@ -581,19 +582,15 @@ static int dbats_flush_tslice(dbats_handler *handler, int agg_id)
 		rc = raw_db_set(handler, handler->dbData, &dbkey, sizeof(dbkey),
 		    buf, compressed_len + 1);
 		if (rc != 0) goto abort;
-		handler->tslice[agg_id]->frag_changed[f] = 0;
 	    } else {
-		if (!buf) {
-		    buf = (char*)emalloc(1 + frag_size, "write buffer");
-		    if (!buf) return errno ? errno : ENOMEM;
-		}
 		handler->tslice[agg_id]->frag[f]->compressed = 0;
 		dbats_log(LOG_INFO, "Frag %d write: %zu", f, frag_size);
 		rc = raw_db_set(handler, handler->dbData, &dbkey, sizeof(dbkey),
 		    handler->tslice[agg_id]->frag[f], frag_size);
 		if (rc != 0) goto abort;
-		handler->tslice[agg_id]->frag_changed[f] = 0;
 	    }
+	    handler->tslice[agg_id]->frag_changed[f] = 0;
+	    changed = 1;
 
 	    rc = raw_db_set(handler, handler->dbIsSet, &dbkey, sizeof(dbkey),
 		handler->tslice[agg_id]->is_set[f], vec_size(ENTRIES_PER_FRAG));
@@ -615,7 +612,7 @@ static int dbats_flush_tslice(dbats_handler *handler, int agg_id)
 
     // We read and write agg.times as the last step of a transaction to
     // minimize the time that the lock is held.
-    if (!handler->cfg.readonly) {
+    if (changed) {
 	// get updated agg times from db
 	size_t value_len;
 	char keybuf[32];
@@ -629,7 +626,7 @@ static int dbats_flush_tslice(dbats_handler *handler, int agg_id)
 	}
 
 	// write new agg times to db if needed
-	int changed = 0;
+	changed = 0;
 	if (handler->agg[agg_id].times.start == 0 ||
 	    handler->agg[agg_id].times.start > handler->tslice[agg_id]->time)
 	{
