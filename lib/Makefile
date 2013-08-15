@@ -8,8 +8,7 @@ OPTIMIZE     = -O -DNDEBUG
 #PROF         = -pg
 CFLAGS       = $(OPTIMIZE) -Wall $(INCLUDE) $(PROF) # -fPIC
 LDFLAGS      = -L . $(PROF)
-DMALLOCLIBS  = dmalloc/dmalloc.o dmalloc/malloc.o
-LDLIBS      = $(DMALLOCLIBS) -ldbats -ldb
+LDLIBS      = -ldbats -ldb
 
 DBATS_LIB   = libdbats.a
 
