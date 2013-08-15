@@ -15,6 +15,8 @@ static void help(void) {
     exit(-1);
 }
 
+char *keys[10000000];
+
 int main(int argc, char *argv[]) {
     char *dbats_path;
     dbats_handler *handler;
@@ -76,6 +78,7 @@ int main(int argc, char *argv[]) {
     if (dbats_aggregate(handler, DBATS_AGG_SUM, 10) != 0)
 	return -1;
 
+    uint32_t key_id = 0;
     while (1) {
 	int n = scanf("%127s %" SCNval " %" SCNu32 "\n", key, &value, &t);
 	if (n != 3) break;
@@ -84,12 +87,22 @@ int main(int argc, char *argv[]) {
 	    dbats_log(LOG_NORMAL, "report-in: select time %u", t);
 	    if (dbats_select_time(handler, t, select_flags) == -1)
 		return(-1);
+	    key_id = 0;
 	}
 	last_t = t;
 
-	// XXX TODO: use dbats_set() instead of dbats_set_by_key()
-	if (dbats_set_by_key(handler, key, &value) != 0)
+	if (!keys[key_id] || strcmp(keys[key_id], key) != 0) {
+	    // If input keys are in consistent order, this lookup will be
+	    // skipped after the first round.
+	    if (dbats_get_key_id(handler, key, &key_id, DBATS_CREATE) != 0)
+		return -1;
+	    if (keys[key_id]) free(keys[key_id]); // shouldn't happen
+	    keys[key_id] = strdup(key);
+	}
+
+	if (dbats_set(handler, key_id, &value) != 0)
 	    return -1;
+	key_id++;
     }
 
     dbats_close(handler);
