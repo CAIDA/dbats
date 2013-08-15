@@ -39,7 +39,7 @@ ct_assert((sizeof(double) <= sizeof(dbats_value)), dbats_value_is_smaller_than_d
 #define vec_size(N)        (((N)+7)/8)                    // size for N bits
 #define vec_set(vec, i)    (vec[(i)/8] |= (1<<((i)%8)))   // set the ith bit
 #define vec_reset(vec, i)  (vec[(i)/8] &= ~(1<<((i)%8)))  // reset the ith bit
-#define vec_test(vec, i)   (vec[(i)/8] & (1<<((i)%8)))    // test the ith bit
+#define vec_test(vec, i)   (vec && (vec[(i)/8] & (1<<((i)%8))))    // test the ith bit
 
 #define valueptr(handler, agg_id, frag_id, offset) \
     ((dbats_value*)(&handler->tslice[agg_id]->frag[frag_id]->data[offset * handler->cfg.entry_size]))
@@ -177,11 +177,11 @@ static inline int commit_transaction(dbats_handler *handler)
 	if ((rc = handler->txn->commit(handler->txn, 0)) != 0)
 	    dbats_log(LOG_ERROR, "commit transaction: %s", db_strerror(rc));
 	handler->txn = NULL;
-    }
 
-    rc = handler->dbenv->txn_checkpoint(handler->dbenv, 256, 0, 0);
-    if (rc != 0)
-	dbats_log(LOG_ERROR, "txn_checkpoint: %s", db_strerror(rc));
+	rc = handler->dbenv->txn_checkpoint(handler->dbenv, 256, 0, 0);
+	if (rc != 0)
+	    dbats_log(LOG_ERROR, "txn_checkpoint: %s", db_strerror(rc));
+    }
 
     return rc;
 }
@@ -751,26 +751,34 @@ uint32_t dbats_normalize_time(const dbats_handler *handler, int agg_id, uint32_t
 
 static int load_isset(dbats_handler *handler, fragkey_t *dbkey, uint8_t **dest)
 {
+    static uint8_t *buf = NULL; // can recycle memory across calls
     int rc;
     size_t value_len = vec_size(ENTRIES_PER_FRAG);
 
-    *dest = emalloc(vec_size(ENTRIES_PER_FRAG), "is_set");
-    if (!*dest)
+    if (!buf && !(buf = emalloc(vec_size(ENTRIES_PER_FRAG), "is_set")))
 	return errno ? errno : ENOMEM; // error
 
     rc = raw_db_get(handler, handler->dbIsSet, dbkey, sizeof(*dbkey),
-	*dest, &value_len, !handler->cfg.readonly ? DB_RMW : 0);
-    // assert(value_len == vec_size(ENTRIES_PER_FRAG));
+	buf, &value_len, !handler->cfg.readonly ? DB_RMW : 0);
+
     dbats_log(LOG_INFO, "load_isset t=%u, agg_id=%u, frag_id=%u: "
 	"raw_db_get(is_set) = %d", dbkey->time, dbkey->agg_id, dbkey->frag_id, rc);
     if (rc != 0) {
-	// XXX TODO: set *dest = NULL, and save the malloc'd memory for the
-	// next load_isset() (and change vec_test() to allow a NULL pointer)
-	memset(*dest, 0, vec_size(ENTRIES_PER_FRAG));
+	if (dbkey->time == handler->tslice[dbkey->agg_id]->time) {
+	    memset(buf, 0, vec_size(ENTRIES_PER_FRAG));
+	    *dest = buf;
+	    buf = NULL;
+	} else {
+	    // return nothing, and keep buf for the next call
+	    *dest = NULL;
+	}
 	if (rc == DB_NOTFOUND) return rc; // no match
 	abort_transaction(handler);
 	return rc; // error
     }
+    // assert(value_len == vec_size(ENTRIES_PER_FRAG));
+    *dest = buf;
+    buf = NULL;
 
     if (dbkey->agg_id == 0 && handler->active_last_data < dbkey->time)
 	handler->active_last_data = dbkey->time;
@@ -1092,8 +1100,6 @@ static int instantiate_frag_func(dbats_handler *handler, int agg_id, uint32_t fr
     if (!(tslice->frag[frag_id] = ecalloc(1, len, "tslice->frag[frag_id]"))) {
 	return errno ? errno : ENOMEM;
     }
-
-    assert(tslice->is_set[frag_id]);
 
     if (tslice->num_frags <= frag_id)
 	tslice->num_frags = frag_id + 1;
