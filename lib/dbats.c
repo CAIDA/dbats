@@ -178,6 +178,11 @@ static inline int commit_transaction(dbats_handler *handler)
 	    dbats_log(LOG_ERROR, "commit transaction: %s", db_strerror(rc));
 	handler->txn = NULL;
     }
+
+    rc = handler->dbenv->txn_checkpoint(handler->dbenv, 256, 0, 0);
+    if (rc != 0)
+	dbats_log(LOG_ERROR, "txn_checkpoint: %s", db_strerror(rc));
+
     return rc;
 }
 
@@ -272,14 +277,12 @@ static int raw_db_set(dbats_handler *handler, DB *db,
 // the memory pointed to by value.
 static int raw_db_get(dbats_handler *handler, DB* db,
     const void *key, uint32_t key_len, void *value, size_t *value_len,
-    int writelock)
+    uint32_t dbflags)
 {
     int rc;
 
     DBT_in(dbt_key, (void*)key, key_len);
     DBT_out(dbt_data, value, *value_len);
-    uint32_t dbflags = 0;
-    if (writelock) dbflags |= DB_RMW;
     if ((rc = db->get(db, handler->txn, &dbt_key, &dbt_data, dbflags)) == 0) {
 	*value_len = dbt_data.size;
 	return 0;
@@ -404,7 +407,7 @@ dbats_handler *dbats_open(const char *path,
 	} else { \
 	    int writelock = !handler->cfg.readonly || handler->cfg.exclusive; \
 	    if (raw_db_get(handler, handler->dbMeta, #field, strlen(#field), \
-		&handler->cfg.field, &value_len, writelock) != 0) \
+		&handler->cfg.field, &value_len, writelock ? DB_RMW : 0) != 0) \
 	    { \
 		dbats_log(LOG_ERROR, "%s: missing config value: %s", path, #field); \
 		goto abort; \
@@ -619,7 +622,7 @@ static int dbats_flush_tslice(dbats_handler *handler, int agg_id)
 	sprintf(keybuf, "agg%d", agg_id);
 	value_len = sizeof(dbats_agg);
 	if ((rc = raw_db_get(handler, handler->dbMeta, keybuf, strlen(keybuf),
-	    &handler->agg[agg_id], &value_len, 1)) != 0)
+	    &handler->agg[agg_id], &value_len, DB_RMW)) != 0)
 	{
 	    dbats_log(LOG_ERROR, "error getting %s: %s", keybuf, db_strerror(rc));
 	    goto abort;
@@ -756,7 +759,7 @@ static int load_isset(dbats_handler *handler, fragkey_t *dbkey, uint8_t **dest)
 	return errno ? errno : ENOMEM; // error
 
     rc = raw_db_get(handler, handler->dbIsSet, dbkey, sizeof(*dbkey),
-	*dest, &value_len, !handler->cfg.readonly);
+	*dest, &value_len, !handler->cfg.readonly ? DB_RMW : 0);
     // assert(value_len == vec_size(ENTRIES_PER_FRAG));
     dbats_log(LOG_INFO, "load_isset t=%u, agg_id=%u, frag_id=%u: "
 	"raw_db_get(is_set) = %d", dbkey->time, dbkey->agg_id, dbkey->frag_id, rc);
@@ -799,7 +802,7 @@ static int load_frag(dbats_handler *handler, uint32_t t, int agg_id,
 
     size_t value_len = handler->db_get_buf_len;
     rc = raw_db_get(handler, handler->dbData, &dbkey, sizeof(dbkey),
-	handler->db_get_buf, &value_len, !handler->cfg.readonly);
+	handler->db_get_buf, &value_len, !handler->cfg.readonly ? DB_RMW : 0);
     dbats_log(LOG_INFO, "load_frag t=%u, agg_id=%u, frag_id=%u: "
 	"raw_db_get(frag) = %d", t, agg_id, frag_id, rc);
     if (rc != 0) {
@@ -999,7 +1002,8 @@ int dbats_get_key_id(dbats_handler *handler, const char *key,
     size_t len = sizeof(*key_id_p);
     int rc;
 
-    rc = raw_db_get(handler, handler->dbKeyname, key, keylen, key_id_p, &len, 0);
+    rc = raw_db_get(handler, handler->dbKeyname, key, keylen, key_id_p, &len,
+	DB_READ_COMMITTED);
     if (rc == 0) {
 	// found it
 	dbats_log(LOG_INFO, "Found key #%u: %s", *key_id_p, key);
@@ -1054,7 +1058,7 @@ int dbats_get_key_name(dbats_handler *handler, uint32_t key_id, char *namebuf)
     uint32_t value_len = DBATS_KEYLEN - 1;
 
     rc = raw_db_get(handler, handler->dbKeyid, &recno, sizeof(recno),
-	namebuf, &value_len, 0);
+	namebuf, &value_len, DB_READ_COMMITTED);
     if (rc != 0) return rc;
     namebuf[value_len] = '\0';
     return 0;
@@ -1411,7 +1415,7 @@ int dbats_walk_keyname_start(dbats_handler *handler)
 {
     int rc;
 
-    if ((rc = handler->dbKeyname->cursor(handler->dbKeyname, handler->txn, &handler->keyname_cursor, 0)) != 0) {
+    if ((rc = handler->dbKeyname->cursor(handler->dbKeyname, NULL, &handler->keyname_cursor, 0)) != 0) {
 	dbats_log(LOG_ERROR, "Error in dbats_walk_keyname_start: %s", db_strerror(rc));
 	return -1;
     }
@@ -1424,7 +1428,9 @@ int dbats_walk_keyname_next(dbats_handler *handler, uint32_t *key_id_p,
     int rc;
     DBT_out(dbt_keyid, key_id_p, sizeof(*key_id_p));
     DBT_out(dbt_keyname, namebuf, DBATS_KEYLEN-1);
-    if ((rc = handler->keyname_cursor->get(handler->keyname_cursor, &dbt_keyname, &dbt_keyid, DB_NEXT)) != 0) {
+    rc = handler->keyname_cursor->get(handler->keyname_cursor,
+	&dbt_keyname, &dbt_keyid, DB_NEXT | DB_READ_COMMITTED);
+    if (rc != 0) {
 	if (rc != DB_NOTFOUND)
 	    dbats_log(LOG_ERROR, "Error in dbats_walk_keyname_next: %s", db_strerror(rc));
 	return -1;
@@ -1451,7 +1457,7 @@ int dbats_walk_keyid_start(dbats_handler *handler)
 {
     int rc;
 
-    if ((rc = handler->dbKeyid->cursor(handler->dbKeyid, handler->txn, &handler->keyid_cursor, 0)) != 0) {
+    if ((rc = handler->dbKeyid->cursor(handler->dbKeyid, NULL, &handler->keyid_cursor, 0)) != 0) {
 	dbats_log(LOG_ERROR, "Error in dbats_walk_keyid_start: %s", db_strerror(rc));
 	return -1;
     }
@@ -1466,7 +1472,9 @@ int dbats_walk_keyid_next(dbats_handler *handler, uint32_t *key_id_p,
 
     DBT_out(dbt_keyrecno, &recno, sizeof(recno));
     DBT_out(dbt_keyname, namebuf, DBATS_KEYLEN-1);
-    if ((rc = handler->keyid_cursor->get(handler->keyid_cursor, &dbt_keyrecno, &dbt_keyname, DB_NEXT)) != 0) {
+    rc = handler->keyid_cursor->get(handler->keyid_cursor,
+	&dbt_keyrecno, &dbt_keyname, DB_NEXT | DB_READ_COMMITTED);
+    if (rc != 0) {
 	if (rc != DB_NOTFOUND)
 	    dbats_log(LOG_ERROR, "Error in dbats_walk_keyid_next: %s", db_strerror(rc));
 	return -1;
