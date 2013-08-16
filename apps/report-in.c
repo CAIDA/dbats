@@ -1,5 +1,6 @@
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include "dbats.h"
 
 static char *progname = 0;
@@ -25,7 +26,7 @@ int main(int argc, char *argv[]) {
     int open_flags = DBATS_CREATE;
     progname = argv[0];
 
-    dbats_log_level = LOG_NORMAL;
+    dbats_log_level = LOG_INFO;
 
     uint32_t last_t = 0;
     uint32_t t;
@@ -62,11 +63,11 @@ int main(int argc, char *argv[]) {
 	help();
     dbats_path = argv[0];
 
-    dbats_log(LOG_NORMAL, "report-in: open");
+    dbats_log(LOG_INFO, "report-in: open");
     handler = dbats_open(dbats_path, 1, period, open_flags);
     if (!handler) return -1;
 
-    dbats_log(LOG_NORMAL, "report-in: config aggs");
+    dbats_log(LOG_INFO, "report-in: config aggs");
     if (dbats_aggregate(handler, DBATS_AGG_MIN, 10) != 0)
 	return -1;
     if (dbats_aggregate(handler, DBATS_AGG_MAX, 10) != 0)
@@ -84,7 +85,7 @@ int main(int argc, char *argv[]) {
 	if (n != 3) break;
 
 	if (t != last_t) {
-	    dbats_log(LOG_NORMAL, "report-in: select time %u", t);
+	    dbats_log(LOG_INFO, "report-in: select time %u", t);
 	    if (dbats_select_time(handler, t, select_flags) == -1)
 		return(-1);
 	    key_id = 0;
