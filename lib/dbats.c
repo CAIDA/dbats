@@ -362,6 +362,23 @@ dbats_handler *dbats_open(const char *path,
 	} else if (errno == EEXIST) {
 	    // existing database dir
 	    flags &= ~DBATS_CREATE;
+	    // Wait for $path/meta to exist to avoid race condition with
+	    // another process creating a dbats environment.
+	    char file[PATH_MAX];
+	    struct stat statbuf;
+	    int timeout = 10;
+	    sprintf(file, "%s/meta", path);
+	    while (stat(file, &statbuf) != 0) {
+		if (errno != ENOENT) {
+		    dbats_log(LOG_ERROR, "Error checking %s: %s", file, strerror(errno));
+		    return NULL;
+		}
+		if (--timeout <= 0) {
+		    dbats_log(LOG_ERROR, "Timeout waiting for %s", file);
+		    return NULL;
+		}
+		sleep(1);
+	    }
 	} else {
 	    // new database dir failed
 	    dbats_log(LOG_ERROR, "Error creating %s: %s",
