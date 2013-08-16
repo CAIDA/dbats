@@ -16,10 +16,13 @@
 
 #include <stdarg.h>
 
-#define LOG_ERROR     0
-#define LOG_WARNING   1
-#define LOG_NORMAL    2
-#define LOG_INFO      3
+#define LOG_ERROR      0
+#define LOG_WARNING   10
+#define LOG_INFO      20
+#define LOG_CONFIG    30
+#define LOG_FINE      40
+#define LOG_VERYFINE  50
+#define LOG_FINEST    60
 
 extern int dbats_log_level;
 extern FILE *dbats_log_file;

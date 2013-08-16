@@ -243,7 +243,7 @@ static int raw_db_set(dbats_handler *handler, DB *db,
 
     if (db == handler->dbData) {
 	fragkey_t *fragkey = (fragkey_t*)key;
-	dbats_log(LOG_INFO, "raw_db_set Data: t=%u agg=%d frag=%u, compress=%d, len=%u",
+	dbats_log(LOG_FINEST, "raw_db_set Data: t=%u agg=%d frag=%u, compress=%d, len=%u",
 	    fragkey->time, fragkey->agg_id, fragkey->frag_id, *(uint8_t*)value, value_len);
     }
 
@@ -288,7 +288,7 @@ static int raw_db_get(dbats_handler *handler, DB* db,
 	return 0;
     }
     if (rc != DB_NOTFOUND)
-	dbats_log(LOG_INFO, "raw_db_get failed: %s", db_strerror(rc));
+	dbats_log(LOG_FINE, "raw_db_get failed: %s", db_strerror(rc));
     if (rc == DB_BUFFER_SMALL) {
 	dbats_log(LOG_WARNING, "raw_db_get: had %" PRIu32 ", needed %" PRIu32,
 	    dbt_data.ulen, dbt_data.size);
@@ -321,7 +321,7 @@ dbats_handler *dbats_open(const char *path,
     uint32_t period,
     uint32_t flags)
 {
-    dbats_log(LOG_INFO, "%s", db_full_version(NULL, NULL, NULL, NULL, NULL));
+    dbats_log(LOG_FINE, "%s", db_full_version(NULL, NULL, NULL, NULL, NULL));
 
     int rc;
     int dbmode = 00666;
@@ -430,7 +430,7 @@ dbats_handler *dbats_open(const char *path,
 		goto abort; \
 	    } \
 	} \
-	dbats_log(LOG_INFO, "cfg: %s = %u", #field, handler->cfg.field); \
+	dbats_log(LOG_CONFIG, "cfg: %s = %u", #field, handler->cfg.field); \
     } while (0)
 
     initcfg(version,           DBATS_DB_VERSION);
@@ -570,7 +570,7 @@ int dbats_aggregate(dbats_handler *handler, int func, int steps)
 // Also cleans up in-memory tslice, even if db is readonly.
 static int dbats_flush_tslice(dbats_handler *handler, int agg_id)
 {
-    dbats_log(LOG_INFO, "Flush t=%u agg_id=%d", handler->tslice[agg_id]->time, agg_id);
+    dbats_log(LOG_FINE, "Flush t=%u agg_id=%d", handler->tslice[agg_id]->time, agg_id);
     size_t frag_size = fragsize(handler);
     fragkey_t dbkey;
     char *buf = NULL;
@@ -586,7 +586,7 @@ static int dbats_flush_tslice(dbats_handler *handler, int agg_id)
 	if (handler->cfg.readonly) {
 	    // do nothing
 	} else if (!handler->tslice[agg_id]->frag_changed[f]) {
-	    dbats_log(LOG_INFO, "Skipping frag %d (unchanged)", f);
+	    dbats_log(LOG_VERYFINE, "Skipping frag %d (unchanged)", f);
 	} else {
 	    if (handler->cfg.compress) {
 		if (!buf) {
@@ -597,14 +597,14 @@ static int dbats_flush_tslice(dbats_handler *handler, int agg_id)
 		handler->tslice[agg_id]->frag[f]->compressed = 1;
 		size_t compressed_len = qlz_compress(handler->tslice[agg_id]->frag[f],
 		    buf+1, frag_size, handler->state_compress);
-		dbats_log(LOG_INFO, "Frag %d compression: %zu -> %zu (%.1f %%)",
+		dbats_log(LOG_VERYFINE, "Frag %d compression: %zu -> %zu (%.1f %%)",
 		    f, frag_size, compressed_len, compressed_len*100.0/frag_size);
 		rc = raw_db_set(handler, handler->dbData, &dbkey, sizeof(dbkey),
 		    buf, compressed_len + 1);
 		if (rc != 0) goto abort;
 	    } else {
 		handler->tslice[agg_id]->frag[f]->compressed = 0;
-		dbats_log(LOG_INFO, "Frag %d write: %zu", f, frag_size);
+		dbats_log(LOG_VERYFINE, "Frag %d write: %zu", f, frag_size);
 		rc = raw_db_set(handler, handler->dbData, &dbkey, sizeof(dbkey),
 		    handler->tslice[agg_id]->frag[f], frag_size);
 		if (rc != 0) goto abort;
@@ -682,7 +682,7 @@ abort:
 
 int dbats_commit(dbats_handler *handler)
 {
-    dbats_log(LOG_INFO, "commit %u", handler->tslice[0]->time);
+    dbats_log(LOG_FINE, "commit %u", handler->tslice[0]->time);
 
     if (handler->is_set) {
 	int tn = (handler->active_end - handler->active_start) / handler->agg[0].period + 1;
@@ -778,7 +778,7 @@ static int load_isset(dbats_handler *handler, fragkey_t *dbkey, uint8_t **dest)
     rc = raw_db_get(handler, handler->dbIsSet, dbkey, sizeof(*dbkey),
 	buf, &value_len, !handler->cfg.readonly ? DB_RMW : 0);
 
-    dbats_log(LOG_INFO, "load_isset t=%u, agg_id=%u, frag_id=%u: "
+    dbats_log(LOG_FINE, "load_isset t=%u, agg_id=%u, frag_id=%u: "
 	"raw_db_get(is_set) = %d", dbkey->time, dbkey->agg_id, dbkey->frag_id, rc);
     if (rc != 0) {
 	if (dbkey->time == handler->tslice[dbkey->agg_id]->time) {
@@ -828,7 +828,7 @@ static int load_frag(dbats_handler *handler, uint32_t t, int agg_id,
     size_t value_len = handler->db_get_buf_len;
     rc = raw_db_get(handler, handler->dbData, &dbkey, sizeof(dbkey),
 	handler->db_get_buf, &value_len, !handler->cfg.readonly ? DB_RMW : 0);
-    dbats_log(LOG_INFO, "load_frag t=%u, agg_id=%u, frag_id=%u: "
+    dbats_log(LOG_FINE, "load_frag t=%u, agg_id=%u, frag_id=%u: "
 	"raw_db_get(frag) = %d", t, agg_id, frag_id, rc);
     if (rc != 0) {
 	if (rc == DB_NOTFOUND) return 0; // no match
@@ -854,7 +854,7 @@ static int load_frag(dbats_handler *handler, uint32_t t, int agg_id,
 	}
 	len = qlz_decompress((void*)(handler->db_get_buf+1), ptr, handler->state_decompress);
 	// assert(len == fragsize(handler));
-	dbats_log(LOG_INFO, "decompressed frag t=%u, agg_id=%u, frag_id=%u: "
+	dbats_log(LOG_VERYFINE, "decompressed frag t=%u, agg_id=%u, frag_id=%u: "
 	    "%u -> %u (%.1f%%)",
 	    t, agg_id, frag_id, value_len, len, len*100.0/value_len);
 
@@ -862,7 +862,7 @@ static int load_frag(dbats_handler *handler, uint32_t t, int agg_id,
 	// copy fragment
 	// XXX TODO: don't memcpy; get directly into ptr
 	memcpy(ptr, handler->db_get_buf, len);
-	dbats_log(LOG_INFO, "copied frag t=%u, agg_id=%u, frag_id=%u",
+	dbats_log(LOG_VERYFINE, "copied frag t=%u, agg_id=%u, frag_id=%u",
 	    t, agg_id, frag_id);
     }
 
@@ -936,7 +936,7 @@ int dbats_select_time(dbats_handler *handler, uint32_t time_value, uint32_t flag
 {
     int rc;
 
-    dbats_log(LOG_INFO, "select_time %u", time_value);
+    dbats_log(LOG_FINE, "select_time %u", time_value);
 
     if ((rc = dbats_commit(handler)) != 0)
 	return rc;
@@ -957,7 +957,7 @@ int dbats_select_time(dbats_handler *handler, uint32_t time_value, uint32_t flag
 
 	if (handler->cfg.exclusive) {
 	    if (tslice->time == t) {
-		dbats_log(LOG_INFO, "select_time %u, agg_id=%d: already loaded", t, agg_id);
+		dbats_log(LOG_FINE, "select_time %u, agg_id=%d: already loaded", t, agg_id);
 		continue;
 	    }
 	    // free obsolete fragments
@@ -1007,7 +1007,7 @@ int dbats_select_time(dbats_handler *handler, uint32_t time_value, uint32_t flag
 	    if (tslice->frag[frag_id])
 		loaded++;
 	}
-	dbats_log(LOG_INFO, "select_time %u: agg_id=%d, loaded %u/%u fragments",
+	dbats_log(LOG_FINE, "select_time %u: agg_id=%d, loaded %u/%u fragments",
 	    time_value, agg_id, loaded, tslice->num_frags);
     }
 
@@ -1031,7 +1031,7 @@ int dbats_get_key_id(dbats_handler *handler, const char *key,
 	DB_READ_COMMITTED);
     if (rc == 0) {
 	// found it
-	dbats_log(LOG_INFO, "Found key #%u: %s", *key_id_p, key);
+	dbats_log(LOG_FINEST, "Found key #%u: %s", *key_id_p, key);
 	return 0;
 
     } else if (rc != DB_NOTFOUND) {
@@ -1040,7 +1040,7 @@ int dbats_get_key_id(dbats_handler *handler, const char *key,
 
     } else if (!(flags & DBATS_CREATE)) {
 	// didn't find, and can't create
-	dbats_log(LOG_INFO, "Key not found: %s", key);
+	dbats_log(LOG_FINE, "Key not found: %s", key);
 	return rc;
 
     } else {
@@ -1066,7 +1066,7 @@ int dbats_get_key_id(dbats_handler *handler, const char *key,
 	    dbats_log(LOG_ERROR, "Error creating keyname %s -> %u: %s", key, *key_id_p, db_strerror(rc));
 	    goto abort;
 	}
-	dbats_log(LOG_INFO, "Assigned key #%u: %s", *key_id_p, key);
+	dbats_log(LOG_FINEST, "Assigned key #%u: %s", *key_id_p, key);
 
 	return 0;
     }
@@ -1110,7 +1110,7 @@ static int instantiate_frag_func(dbats_handler *handler, int agg_id, uint32_t fr
     }
 
     // Allocate a new fragment.
-    dbats_log(LOG_INFO, "grow tslice for time %u, agg_id %d, frag_id %u",
+    dbats_log(LOG_VERYFINE, "grow tslice for time %u, agg_id %d, frag_id %u",
 	tslice->time, agg_id, frag_id);
 
     size_t len = fragsize(handler);
@@ -1124,7 +1124,7 @@ static int instantiate_frag_func(dbats_handler *handler, int agg_id, uint32_t fr
 	instantiate_isset_frags(handler, frag_id);
     }
 
-    dbats_log(LOG_INFO, "Grew tslice to %u elements",
+    dbats_log(LOG_VERYFINE, "Grew tslice to %u elements",
 	tslice->num_frags * ENTRIES_PER_FRAG);
 
     return 0;
@@ -1142,7 +1142,7 @@ static inline int instantiate_frag(dbats_handler *handler, int agg_id, uint32_t 
 
 int dbats_set(dbats_handler *handler, uint32_t key_id, const dbats_value *valuep)
 {
-    dbats_log(LOG_INFO, "dbats_set %u #%u = %" PRIval, handler->tslice[0]->time, key_id, valuep[0]); // XXX
+    dbats_log(LOG_VERYFINE, "dbats_set %u #%u = %" PRIval, handler->tslice[0]->time, key_id, valuep[0]); // XXX
     int rc;
 
     uint32_t frag_id = keyfrag(key_id);
@@ -1190,7 +1190,7 @@ int dbats_set(dbats_handler *handler, uint32_t key_id, const dbats_value *valuep
 	    }
 	}
 
-	dbats_log(LOG_INFO, "agg %d: aggval=%" PRIval " n=%d",
+	dbats_log(LOG_FINEST, "agg %d: aggval=%" PRIval " n=%d",
 	    agg_id, aggval[0], n); // XXX
 
 	for (int i = 0; i < handler->cfg.values_per_entry; i++) {
@@ -1270,7 +1270,7 @@ int dbats_set(dbats_handler *handler, uint32_t key_id, const dbats_value *valuep
 	}
 
 	if (changed || failed) {
-	    int level = failed ? LOG_ERROR : LOG_INFO;
+	    int level = failed ? LOG_ERROR : LOG_FINE;
 	    if (level <= dbats_log_level) { 
 		char aggbuf[64];
 		if (handler->agg[agg_id].func == DBATS_AGG_AVG)
@@ -1298,7 +1298,7 @@ int dbats_set(dbats_handler *handler, uint32_t key_id, const dbats_value *valuep
     memcpy(oldvaluep, valuep, handler->cfg.entry_size);
     vec_set(handler->tslice[0]->is_set[frag_id], offset);
     handler->tslice[0]->frag_changed[frag_id] = 1;
-    dbats_log(LOG_INFO, "Succesfully set value "
+    dbats_log(LOG_VERYFINE, "Succesfully set value "
 	"agg_id=%d frag_id=%u offset=%" PRIu32 " value_len=%u value=%" PRIval,
 	0, frag_id, offset, handler->cfg.entry_size, valuep[0]);
 
@@ -1356,7 +1356,7 @@ int dbats_get(dbats_handler *handler, uint32_t key_id,
 	} else {
 	    *valuepp = valueptr(handler, agg_id, frag_id, offset);
 	}
-	dbats_log(LOG_INFO, "Succesfully read value [offset=%" PRIu32 "][value_len=%u]",
+	dbats_log(LOG_VERYFINE, "Succesfully read value [offset=%" PRIu32 "][value_len=%u]",
 	    offset, handler->cfg.entry_size);
 
     } else {
@@ -1403,7 +1403,7 @@ int dbats_get_double(dbats_handler *handler, uint32_t key_id,
 	    return 1;
 	}
 	*valuepp = (double*)valueptr(handler, agg_id, frag_id, offset);
-	dbats_log(LOG_INFO, "Succesfully read value [offset=%" PRIu32 "][value_len=%u]",
+	dbats_log(LOG_VERYFINE, "Succesfully read value [offset=%" PRIu32 "][value_len=%u]",
 	    offset, handler->cfg.entry_size);
 
     } else {
