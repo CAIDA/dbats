@@ -355,7 +355,7 @@ dbats_handler *dbats_open(const char *path,
     handler->cfg.exclusive = !!(flags & DBATS_EXCLUSIVE);
     handler->cfg.no_txn = !!(flags & DBATS_NO_TXN);
     handler->cfg.values_per_entry = 1;
-    handler->cfg.serialize_writes = !handler->cfg.readonly;
+    handler->serialize = 1;
     handler->path = path;
 
     if ((rc = db_env_create(&handler->dbenv, 0)) != 0) {
@@ -963,15 +963,20 @@ int dbats_select_time(dbats_handler *handler, uint32_t time_value, uint32_t flag
     uint32_t min_time = 0;
     uint32_t max_time = 0;
 
-    if (handler->cfg.serialize_writes) {
-	// write lock on "agg0" enforces one writer at a time
+    if (handler->serialize) {
+	// Lock "agg0" to enforce one writer at a time.
+	// Timeslice transactions are sufficiently complex that they end up
+	// being serialized anyway.  By serializing up front, we avoid all
+	// deadlocks and don't need sub-transactions around dbats_get() and
+	// dbats_set().
 	int timeout = 10;
 	const char *keybuf = "agg0";
 	while (1) {
 	    size_t value_len;
 	    value_len = sizeof(dbats_agg);
+	    int dbflags = handler->cfg.readonly ? 0 : DB_RMW;
 	    rc = raw_db_get(handler, handler->dbMeta, keybuf, strlen(keybuf),
-		&handler->agg[0], &value_len, DB_RMW);
+		&handler->agg[0], &value_len, dbflags);
 	    if (rc == 0) break;
 	    if (rc != DB_LOCK_DEADLOCK || --timeout <= 0) {
 		dbats_log(LOG_ERROR, "error getting %s: %s", keybuf, db_strerror(rc));
@@ -1186,11 +1191,14 @@ int dbats_set(dbats_handler *handler, uint32_t key_id, const dbats_value *valuep
     }
 
 retry:
-    begin_transaction(handler, "set txn");
+    if (!handler->serialize)
+	begin_transaction(handler, "set txn");
 
     if ((rc = instantiate_frag(handler, 0, frag_id)) != 0) {
-	abort_transaction(handler); // set txn
-	if (rc == DB_LOCK_DEADLOCK) goto retry;
+	if (!handler->serialize) {
+	    abort_transaction(handler); // set txn
+	    if (rc == DB_LOCK_DEADLOCK) goto retry;
+	}
 	handler->cfg.readonly = 1;
 	return rc;
     }
@@ -1201,9 +1209,10 @@ retry:
     // For each agg_id, aggregate *valuep into tslice[agg_id].
     for (int agg_id = 1; agg_id < handler->cfg.num_aggs; agg_id++) {
 	if ((rc = instantiate_frag(handler, agg_id, frag_id)) != 0) {
-	    abort_transaction(handler); // set txn
-	    if (rc == DB_LOCK_DEADLOCK) goto retry;
-	    handler->cfg.readonly = 1;
+	    if (!handler->serialize) {
+		abort_transaction(handler); // set txn
+		if (rc == DB_LOCK_DEADLOCK) goto retry;
+	    }
 	    return rc;
 	}
 
@@ -1327,7 +1336,8 @@ retry:
 	    handler->tslice[agg_id]->frag_changed[frag_id] = 1;
 	} else if (failed) {
 	    handler->cfg.readonly = 1;
-	    abort_transaction(handler); // set txn
+	    if (!handler->serialize)
+		abort_transaction(handler); // set txn
 	    return failed;
 	}
     }
@@ -1341,7 +1351,8 @@ retry:
 	"agg_id=%d frag_id=%u offset=%" PRIu32 " value_len=%u value=%" PRIval,
 	0, frag_id, offset, handler->cfg.entry_size, valuep[0]);
 
-    commit_transaction(handler); // set txn
+    if (!handler->serialize)
+	commit_transaction(handler); // set txn
     return 0;
 }
 
@@ -1375,7 +1386,8 @@ int dbats_get(dbats_handler *handler, uint32_t key_id,
     uint32_t offset = keyoff(key_id);
 
 retry:
-    begin_transaction(handler, "get txn");
+    if (!handler->serialize)
+	begin_transaction(handler, "get txn");
 
     if ((rc = instantiate_frag(handler, agg_id, frag_id)) == 0) {
 	if (!vec_test(tslice->is_set[frag_id], offset)) {
@@ -1384,7 +1396,8 @@ retry:
 	    dbats_log(LOG_WARNING, "Value unset (v): %u %d %s",
 		tslice->time, agg_id, keyname);
 	    *valuepp = NULL;
-	    commit_transaction(handler);
+	    if (!handler->serialize)
+		commit_transaction(handler); // get txn
 	    return DB_NOTFOUND;
 	}
 	if (handler->agg[agg_id].func == DBATS_AGG_AVG) {
@@ -1393,7 +1406,8 @@ retry:
 	    if (!avg_buf) {
 		avg_buf = emalloc(handler->cfg.entry_size * handler->cfg.values_per_entry, "avg_buf");
 		if (!avg_buf) {
-		    abort_transaction(handler);
+		    if (!handler->serialize)
+			abort_transaction(handler); // get txn
 		    return errno ? errno : ENOMEM;
 		}
 	    }
@@ -1405,7 +1419,8 @@ retry:
 	}
 	dbats_log(LOG_VERYFINE, "Succesfully read value [offset=%" PRIu32 "][value_len=%u]",
 	    offset, handler->cfg.entry_size);
-	commit_transaction(handler);
+	if (!handler->serialize)
+	    commit_transaction(handler); // get txn
 	return 0;
 
     } else if (rc == DB_NOTFOUND) {
@@ -1414,12 +1429,15 @@ retry:
 	dbats_log(LOG_WARNING, "Value unset (f): %u %d %s",
 	    tslice->time, agg_id, keyname);
 	*valuepp = NULL;
-	commit_transaction(handler);
+	if (!handler->serialize)
+	    commit_transaction(handler); // get txn
 	return rc;
 
     } else {
-	abort_transaction(handler);
-	if (rc == DB_LOCK_DEADLOCK) goto retry;
+	if (!handler->serialize) {
+	    abort_transaction(handler); // get txn
+	    if (rc == DB_LOCK_DEADLOCK) goto retry;
+	}
 	return rc;
     }
 }
@@ -1445,7 +1463,8 @@ int dbats_get_double(dbats_handler *handler, uint32_t key_id,
     uint32_t offset = keyoff(key_id);
 
 retry:
-    begin_transaction(handler, "get txn");
+    if (!handler->serialize)
+	begin_transaction(handler, "get txn");
 
     if ((rc = instantiate_frag(handler, agg_id, frag_id)) == 0) {
 	if (!vec_test(tslice->is_set[frag_id], offset)) {
@@ -1454,13 +1473,15 @@ retry:
 	    dbats_log(LOG_WARNING, "Value unset (v): %u %d %s",
 		tslice->time, agg_id, keyname);
 	    *valuepp = NULL;
-	    commit_transaction(handler);
+	    if (!handler->serialize)
+		commit_transaction(handler); // get txn
 	    return DB_NOTFOUND;
 	}
 	*valuepp = (double*)valueptr(handler, agg_id, frag_id, offset);
 	dbats_log(LOG_VERYFINE, "Succesfully read value [offset=%" PRIu32 "][value_len=%u]",
 	    offset, handler->cfg.entry_size);
-	commit_transaction(handler);
+	if (!handler->serialize)
+	    commit_transaction(handler); // get txn
 	return 0;
 
     } else if (rc == DB_NOTFOUND) {
@@ -1469,12 +1490,15 @@ retry:
 	dbats_log(LOG_WARNING, "Value unset (f): %u %d %s",
 	    tslice->time, agg_id, keyname);
 	*valuepp = NULL;
-	commit_transaction(handler);
+	if (!handler->serialize)
+	    commit_transaction(handler); // get txn
 	return rc;
 
     } else {
-	abort_transaction(handler);
-	if (rc == DB_LOCK_DEADLOCK) goto retry;
+	if (!handler->serialize) {
+	    abort_transaction(handler); // get txn
+	    if (rc == DB_LOCK_DEADLOCK) goto retry;
+	}
 	return rc;
     }
 }
