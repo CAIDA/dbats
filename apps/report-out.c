@@ -133,6 +133,9 @@ int main(int argc, char *argv[]) {
     if (begin == 0) begin = agg0->times.start;
     if (end == 0) end = agg0->times.end;
 
+    const volatile dbats_config *cfg = dbats_get_config(handler);
+    dbats_commit(handler); // commit the txn started by dbats_open
+
     if (keyfile_path)
 	load_keys(handler, keyfile_path);
     else
@@ -142,22 +145,20 @@ int main(int argc, char *argv[]) {
     out = stdout;
     run_start = time(NULL);
 
-    const volatile dbats_config *cfg = dbats_get_config(handler);
-
     if (outtype == OT_GNUPLOT) {
 	fprintf(out, "set style data steps\n");
 	fprintf(out, "set xrange [%" PRIu32 ":%" PRIu32 "]\n",
 	    0, end + agg0->period - begin);
-	const volatile dbats_agg *agg;
+	const volatile dbats_agg *agg1;
 	if (cfg->num_aggs > 0) {
-	    agg = dbats_get_agg(handler, 1);
-	    fprintf(out, "set xtics %d\n", agg->period);
-	    fprintf(out, "set mxtics %d\n", agg->steps);
+	    agg1 = dbats_get_agg(handler, 1);
+	    fprintf(out, "set xtics %d\n", agg1->period);
+	    fprintf(out, "set mxtics %d\n", agg1->steps);
 	    fprintf(out, "set grid xtics\n");
 	}
 	const char *prefix = "plot";
 	for (int agg_id = 0; agg_id < cfg->num_aggs; agg_id++) {
-	    agg = dbats_get_agg(handler, agg_id);
+	    const volatile dbats_agg *agg = dbats_get_agg(handler, agg_id);
 	    fprintf(out, "%s '-' using ($1-%"PRIu32"):($2) "
 		"linecolor %d title \"%"PRIu32"s %s\"",
 		prefix, begin,
