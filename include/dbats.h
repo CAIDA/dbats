@@ -92,6 +92,7 @@ typedef struct {
     uint8_t compress;          ///< Compress data written to db (O)
     uint8_t exclusive;         ///< Obtain exclusive lock on whole db (O)
     uint8_t no_txn;            ///< Don't use transactions (O)
+    uint8_t serialize_writes;  // allow only one writer at a time
     uint16_t num_aggs;         ///< Number of aggregations (C)
     uint16_t values_per_entry; ///< Number of dbats_values in an entry (C)
     uint16_t entry_size;       ///< Size of an entry in bytes (C)
