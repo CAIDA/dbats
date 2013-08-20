@@ -78,6 +78,7 @@ struct dbats_handler {
     const char *path;          // path of BDB environment directory
     uint8_t is_open;
     uint8_t preload;           // load frags when tslice is selected
+    uint8_t serialize;         // allow only one writer at a time
     void *state_compress;
     void *state_decompress;
     DB_ENV *dbenv;             // DB environment
