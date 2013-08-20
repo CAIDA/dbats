@@ -21,12 +21,13 @@
  *  - Open a database with dbats_open().
  *  - If this is a new database, define aggregate time series with
  *    dbats_aggregate().
- *  - loop:
+ *  - Optionally, dbats_commit().
+ *  - Loop:
  *    - Select a working time slice with dbats_select_time().
- *    - write primary values for multiple keys with dbats_set(), and/or
- *    - read primary and/or aggregate values for multiple keys with dbats_get()
- *    - optionally, dbats_commit()
- *  - Close the database with dbats_close()
+ *    - Write primary values for multiple keys with dbats_set(), and/or
+ *    - read primary and/or aggregate values for multiple keys with dbats_get().
+ *    - Optionally, dbats_commit().
+ *  - Close the database with dbats_close().
  *
  *  Functions that return an int will return one of the following types of
  *  values:
@@ -106,14 +107,23 @@ typedef struct dbats_handler dbats_handler; ///< Opaque handle for a DBATS db
 
 /* ************************************************** */
 
-/** Open a DBATS database.
+/** Open an existing or new DBATS database.
+ *  Some configuration parameters can be set only when creating a database;
+ *  when opening an existing database, those parameters will be silently
+ *  ignored.
+ *  This function also begins a transaction, so that database creation and
+ *  subsequent dbats_aggregate() calls will not have race conditions with
+ *  other processes.  If there will be a delay before your first call to
+ *  dbats_select_time(), you should call dbats_commit() to release the locks
+ *  and allow other processes to access the database during the delay.
  *  @param[in] dbats_path path of a directory containing a DBATS database
  *  @param[in] values_per_entry number of dbats_values in the array read by
  *    dbats_get() or written by dbats_set().
  *  @param[in] period the number of seconds between data values
  *  @param[in] flags a bitwise-OR combination of any of the following:
  *    -	DBATS_CREATE - create the database if it doesn't already exist
- *    -	DBATS_READONLY - do not allow writing to the database
+ *    -	DBATS_READONLY - do not allow writing to the database (improves
+ *      performance).
  *    -	DBATS_UNCOMPRESSED - do not compress written timeseries data
  *    -	DBATS_EXCLUSIVE - do not allow any other process to access the database
  *    -	DBATS_NO_TXN - do not use transactions (unsafe)
@@ -128,13 +138,15 @@ extern dbats_handler *dbats_open(const char *dbats_path,
 
 /** Close a database opened by dbats_open().
  *  Automatically calls dbats_commit() if needed to commit any operations since
- *  the last call to dbats_select_time().
+ *  the last call to dbats_open() or dbats_select_time().
  *  @param[in] handler A dbats_handler created by dbats_open().
  */
 extern void dbats_close(dbats_handler *handler);
 
 /** Defines an aggregate.
- *  Can be called only before writing data with dbats_set().
+ *  Should be called after opening a database with dbats_open() but before
+ *  dbats_commit() or dbats_select_time(), and before any data has been
+ *  written to the database.
  *  @param[in] handler A dbats_handler created by dbats_open().
  *  @param[in] func one of the following values indicating which aggregation
  *    function to apply to the data points:
@@ -148,26 +160,26 @@ extern void dbats_close(dbats_handler *handler);
  */
 extern int dbats_aggregate(dbats_handler *handler, int func, int steps);
 
-/** Round a time value down to a multiple of period.
+/** Round a time value down to a multiple of an aggregate's period.
  *  @param[in] handler A dbats_handler created by dbats_open().
  *  @param[in] agg_id which aggregate's period to use (use 0 for the primary
  *    data series).
- *  @param[in] time a unix time value (seconds since 1970-01-01 00:00:00 UTC,
- *    without leap seconds).  Value will be rounded down to the nearest
+ *  @param[in,out] t a unix time value (seconds since 1970-01-01 00:00:00
+ *    UTC, without leap seconds).  Value will be rounded down to the nearest
  *    multiple of the data period, counting from 00:00 on the first Sunday of
  *    1970.
- *  @return the rounded time value
+ *  @return the rounded time value (*t)
  */
 extern uint32_t dbats_normalize_time(const dbats_handler *handler, int agg_id,
-    uint32_t *time);
+    uint32_t *t);
 
 /** Select a time period to operate on in subsequent calls to dbats_get() and
  *  dbats_set().
  *  Automatically calls dbats_commit() if needed to commit any operations since
- *  the last call to dbats_select_time().
+ *  the last call to dbats_open() or dbats_select_time().
  *  @param[in] handler A dbats_handler created by dbats_open().
  *  @param[in] time_value the desired time, which will be rounded down by
- *    \ref dbats_normalize_time (handler, 0, &time_value).
+ *    dbats_normalize_time().
  *  @param[in] flags a bitwise-OR combination of any of the following:
  *    - DBATS_PRELOAD - load data immediately instead of waiting until it's
  *      needed (rarely useful)
@@ -179,7 +191,8 @@ extern int dbats_select_time(dbats_handler *handler,
 /** Commit pending writes to the on-disk database and release any associated
  *  database locks and other resources.
  *  Calling this directly is useful if there will be a delay before your next
- *  call to dbats_select_time().
+ *  call to dbats_select_time() and there are other processes trying to access
+ *  the database.
  *  @param[in] handler A dbats_handler created by dbats_open().
  *  @return 0 for success, nonzero for error.
  */
@@ -210,7 +223,8 @@ extern int dbats_get_key_name(dbats_handler *handler, uint32_t key_id,
 
 /** Write a value to the primary time series for the specified key and the
  *  time selected by dbats_select_time().
- *  All aggregates including this primary data point will also be updated.
+ *  All aggregate values whose time ranges contain this primary data point
+ *  will also be updated.
  *  @param[in] handler A dbats_handler created by dbats_open().
  *  @param[in] key_id the id of the key.
  *  @param[in] valuep a pointer to an array of values_per_entry dbats_value
@@ -222,7 +236,8 @@ extern int dbats_set(dbats_handler *handler, uint32_t key_id,
 
 /** Write a value to the primary time series for the specified key and the
  *  time selected by dbats_select_time().
- *  Equivalent to dbats_get_key_id() followed by dbats_set().
+ *  Equivalent to \ref dbats_get_key_id (handler, key, &key_id, DBATS_CREATE)
+ *  followed by \ref dbats_set (handler, key_id, valuep).
  *  Note that dbats_set() is much faster than dbats_set_by_key() if you know
  *  the key_id already.
  *  @param[in] handler A dbats_handler created by dbats_open().
@@ -234,8 +249,8 @@ extern int dbats_set(dbats_handler *handler, uint32_t key_id,
 extern int dbats_set_by_key (dbats_handler *handler, const char *key,
     const dbats_value *valuep);
 
-/** Read an array of dbats_value from the database for the specified key and the
- *  time selected by dbats_select_time().
+/** Read an entry (array of dbats_value) from the database for the specified
+ *  key and the time selected by dbats_select_time().
  *  @param[in] handler A dbats_handler created by dbats_open().
  *  @param[in] key_id the id of the key.
  *  @param[out] valuepp the address of a dbats_value*; after the call,
@@ -248,16 +263,15 @@ extern int dbats_set_by_key (dbats_handler *handler, const char *key,
 extern int dbats_get(dbats_handler *handler, uint32_t key_id,
     const dbats_value **valuepp, int agg_id);
 
-/** Read a double value from the database for the specified key and the
- *  time selected by dbats_select_time().
+/** Read an array of double values from the database for the specified key and
+ *  the time selected by dbats_select_time().
  *  This function can be applied only to DBATS_AGG_AVG values.
  *  @param[in] handler A dbats_handler created by dbats_open().
  *  @param[in] key_id the id of the key.
- *  @param[out] valuepp the address of a dbats_value*; after the call,
+ *  @param[out] valuepp the address of a double*; after the call,
  *    *valuepp will point to an array of values_per_entry double values
  *    read from the database.
- *  @param[in] agg_id which aggregate's value to get (use 0 for the primary
- *    data series).
+ *  @param[in] agg_id which aggregate's value to get.
  *  @return 0 for success, nonzero for error.
  */
 extern int dbats_get_double(dbats_handler *handler, uint32_t key_id,
