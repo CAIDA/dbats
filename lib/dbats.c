@@ -352,6 +352,7 @@ dbats_handler *dbats_open(const char *path,
     dbats_handler *handler = ecalloc(1, sizeof(dbats_handler), "handler");
     if (!handler) return NULL;
     handler->cfg.readonly = !!(flags & DBATS_READONLY);
+    handler->cfg.updatable = !!(flags & DBATS_UPDATABLE);
     handler->cfg.compress = !(flags & DBATS_UNCOMPRESSED);
     handler->cfg.exclusive = !!(flags & DBATS_EXCLUSIVE);
     handler->cfg.no_txn = !!(flags & DBATS_NO_TXN);
@@ -1197,7 +1198,7 @@ int dbats_set(dbats_handler *handler, uint32_t key_id, const dbats_value *valuep
 
     if (!handler->is_open || handler->cfg.readonly) {
 	dbats_log(LOG_ERROR, "is_open=%d, readonly=%d", handler->is_open, handler->cfg.readonly);
-	return -1;
+	return EPERM;
     }
 
 retry:
@@ -1213,6 +1214,10 @@ retry:
     }
 
     uint8_t was_set = vec_test(handler->tslice[0]->is_set[frag_id], offset);
+    if (was_set & !handler->cfg.updatable) {
+	dbats_log(LOG_ERROR, "value is already set: t=%" PRIu32 " keyid=%d", handler->tslice[0]->time, key_id);
+	return EEXIST;
+    }
     dbats_value *oldvaluep = valueptr(handler, 0, frag_id, offset);
 
     // For each agg_id, aggregate *valuep into tslice[agg_id].
@@ -1610,10 +1615,10 @@ int dbats_walk_keyid_end(dbats_handler *handler)
 
 /*************************************************************************/
 
-const volatile dbats_config *dbats_get_config(dbats_handler *handler)
+const dbats_config *dbats_get_config(dbats_handler *handler)
     { return &handler->cfg; }
 
-const volatile dbats_agg *dbats_get_agg(dbats_handler *handler, int agg_id)
+const dbats_agg *dbats_get_agg(dbats_handler *handler, int agg_id)
     { return &handler->agg[agg_id]; }
 
 /*************************************************************************/

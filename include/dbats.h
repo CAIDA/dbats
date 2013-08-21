@@ -55,6 +55,7 @@
 #define DBATS_UNCOMPRESSED   0x10 ///< don't compress written timeseries data
 #define DBATS_EXCLUSIVE      0x20 ///< obtain exclusive lock on whole db
 #define DBATS_NO_TXN         0x40 ///< don't use transactions (for debugging only)
+#define DBATS_UPDATABLE      0x80 ///< allow updates to existing values
 ///@}
 
 /** @name Aggregation functions */
@@ -93,6 +94,7 @@ typedef struct {
     uint8_t compress;          ///< Compress data written to db (O)
     uint8_t exclusive;         ///< Obtain exclusive lock on whole db (O)
     uint8_t no_txn;            ///< Don't use transactions (O)
+    uint8_t updatable;         ///< Allow updates to existing values (O)
     uint16_t num_aggs;         ///< Number of aggregations (C)
     uint16_t values_per_entry; ///< Number of dbats_values in an entry (C)
     uint16_t entry_size;       ///< Size of an entry in bytes (C)
@@ -229,15 +231,20 @@ extern int dbats_get_key_name(dbats_handler *handler, uint32_t key_id,
  *  @param[in] key_id the id of the key.
  *  @param[in] valuep a pointer to an array of values_per_entry dbats_value
  *    to be written to the database.
- *  @return 0 for success, nonzero for error.
+ *  @return
+ *    - 0 for success;
+ *    - EPERM if the handler is not open or was opened with DBATS_READONLY;
+ *    - EEXIST if a value already exists for the given time and key and handler
+ *      was not opened with DBATS_UPDATABLE;
+ *    - other nonzero value for other errors.
  */
 extern int dbats_set(dbats_handler *handler, uint32_t key_id,
     const dbats_value *valuep);
 
 /** Write a value to the primary time series for the specified key and the
  *  time selected by dbats_select_time().
- *  Equivalent to \ref dbats_get_key_id (handler, key, &key_id, flags)
- *  followed by \ref dbats_set (handler, key_id, valuep).
+ *  Equivalent to @ref dbats_get_key_id (handler, key, &key_id, flags)
+ *  followed by @ref dbats_set (handler, key_id, valuep).
  *  Note that dbats_set() is much faster than dbats_set_by_key() if you know
  *  the key_id already.
  *  @param[in] handler A dbats_handler created by dbats_open().
@@ -246,8 +253,13 @@ extern int dbats_set(dbats_handler *handler, uint32_t key_id,
  *    to be written to the database.
  *  @param[in] flags a bitwise-OR combination of any of the following:
  *    - DBATS_CREATE - create the key if it does not already exist.
- *  @return 0 for success, DB_NOTFOUND if the key does not exist and
- *    DBATS_CREATE flag was not set, or other nonzero value for error.
+ *  @return
+ *    - 0 for success;
+ *    - EPERM if the handler is not open or was opened with DBATS_READONLY;
+ *    - DB_NOTFOUND if the key does not exist and DBATS_CREATE flag was not set;
+ *    - EEXIST if a value already exists for the given time and key, and
+ *      handler was not opened with DBATS_UPDATABLE;
+ *    - other nonzero value for other errors.
  */
 extern int dbats_set_by_key (dbats_handler *handler, const char *key,
     const dbats_value *valuep, int flags);
@@ -362,13 +374,13 @@ extern int dbats_walk_keyid_end(dbats_handler *handler);
  *  @param[in] handler A dbats_handler created by dbats_open().
  *  @return pointer to a dbats_config containing configuration parameters.
  */
-extern const volatile dbats_config *dbats_get_config(dbats_handler *handler);
+extern const dbats_config *dbats_get_config(dbats_handler *handler);
 
 /** Get aggregation parameters from a DBATS database.
  *  @param[in] handler A dbats_handler created by dbats_open().
  *  @param[in] agg_id The id of the aggregate.
  *  @return pointer to a dbats_agg describing the aggregate specified by agg_id.
  */
-extern const volatile dbats_agg *dbats_get_agg(dbats_handler *handler, int agg_id);
+extern const dbats_agg *dbats_get_agg(dbats_handler *handler, int agg_id);
 
 extern void dbats_stat_print(const dbats_handler *handler);
