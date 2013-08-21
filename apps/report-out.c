@@ -26,10 +26,10 @@ static void help(void) {
 
 /* ***************************************************************** */
 
-#define MAX_KEYS 262144
+#define MAX_KEYS 10000000
 struct keyinfo {
     uint32_t keyid;
-    char key[DBATS_KEYLEN];
+    char *key;
 };
 static struct keyinfo keys[MAX_KEYS];
 static int n_keys = 0;
@@ -41,13 +41,15 @@ static void load_keys(dbats_handler *handler, const char *path)
 	fprintf(stderr, "%s: %s\n", path, strerror(errno));
 	exit(-1);
     }
-    while (fgets(keys[n_keys].key, sizeof(keys[n_keys].key), keyfile)) {
-	char *p = strchr(keys[n_keys].key, '\n');
+    char keybuf[DBATS_KEYLEN+1];
+    while (fgets(keybuf, sizeof(keybuf), keyfile)) {
+	char *p = strchr(keybuf, '\n');
 	if (p) *p = 0;
-	if (dbats_get_key_id(handler, keys[n_keys].key, &keys[n_keys].keyid, 0) != 0) {
-	    fprintf(stderr, "no such key: %s\n", keys[n_keys].key);
+	if (dbats_get_key_id(handler, keybuf, &keys[n_keys].keyid, 0) != 0) {
+	    fprintf(stderr, "no such key: %s\n", keybuf);
 	    exit(-1);
 	}
+	keys[n_keys].key = strdup(keybuf);
 	n_keys++;
     }
     if (ferror(keyfile)) {
@@ -59,7 +61,9 @@ static void load_keys(dbats_handler *handler, const char *path)
 static void get_keys(dbats_handler *handler)
 {
     dbats_walk_keyid_start(handler);
-    while (dbats_walk_keyid_next(handler, &keys[n_keys].keyid, keys[n_keys].key) == 0) {
+    char keybuf[DBATS_KEYLEN];
+    while (dbats_walk_keyid_next(handler, &keys[n_keys].keyid, keybuf) == 0) {
+	keys[n_keys].key = strdup(keybuf);
 	n_keys++;
     }
     dbats_walk_keyid_end(handler);
