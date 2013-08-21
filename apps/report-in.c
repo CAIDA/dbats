@@ -13,6 +13,7 @@ static void help(void) {
     fprintf(stderr, "-t             don't use transactions (fast, but unsafe)\n");
     fprintf(stderr, "-p             preload timeslices\n");
     fprintf(stderr, "-Z             don't compress db\n");
+    fprintf(stderr, "-i             initialize db only; do not write data\n");
     exit(-1);
 }
 
@@ -24,6 +25,7 @@ int main(int argc, char *argv[]) {
     uint32_t period = 60;
     int select_flags = 0;
     int open_flags = DBATS_CREATE;
+    int init_only = 0;
     progname = argv[0];
 
     dbats_log_level = LOG_INFO;
@@ -34,7 +36,7 @@ int main(int argc, char *argv[]) {
     char key[128];
 
     int c;
-    while ((c = getopt(argc, argv, "v:xtpZ")) != -1) {
+    while ((c = getopt(argc, argv, "v:xtpZi")) != -1) {
 	switch (c) {
 	case 'v':
 	    dbats_log_level = atoi(optarg);
@@ -50,6 +52,9 @@ int main(int argc, char *argv[]) {
 	    break;
 	case 'Z':
 	    open_flags |= DBATS_UNCOMPRESSED;
+	    break;
+	case 'i':
+	    init_only = 1;
 	    break;
 	default:
 	    help();
@@ -88,7 +93,7 @@ int main(int argc, char *argv[]) {
 	int n = scanf("%127s %" SCNval " %" SCNu32 "\n", key, &value, &t);
 	if (n != 3) break;
 
-	if (t != last_t) {
+	if (t != last_t && !init_only) {
 	    dbats_log(LOG_INFO, "report-in: select time %u", t);
 	    if (dbats_select_time(handler, t, select_flags) == -1)
 		return(-1);
@@ -105,8 +110,10 @@ int main(int argc, char *argv[]) {
 	    keys[key_id] = strdup(key);
 	}
 
-	if (dbats_set(handler, key_id, &value) != 0)
-	    return -1;
+	if (!init_only) {
+	    if (dbats_set(handler, key_id, &value) != 0)
+		return -1;
+	}
 	key_id++;
     }
 
