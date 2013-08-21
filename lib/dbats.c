@@ -385,17 +385,17 @@ dbats_handler *dbats_open(const char *path,
 	    flags &= ~DBATS_CREATE;
 	    // Wait for $path/meta to exist to avoid race condition with
 	    // another process creating a dbats environment.
-	    char file[PATH_MAX];
+	    char filename[PATH_MAX];
 	    struct stat statbuf;
 	    int timeout = 10;
-	    sprintf(file, "%s/meta", path);
-	    while (stat(file, &statbuf) != 0) {
+	    sprintf(filename, "%s/meta", path);
+	    while (stat(filename, &statbuf) != 0) {
 		if (errno != ENOENT) {
-		    dbats_log(LOG_ERROR, "Error checking %s: %s", file, strerror(errno));
+		    dbats_log(LOG_ERROR, "Error checking %s: %s", filename, strerror(errno));
 		    return NULL;
 		}
 		if (--timeout <= 0) {
-		    dbats_log(LOG_ERROR, "Timeout waiting for %s", file);
+		    dbats_log(LOG_ERROR, "Timeout waiting for %s", filename);
 		    return NULL;
 		}
 		sleep(1);
@@ -408,12 +408,27 @@ dbats_handler *dbats_open(const char *path,
 	}
     }
 
-    if ((rc = handler->dbenv->set_lk_max_locks(handler->dbenv, 20000)) != 0) {
+    if (is_new) {
+	char filename[PATH_MAX];
+	sprintf(filename, "%s/DB_CONFIG", path);
+	FILE *file = fopen(filename, "w");
+	if (!file) {
+	    dbats_log(LOG_ERROR, "Error opening %s: %s", filename, strerror(errno));
+	    return NULL;
+	}
+	fprintf(file, "log_set_config DB_LOG_AUTO_REMOVE on\n");
+	fclose(file);
+    }
+
+    // These can't be changed after writing to the environment, so there's
+    // no point in putting them in $path/DB_CONFIG.
+    // XXX These should be based on max expected number of metric keys?
+    // 40000 is enough to insert at least 2000000 metric keys.
+    if ((rc = handler->dbenv->set_lk_max_locks(handler->dbenv, 40000)) != 0) {
 	dbats_log(LOG_ERROR, "Error in set_lk_max_locks: %s: %s", path, db_strerror(rc));
 	return NULL;
     }
-
-    if ((rc = handler->dbenv->set_lk_max_objects(handler->dbenv, 20000)) != 0) {
+    if ((rc = handler->dbenv->set_lk_max_objects(handler->dbenv, 40000)) != 0) {
 	dbats_log(LOG_ERROR, "Error in set_lk_max_objects: %s: %s", path, db_strerror(rc));
 	return NULL;
     }
