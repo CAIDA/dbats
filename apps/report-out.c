@@ -19,7 +19,7 @@ static void help(void) {
     fprintf(stderr, "               (default: first time in db)\n");
     fprintf(stderr, "-e{end}        end time\n");
     fprintf(stderr, "               (default: last time in db)\n");
-    fprintf(stderr, "-o text        output text\n");
+    fprintf(stderr, "-o text        output text (default)\n");
     fprintf(stderr, "-o gnuplot     output gnuplot script\n");
     exit(-1);
 }
@@ -133,11 +133,11 @@ int main(int argc, char *argv[]) {
     handler = dbats_open(dbats_path, 0, 0, open_flags);
     if (!handler) return(-1);
 
-    const volatile dbats_agg *agg0 = dbats_get_agg(handler, 0);
+    const dbats_agg *agg0 = dbats_get_agg(handler, 0);
     if (begin == 0) begin = agg0->times.start;
     if (end == 0) end = agg0->times.end;
 
-    const volatile dbats_config *cfg = dbats_get_config(handler);
+    const dbats_config *cfg = dbats_get_config(handler);
     dbats_commit(handler); // commit the txn started by dbats_open
 
     if (keyfile_path)
@@ -153,7 +153,7 @@ int main(int argc, char *argv[]) {
 	fprintf(out, "set style data steps\n");
 	fprintf(out, "set xrange [%" PRIu32 ":%" PRIu32 "]\n",
 	    0, end + agg0->period - begin);
-	const volatile dbats_agg *agg1;
+	const dbats_agg *agg1;
 	if (cfg->num_aggs > 0) {
 	    agg1 = dbats_get_agg(handler, 1);
 	    fprintf(out, "set xtics %d\n", agg1->period);
@@ -162,7 +162,7 @@ int main(int argc, char *argv[]) {
 	}
 	const char *prefix = "plot";
 	for (int agg_id = 0; agg_id < cfg->num_aggs; agg_id++) {
-	    const volatile dbats_agg *agg = dbats_get_agg(handler, agg_id);
+	    const dbats_agg *agg = dbats_get_agg(handler, agg_id);
 	    fprintf(out, "%s '-' using ($1-%"PRIu32"):($2) "
 		"linecolor %d title \"%"PRIu32"s %s\"",
 		prefix, begin,
@@ -173,7 +173,7 @@ int main(int argc, char *argv[]) {
     }
 
     for (int agg_id = 0; agg_id < cfg->num_aggs; agg_id++) {
-	const volatile dbats_agg *agg = dbats_get_agg(handler, agg_id);
+	const dbats_agg *agg = dbats_get_agg(handler, agg_id);
 	char strval[64];
 	strval[0] = '\0';
 	uint32_t t;

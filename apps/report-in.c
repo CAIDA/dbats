@@ -67,7 +67,7 @@ int main(int argc, char *argv[]) {
     handler = dbats_open(dbats_path, 1, period, open_flags);
     if (!handler) return -1;
 
-    const volatile dbats_config *cfg = dbats_get_config(handler);
+    const dbats_config *cfg = dbats_get_config(handler);
     if (cfg->num_aggs == 1) {
 	dbats_log(LOG_INFO, "report-in: config aggs");
 	if (dbats_aggregate(handler, DBATS_AGG_MIN, 10) != 0)
