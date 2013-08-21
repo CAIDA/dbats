@@ -86,17 +86,19 @@ int main(int argc, char *argv[]) {
 	if (dbats_aggregate(handler, DBATS_AGG_SUM, 10) != 0)
 	    return -1;
     }
-    dbats_commit(handler); // commit the txn started by dbats_open
+    if (!init_only) dbats_commit(handler); // commit the txn started by dbats_open
 
     uint32_t key_id = 0;
     while (1) {
 	int n = scanf("%127s %" SCNval " %" SCNu32 "\n", key, &value, &t);
 	if (n != 3) break;
 
-	if (t != last_t && !init_only) {
-	    dbats_log(LOG_INFO, "report-in: select time %u", t);
-	    if (dbats_select_time(handler, t, select_flags) == -1)
-		return(-1);
+	if (t != last_t) {
+	    if (!init_only) {
+		dbats_log(LOG_INFO, "report-in: select time %u", t);
+		if (dbats_select_time(handler, t, select_flags) == -1)
+		    return(-1);
+	    }
 	    key_id = 0;
 	}
 	last_t = t;
