@@ -236,7 +236,7 @@ extern int dbats_set(dbats_handler *handler, uint32_t key_id,
 
 /** Write a value to the primary time series for the specified key and the
  *  time selected by dbats_select_time().
- *  Equivalent to \ref dbats_get_key_id (handler, key, &key_id, DBATS_CREATE)
+ *  Equivalent to \ref dbats_get_key_id (handler, key, &key_id, flags)
  *  followed by \ref dbats_set (handler, key_id, valuep).
  *  Note that dbats_set() is much faster than dbats_set_by_key() if you know
  *  the key_id already.
@@ -244,10 +244,13 @@ extern int dbats_set(dbats_handler *handler, uint32_t key_id,
  *  @param[in] key the name of the key.
  *  @param[in] valuep a pointer to an array of values_per_entry dbats_values
  *    to be written to the database.
- *  @return 0 for success, nonzero for error.
+ *  @param[in] flags a bitwise-OR combination of any of the following:
+ *    - DBATS_CREATE - create the key if it does not already exist.
+ *  @return 0 for success, DB_NOTFOUND if the key does not exist and
+ *    DBATS_CREATE flag was not set, or other nonzero value for error.
  */
 extern int dbats_set_by_key (dbats_handler *handler, const char *key,
-    const dbats_value *valuep);
+    const dbats_value *valuep, int flags);
 
 /** Read an entry (array of dbats_value) from the database for the specified
  *  key and the time selected by dbats_select_time().

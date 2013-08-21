@@ -1209,7 +1209,6 @@ retry:
 	    abort_transaction(handler); // set txn
 	    if (rc == DB_LOCK_DEADLOCK) goto retry;
 	}
-	handler->cfg.readonly = 1;
 	return rc;
     }
 
@@ -1345,7 +1344,6 @@ retry:
 	    vec_set(handler->tslice[agg_id]->is_set[frag_id], offset);
 	    handler->tslice[agg_id]->frag_changed[frag_id] = 1;
 	} else if (failed) {
-	    handler->cfg.readonly = 1;
 	    if (!handler->serialize)
 		abort_transaction(handler); // set txn
 	    return failed;
@@ -1367,15 +1365,13 @@ retry:
 }
 
 int dbats_set_by_key(dbats_handler *handler, const char *key,
-    const dbats_value *valuep)
+    const dbats_value *valuep, int flags)
 {
     int rc;
     uint32_t key_id;
 
-    if ((rc = dbats_get_key_id(handler, key, &key_id, DBATS_CREATE)) != 0) {
-	handler->cfg.readonly = 1;
+    if ((rc = dbats_get_key_id(handler, key, &key_id, flags)) != 0)
 	return rc;
-    }
     return dbats_set(handler, key_id, valuep);
 }
 
