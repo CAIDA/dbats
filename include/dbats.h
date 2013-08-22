@@ -113,6 +113,8 @@ typedef struct dbats_handler dbats_handler; ///< Opaque handle for a DBATS db
  *  Some configuration parameters can be set only when creating a database;
  *  when opening an existing database, those parameters will be silently
  *  ignored.
+ *  By default, the database will allow reading data values and inserting new
+ *  data values, but not updating existing data values.
  *  This function also begins a transaction, so that database creation and
  *  subsequent dbats_aggregate() calls will not have race conditions with
  *  other processes.  If there will be a delay before your first call to
@@ -120,8 +122,10 @@ typedef struct dbats_handler dbats_handler; ///< Opaque handle for a DBATS db
  *  and allow other processes to access the database during the delay.
  *  @param[in] dbats_path path of a directory containing a DBATS database
  *  @param[in] values_per_entry number of dbats_values in the array read by
- *    dbats_get() or written by dbats_set().
+ *    dbats_get() or written by dbats_set()
+ *    (only if creating a new database).
  *  @param[in] period the number of seconds between data values
+ *    (only if creating a new database).
  *  @param[in] flags a bitwise-OR combination of any of the following:
  *    -	DBATS_CREATE - create the database if it doesn't already exist
  *    -	DBATS_READONLY - do not allow writing to the database (improves
@@ -129,6 +133,7 @@ typedef struct dbats_handler dbats_handler; ///< Opaque handle for a DBATS db
  *    -	DBATS_UNCOMPRESSED - do not compress written timeseries data
  *    -	DBATS_EXCLUSIVE - do not allow any other process to access the database
  *    -	DBATS_NO_TXN - do not use transactions (unsafe)
+ *    -	DBATS_UPDATABLE - allow updates to existing values
  *  @return On success, returns a pointer to an opaque dbats_handler that
  *  must be passed to all subsequent calls on this database.  On failure,
  *  returns NULL.
@@ -177,8 +182,12 @@ extern uint32_t dbats_normalize_time(const dbats_handler *handler, int agg_id,
 
 /** Select a time period to operate on in subsequent calls to dbats_get() and
  *  dbats_set().
- *  Automatically calls dbats_commit() if needed to commit any operations since
- *  the last call to dbats_open() or dbats_select_time().
+ *  This function automatically calls dbats_commit() if needed to commit any
+ *  operations since the last call to dbats_open() or dbats_select_time().
+ *  Then this function selects a time period and begins a new transaction.
+ *  All subsequent calls to dbats_get() and dbats_set() will take place in this
+ *  transaction, up to the next call to dbats_select_time(), dbats_commit(),
+ *  dbats_abort(), or dbats_close().
  *  @param[in] handler A dbats_handler created by dbats_open().
  *  @param[in] time_value the desired time, which will be rounded down by
  *    dbats_normalize_time().
@@ -190,17 +199,29 @@ extern uint32_t dbats_normalize_time(const dbats_handler *handler, int agg_id,
 extern int dbats_select_time(dbats_handler *handler,
     uint32_t time_value, uint32_t flags);
 
-/** Commit pending writes to the on-disk database and release any associated
- *  database locks and other resources.
+/** Commit the transaction in progress, flushing any pending writes to the
+ *  database and releasing any associated database locks and other resources.
  *  Calling this directly is useful if there will be a delay before your next
  *  call to dbats_select_time() and there are other processes trying to access
- *  the database.
+ *  the database.  After calling this function, you must call
+ *  dbats_select_time() again before you can call dbats_set() or dbats_get().
  *  @param[in] handler A dbats_handler created by dbats_open().
  *  @return 0 for success, nonzero for error.
  */
 extern int dbats_commit(dbats_handler *handler);
 
-/** Get the id of a key.
+/** Abort the transaction in progress (since the last dbats_select_time()),
+ *  discarding any pending writes and releasing any associated database locks
+ *  and other resources.  After calling this function, you must call
+ *  dbats_select_time() again before you can call dbats_set() or dbats_get().
+ *  @param[in] handler A dbats_handler created by dbats_open().
+ *  @return 0 for success, nonzero for error.
+ */
+extern int dbats_abort(dbats_handler *handler);
+
+/** Get the id of a new or existing key.
+ *  The key must already exist unless the DBATS_CREATE flag is given.
+ *  When creating multiple keys, it is faster to do so inside a transaction.
  *  @param[in] handler A dbats_handler created by dbats_open().
  *  @param[in] key the name of the key.
  *  @param[out] key_id_p a pointer to a uint32_t where the id for key will be
@@ -213,7 +234,7 @@ extern int dbats_commit(dbats_handler *handler);
 extern int dbats_get_key_id(dbats_handler *handler, const char *key,
     uint32_t *key_id_p, uint32_t flags);
 
-/** Get the name of a key.
+/** Get the name of an existing key.
  *  @param[in] handler A dbats_handler created by dbats_open().
  *  @param[in] key_id the id of the key.
  *  @param[out] namebuf a pointer to an array of at least DBATS_KEYLEN

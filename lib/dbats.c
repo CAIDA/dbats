@@ -593,9 +593,31 @@ int dbats_aggregate(dbats_handler *handler, int func, int steps)
 
 /*************************************************************************/
 
+// Free contents of in-memory tslice.
+static int clear_tslice(dbats_handler *handler, int agg_id)
+{
+    dbats_tslice *tslice = handler->tslice[agg_id];
+    dbats_log(LOG_FINE, "Free tslice t=%u agg_id=%d", tslice->time, agg_id);
+
+    for (int f = 0; f < tslice->num_frags; f++) {
+	if (tslice->frag[f]) {
+	    free(tslice->frag[f]);
+	    tslice->frag[f] = 0;
+	}
+	if (tslice->is_set[f]) {
+	    free(tslice->is_set[f]);
+	    tslice->is_set[f] = 0;
+	}
+    }
+
+    memset(tslice, 0, sizeof(dbats_tslice));
+
+    return 0;
+}
+
 // Writes tslice to db (unless db is readonly).
 // Also cleans up in-memory tslice, even if db is readonly.
-static int dbats_flush_tslice(dbats_handler *handler, int agg_id)
+static int flush_tslice(dbats_handler *handler, int agg_id)
 {
     dbats_log(LOG_FINE, "Flush t=%u agg_id=%d", handler->tslice[agg_id]->time, agg_id);
     size_t frag_size = fragsize(handler);
@@ -643,17 +665,6 @@ static int dbats_flush_tslice(dbats_handler *handler, int agg_id)
 		handler->tslice[agg_id]->is_set[f], vec_size(ENTRIES_PER_FRAG));
 	    if (rc != 0) return rc;
 	}
-
-	if (!handler->cfg.exclusive || !handler->is_open) {
-	    if (handler->tslice[agg_id]->frag[f]) {
-		free(handler->tslice[agg_id]->frag[f]);
-		handler->tslice[agg_id]->frag[f] = 0;
-	    }
-	    if (handler->tslice[agg_id]->is_set[f]) {
-		free(handler->tslice[agg_id]->is_set[f]);
-		handler->tslice[agg_id]->is_set[f] = 0;
-	    }
-	}
     }
     if (buf) free(buf);
 
@@ -694,20 +705,17 @@ static int dbats_flush_tslice(dbats_handler *handler, int agg_id)
 	}
     }
 
-    if (!handler->cfg.exclusive) {
-	assert(!handler->tslice[agg_id]->is_set[0]);
-	memset(handler->tslice[agg_id], 0, sizeof(dbats_tslice));
+    if (!handler->cfg.exclusive || !handler->is_open) {
+	clear_tslice(handler, agg_id);
     }
+
     return 0;
 }
 
 /*************************************************************************/
 
-int dbats_commit(dbats_handler *handler)
+static void free_isset(dbats_handler *handler)
 {
-    if (handler->n_txn <= handler->n_internal_txn) return 0;
-    dbats_log(LOG_FINE, "dbats_commit %u", handler->tslice[0]->time);
-
     if (handler->is_set) {
 	int tn = (handler->active_end - handler->active_start) / handler->agg[0].period + 1;
 	for (int ti = 0; ti < tn; ti++) {
@@ -726,9 +734,17 @@ int dbats_commit(dbats_handler *handler)
 	free(handler->is_set);
 	handler->is_set = 0;
     }
+}
+
+int dbats_commit(dbats_handler *handler)
+{
+    if (handler->n_txn <= handler->n_internal_txn) return 0;
+    dbats_log(LOG_FINE, "dbats_commit %u", handler->tslice[0]->time);
+
+    free_isset(handler);
 
     for (int agg_id = 0; agg_id < handler->cfg.num_aggs; agg_id++) {
-	int rc = dbats_flush_tslice(handler, agg_id);
+	int rc = flush_tslice(handler, agg_id);
 	if (rc != 0) {
 	    abort_transaction(handler);
 	    return rc;
@@ -736,6 +752,20 @@ int dbats_commit(dbats_handler *handler)
     }
 
     return commit_transaction(handler);
+}
+
+int dbats_abort(dbats_handler *handler)
+{
+    if (handler->n_txn <= handler->n_internal_txn) return 0;
+    dbats_log(LOG_FINE, "dbats_abort %u", handler->tslice[0]->time);
+
+    free_isset(handler);
+
+    for (int agg_id = 0; agg_id < handler->cfg.num_aggs; agg_id++) {
+	clear_tslice(handler, agg_id);
+    }
+
+    return abort_transaction(handler);
 }
 
 /*************************************************************************/
@@ -1011,18 +1041,7 @@ int dbats_select_time(dbats_handler *handler, uint32_t time_value, uint32_t flag
 		continue;
 	    }
 	    // free obsolete fragments
-	    for (int f = 0; f < tslice->num_frags; f++) {
-		if (tslice->frag[f]) {
-		    free(tslice->frag[f]);
-		    tslice->frag[f] = 0;
-		}
-		if (tslice->is_set[f]) {
-		    free(tslice->is_set[f]);
-		    tslice->is_set[f] = 0;
-		}
-	    }
-	    assert(!tslice->is_set[0]);
-	    memset(tslice, 0, sizeof(dbats_tslice));
+	    clear_tslice(handler, agg_id);
 	}
 
 	tslice->time = t;
@@ -1199,6 +1218,11 @@ int dbats_set(dbats_handler *handler, uint32_t key_id, const dbats_value *valuep
     if (!handler->is_open || handler->cfg.readonly) {
 	dbats_log(LOG_ERROR, "is_open=%d, readonly=%d", handler->is_open, handler->cfg.readonly);
 	return EPERM;
+    }
+
+    if (handler->n_txn <= handler->n_internal_txn) {
+	dbats_log(LOG_ERROR, "dbats_set: no transaction");
+	return -1;
     }
 
 retry:
@@ -1390,6 +1414,11 @@ int dbats_get(dbats_handler *handler, uint32_t key_id,
 
     if (!handler->is_open) {
 	*valuepp = NULL;
+	return -1;
+    }
+
+    if (handler->n_txn <= handler->n_internal_txn) {
+	dbats_log(LOG_ERROR, "dbats_get: no transaction");
 	return -1;
     }
 
