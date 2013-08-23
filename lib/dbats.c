@@ -360,7 +360,7 @@ dbats_handler *dbats_open(const char *path,
     dbats_log(LOG_CONFIG, "%s", db_full_version(NULL, NULL, NULL, NULL, NULL));
 
     int rc;
-    int dbmode = 00666;
+    int mode = 00666;
     uint32_t dbflags = DB_INIT_MPOOL | DB_INIT_LOCK | DB_INIT_LOG |
 	DB_INIT_TXN | DB_THREAD | DB_REGISTER | DB_RECOVER | DB_CREATE;
     int is_new = 0;
@@ -447,7 +447,7 @@ dbats_handler *dbats_open(const char *path,
 	fclose(file);
     }
 
-    if ((rc = dh->dbenv->open(dh->dbenv, path, dbflags, dbmode)) != 0) {
+    if ((rc = dh->dbenv->open(dh->dbenv, path, dbflags, mode)) != 0) {
 	dbats_log(LOG_ERROR, "Error opening DB %s: %s", path, db_strerror(rc));
 	return NULL;
     }
@@ -459,11 +459,13 @@ dbats_handler *dbats_open(const char *path,
     }
     if (begin_transaction(dh, "open txn") != 0) goto abort;
 
-    if (raw_db_open(dh, &dh->dbMeta,    "meta",    DB_BTREE, flags, dbmode) != 0) goto abort;
-    if (raw_db_open(dh, &dh->dbKeyname, "keyname", DB_BTREE, flags, dbmode) != 0) goto abort;
-    if (raw_db_open(dh, &dh->dbKeyid,   "keyid",   DB_RECNO, flags, dbmode) != 0) goto abort;
-    if (raw_db_open(dh, &dh->dbData,    "data",    DB_BTREE, flags, dbmode) != 0) goto abort;
-    if (raw_db_open(dh, &dh->dbIsSet,   "is_set",  DB_BTREE, flags, dbmode) != 0) goto abort;
+#define open_db(db,name,type) raw_db_open(dh, &dh->db, name, type, flags, mode)
+    if (open_db(dbMeta,    "meta",    DB_BTREE) != 0) goto abort;
+    if (open_db(dbKeyname, "keyname", DB_BTREE) != 0) goto abort;
+    if (open_db(dbKeyid,   "keyid",   DB_RECNO) != 0) goto abort;
+    if (open_db(dbData,    "data",    DB_BTREE) != 0) goto abort;
+    if (open_db(dbIsSet,   "is_set",  DB_BTREE) != 0) goto abort;
+#undef open_db
 
     dh->cfg.entry_size = sizeof(dbats_value); // for db_get_buf_len
 
@@ -491,6 +493,8 @@ dbats_handler *dbats_open(const char *path,
     initcfg(period,            period);
     initcfg(values_per_entry,  values_per_entry);
     initcfg(num_series,        1);
+
+#undef initcfg
 
     if (dh->cfg.version != DBATS_DB_VERSION) {
 	dbats_log(LOG_ERROR, "database version %d != library version %d",
