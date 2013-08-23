@@ -11,16 +11,16 @@ static char *progname = 0;
 static void help(void) {
     fprintf(stderr, "%s [{options}] {dbats_path}\n", progname);
     fprintf(stderr, "options:\n");
-    fprintf(stderr, "-v{0|1|2|3}    verbosity level\n");
-    fprintf(stderr, "-x             obtain exclusive lock on db\n");
-    fprintf(stderr, "-k{path}       load list of keys from {path}\n");
-    fprintf(stderr, "               (default: use all keys in db)\n");
-    fprintf(stderr, "-b{begin}      begin time\n");
-    fprintf(stderr, "               (default: first time in db)\n");
-    fprintf(stderr, "-e{end}        end time\n");
-    fprintf(stderr, "               (default: last time in db)\n");
-    fprintf(stderr, "-o text        output text (default)\n");
-    fprintf(stderr, "-o gnuplot     output gnuplot script\n");
+    fprintf(stderr, "-v{N}        verbosity level\n");
+    fprintf(stderr, "-x           obtain exclusive lock on db\n");
+    fprintf(stderr, "-k{path}     load list of keys from {path}\n");
+    fprintf(stderr, "             (default: use all keys in db)\n");
+    fprintf(stderr, "-b{begin}    begin time\n");
+    fprintf(stderr, "             (default: first time in db)\n");
+    fprintf(stderr, "-e{end}      end time\n");
+    fprintf(stderr, "             (default: last time in db)\n");
+    fprintf(stderr, "-o text      output text (default)\n");
+    fprintf(stderr, "-o gnuplot   output gnuplot script\n");
     exit(-1);
 }
 
@@ -81,6 +81,7 @@ int main(int argc, char *argv[]) {
     progname = argv[0];
     int outtype = OT_TEXT;
     int open_flags = DBATS_READONLY;
+    uint32_t agg0_period;
 
     int c;
     while ((c = getopt(argc, argv, "v:xk:b:e:o:")) != -1) {
@@ -133,11 +134,21 @@ int main(int argc, char *argv[]) {
     handler = dbats_open(dbats_path, 0, 0, open_flags);
     if (!handler) return(-1);
 
-    const dbats_agg *agg0 = dbats_get_agg(handler, 0);
-    if (begin == 0) begin = agg0->times.start;
-    if (end == 0) end = agg0->times.end;
-
     const dbats_config *cfg = dbats_get_config(handler);
+
+    const dbats_agg *agg = dbats_get_agg(handler, 0);
+    agg0_period = agg->period;
+    if (end == 0)
+	end = agg->times.end;
+    if (begin == 0) {
+	begin = agg->times.start;
+	for (int agg_id = 1; agg_id < cfg->num_aggs; agg_id++) {
+	    agg = dbats_get_agg(handler, agg_id);
+	    if (begin > agg->times.start)
+		begin = agg->times.start;
+	}
+    }
+
     dbats_commit(handler); // commit the txn started by dbats_open
 
     if (keyfile_path)
@@ -152,7 +163,7 @@ int main(int argc, char *argv[]) {
     if (outtype == OT_GNUPLOT) {
 	fprintf(out, "set style data steps\n");
 	fprintf(out, "set xrange [%" PRIu32 ":%" PRIu32 "]\n",
-	    0, end + agg0->period - begin);
+	    0, end + agg0_period - begin);
 	const dbats_agg *agg1;
 	if (cfg->num_aggs > 0) {
 	    agg1 = dbats_get_agg(handler, 1);
@@ -162,7 +173,7 @@ int main(int argc, char *argv[]) {
 	}
 	const char *prefix = "plot";
 	for (int agg_id = 0; agg_id < cfg->num_aggs; agg_id++) {
-	    const dbats_agg *agg = dbats_get_agg(handler, agg_id);
+	    agg = dbats_get_agg(handler, agg_id);
 	    fprintf(out, "%s '-' using ($1-%"PRIu32"):($2) "
 		"linecolor %d title \"%"PRIu32"s %s\"",
 		prefix, begin,
@@ -173,7 +184,7 @@ int main(int argc, char *argv[]) {
     }
 
     for (int agg_id = 0; agg_id < cfg->num_aggs; agg_id++) {
-	const dbats_agg *agg = dbats_get_agg(handler, agg_id);
+	agg = dbats_get_agg(handler, agg_id);
 	char strval[64];
 	strval[0] = '\0';
 	uint32_t t;
@@ -242,5 +253,5 @@ int main(int argc, char *argv[]) {
     dbats_log(LOG_INFO, "Closing %s", dbats_path);
     dbats_close(handler);
     dbats_log(LOG_INFO, "Done");
-    return(0);
+    return 0;
 }
