@@ -8,12 +8,12 @@ static char *progname = 0;
 static void help(void) {
     fprintf(stderr, "%s [{options}] {dbats_path} < report.metrics\n", progname);
     fprintf(stderr, "options:\n");
-    fprintf(stderr, "-v{0|1|2|3}    verbosity level\n");
-    fprintf(stderr, "-x             obtain exclusive lock on db\n");
-    fprintf(stderr, "-t             don't use transactions (fast, but unsafe)\n");
-    fprintf(stderr, "-p             preload timeslices\n");
-    fprintf(stderr, "-Z             don't compress db\n");
-    fprintf(stderr, "-i             initialize db only; do not write data\n");
+    fprintf(stderr, "-v{N}    verbosity level\n");
+    fprintf(stderr, "-x       obtain exclusive lock on db\n");
+    fprintf(stderr, "-t       don't use transactions (fast, but unsafe)\n");
+    fprintf(stderr, "-p       preload timeslices\n");
+    fprintf(stderr, "-Z       don't compress db\n");
+    fprintf(stderr, "-i       initialize db only; do not write data\n");
     exit(-1);
 }
 
@@ -120,6 +120,5 @@ int main(int argc, char *argv[]) {
     }
 
     dbats_close(handler);
-
-    return(0);
+    return 0;
 }
