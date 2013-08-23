@@ -81,7 +81,7 @@ int main(int argc, char *argv[]) {
     progname = argv[0];
     int outtype = OT_TEXT;
     int open_flags = DBATS_READONLY;
-    uint32_t agg0_period;
+    uint32_t series0_period;
 
     int c;
     while ((c = getopt(argc, argv, "v:xk:b:e:o:")) != -1) {
@@ -136,16 +136,16 @@ int main(int argc, char *argv[]) {
 
     const dbats_config *cfg = dbats_get_config(handler);
 
-    const dbats_agg *agg = dbats_get_agg(handler, 0);
-    agg0_period = agg->period;
+    const dbats_series_info *series = dbats_get_series_info(handler, 0);
+    series0_period = series->period;
     if (end == 0)
-	end = agg->times.end;
+	end = series->times.end;
     if (begin == 0) {
-	begin = agg->times.start;
-	for (int agg_id = 1; agg_id < cfg->num_aggs; agg_id++) {
-	    agg = dbats_get_agg(handler, agg_id);
-	    if (begin > agg->times.start)
-		begin = agg->times.start;
+	begin = series->times.start;
+	for (int sid = 1; sid < cfg->num_series; sid++) {
+	    series = dbats_get_series_info(handler, sid);
+	    if (begin > series->times.start)
+		begin = series->times.start;
 	}
     }
 
@@ -163,32 +163,32 @@ int main(int argc, char *argv[]) {
     if (outtype == OT_GNUPLOT) {
 	fprintf(out, "set style data steps\n");
 	fprintf(out, "set xrange [%" PRIu32 ":%" PRIu32 "]\n",
-	    0, end + agg0_period - begin);
-	const dbats_agg *agg1;
-	if (cfg->num_aggs > 0) {
-	    agg1 = dbats_get_agg(handler, 1);
-	    fprintf(out, "set xtics %d\n", agg1->period);
-	    fprintf(out, "set mxtics %d\n", agg1->steps);
+	    0, end + series0_period - begin);
+	const dbats_series_info *series1;
+	if (cfg->num_series > 0) {
+	    series1 = dbats_get_series_info(handler, 1);
+	    fprintf(out, "set xtics %d\n", series1->period);
+	    fprintf(out, "set mxtics %d\n", series1->steps);
 	    fprintf(out, "set grid xtics\n");
 	}
 	const char *prefix = "plot";
-	for (int agg_id = 0; agg_id < cfg->num_aggs; agg_id++) {
-	    agg = dbats_get_agg(handler, agg_id);
+	for (int sid = 0; sid < cfg->num_series; sid++) {
+	    series = dbats_get_series_info(handler, sid);
 	    fprintf(out, "%s '-' using ($1-%"PRIu32"):($2) "
 		"linecolor %d title \"%"PRIu32"s %s\"",
-		prefix, begin,
-		agg_id, agg->period, dbats_agg_func_label[agg->func]);
+		prefix, begin, sid, series->period,
+		dbats_agg_func_label[series->func]);
 	    prefix = ",";
 	}
 	fprintf(out, "\n");
     }
 
-    for (int agg_id = 0; agg_id < cfg->num_aggs; agg_id++) {
-	agg = dbats_get_agg(handler, agg_id);
+    for (int sid = 0; sid < cfg->num_series; sid++) {
+	series = dbats_get_series_info(handler, sid);
 	char strval[64];
 	strval[0] = '\0';
 	uint32_t t;
-	for (t = begin; t <= end; t += agg->period) {
+	for (t = begin; t <= end; t += series->period) {
 	    int rc;
 
 	    if ((rc = dbats_select_time(handler, t, 0)) == -1) {
@@ -196,10 +196,10 @@ int main(int argc, char *argv[]) {
 		continue;
 	    }
 
-	    if (agg->func == DBATS_AGG_AVG) {
+	    if (series->func == DBATS_AGG_AVG) {
 		const double *values;
 		for (int k = 0; k < n_keys; k++) {
-		    rc = dbats_get_double(handler, keys[k].keyid, &values, agg_id);
+		    rc = dbats_get_double(handler, keys[k].keyid, &values, sid);
 		    if (rc != 0) {
 			fprintf(stderr, "error in dbats_get(%s): rc=%d\n", keys[k].key, rc);
 			break;
@@ -210,7 +210,7 @@ int main(int argc, char *argv[]) {
 			for (int j = 0; j < cfg->values_per_entry; j++) {
 			    fprintf(out, "%.3f ", values ? values[j] : 0);
 			}
-			fprintf(out, "%u %d\n", t, agg_id);
+			fprintf(out, "%u %d\n", t, sid);
 			break;
 		    case OT_GNUPLOT:
 			sprintf(strval, "%.3f", values ? values[0] : 0);
@@ -221,7 +221,7 @@ int main(int argc, char *argv[]) {
 	    } else {
 		const dbats_value *values;
 		for (int k = 0; k < n_keys; k++) {
-		    rc = dbats_get(handler, keys[k].keyid, &values, agg_id);
+		    rc = dbats_get(handler, keys[k].keyid, &values, sid);
 		    if (rc != 0) {
 			fprintf(stderr, "error in dbats_get(%s): rc=%d\n", keys[k].key, rc);
 			break;
@@ -232,7 +232,7 @@ int main(int argc, char *argv[]) {
 			for (int j = 0; j < cfg->values_per_entry; j++) {
 			    fprintf(out, "%" PRIval " ", values ? values[j] : 0);
 			}
-			fprintf(out, "%u %d\n", t, agg_id);
+			fprintf(out, "%u %d\n", t, sid);
 			break;
 		    case OT_GNUPLOT:
 			sprintf(strval, "%" PRIval, values ? values[0] : 0);
