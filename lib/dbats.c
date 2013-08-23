@@ -16,6 +16,7 @@
 #include <sys/types.h>
 #include <db.h>
 #include <assert.h>
+#include <arpa/inet.h> // htonl() etc
 
 #include "dbats.h"
 #include "quicklz.h"
@@ -66,8 +67,8 @@ typedef struct dbats_tslice {
 #define fragsize(handler) (sizeof(dbats_frag) + ENTRIES_PER_FRAG * (handler)->cfg.entry_size)
 
 typedef struct {
+    uint32_t agg_id;
     uint32_t time;
-    int agg_id;
     uint32_t frag_id;
 } fragkey_t;
 
@@ -85,8 +86,8 @@ struct dbats_handler {
     DB *dbMeta;                // config parameters
     DB *dbKeyname;             // key name -> key id
     DB *dbKeyid;               // recno -> key name (note: keyid == recno - 1)
-    DB *dbData;                // {time, agg_id, frag_id} -> value fragment
-    DB *dbIsSet;               // {time, agg_id, frag_id} -> is_set fragment
+    DB *dbData;                // {agg_id, time, frag_id} -> value fragment
+    DB *dbIsSet;               // {agg_id, time, frag_id} -> is_set fragment
     DBC *keyname_cursor;       // for iterating over key names
     DBC *keyid_cursor;         // for iterating over key ids
     dbats_tslice **tslice;     // a tslice for each aggregation level
@@ -129,6 +130,11 @@ const char *dbats_agg_func_label[] = {
     _var.data = _data; \
     _var.ulen = _ulen; \
     _var.flags = DB_DBT_USERMEM
+
+// Construct a DBT for receiving nothing from DB.
+#define DBT_null(_var) \
+    DBT _var; \
+    memset(&_var, 0, sizeof(DBT));
 
 static inline uint32_t min(uint32_t a, uint32_t b) { return a < b ? a : b; }
 static inline uint32_t max(uint32_t a, uint32_t b) { return a > b ? a : b; }
@@ -263,8 +269,8 @@ static int raw_db_set(dbats_handler *handler, DB *db,
 
     if (db == handler->dbData) {
 	fragkey_t *fragkey = (fragkey_t*)key;
-	dbats_log(LOG_FINEST, "raw_db_set Data: t=%u agg=%d frag=%u, compress=%d, len=%u",
-	    fragkey->time, fragkey->agg_id, fragkey->frag_id, *(uint8_t*)value, value_len);
+	dbats_log(LOG_FINEST, "raw_db_set Data: agg=%d t=%u frag=%u, compress=%d, len=%u",
+	    fragkey->agg_id, fragkey->time, fragkey->frag_id, *(uint8_t*)value, value_len);
     }
 
     if (handler->cfg.readonly) {
@@ -473,9 +479,9 @@ dbats_handler *dbats_open(const char *path,
     initcfg(values_per_entry,  values_per_entry);
     initcfg(num_aggs,          1);
 
-    if (handler->cfg.version > DBATS_DB_VERSION) {
-	dbats_log(LOG_ERROR, "database version %d > %d", handler->cfg.version,
-	    DBATS_DB_VERSION);
+    if (handler->cfg.version != DBATS_DB_VERSION) {
+	dbats_log(LOG_ERROR, "database version %d != library version %d",
+	    handler->cfg.version, DBATS_DB_VERSION);
 	return NULL;
     }
 
@@ -591,6 +597,127 @@ int dbats_aggregate(dbats_handler *handler, int func, int steps)
     return 0;
 }
 
+// "DELETE FROM db WHERE db.agg_id = agg_id AND db.time BETWEEN start AND end"
+static int delete_frags(dbats_handler *handler, DB *db, const char *name,
+    int agg_id, uint32_t start, uint32_t end)
+{
+    dbats_log(LOG_FINE, "delete_frags %s %d %u..%u", name,
+	agg_id, start, end);
+    int rc;
+    DBC *dbc;
+    rc = db->cursor(db, current_txn(handler), &dbc, 0);
+    if (rc != 0) {
+	dbats_log(LOG_ERROR, "delete_frags %s %d %u..%u: cursor: %s", name,
+	    agg_id, start, end, db_strerror(rc));
+	return rc;
+    }
+    fragkey_t dbkey = { htonl(agg_id), htonl(start), htonl(0) };
+    DBT_in(dbt_key, &dbkey, sizeof(dbkey));
+    dbt_key.ulen = sizeof(dbkey);
+    DBT_null(dbt_data);
+    // Range cursor search depends on dbkey being {agg_id, time, frag_id}, in
+    // that order, with big endian values.
+    rc = dbc->get(dbc, &dbt_key, &dbt_data, DB_SET_RANGE);
+    while (1) {
+	if (rc == DB_NOTFOUND) break;
+	if (rc != 0) {
+	    dbats_log(LOG_ERROR, "delete_frags %s %d %u %d: get: %s", name,
+		ntohl(dbkey.agg_id), ntohl(dbkey.time), ntohl(dbkey.frag_id),
+		db_strerror(rc));
+	    return rc;
+	}
+	if (ntohl(dbkey.agg_id) != agg_id || ntohl(dbkey.time) > end) break;
+	rc = dbc->del(dbc, 0);
+	if (rc != 0) {
+	    dbats_log(LOG_ERROR, "delete_frags %s %d %u %d: del: %s", name,
+		ntohl(dbkey.agg_id), ntohl(dbkey.time), ntohl(dbkey.frag_id),
+		db_strerror(rc));
+	    return rc;
+	} else {
+	    dbats_log(LOG_FINE, "delete_frags %d %u %d",
+		ntohl(dbkey.agg_id), ntohl(dbkey.time), ntohl(dbkey.frag_id));
+	}
+	rc = dbc->get(dbc, &dbt_key, &dbt_data, DB_NEXT);
+    }
+    return 0;
+}
+
+static int read_agg(dbats_handler *handler, int agg_id, uint32_t flags)
+{
+    size_t value_len = sizeof(dbats_agg);
+    char keybuf[32];
+    sprintf(keybuf, "agg%d", agg_id);
+
+    int rc = raw_db_get(handler, handler->dbMeta, keybuf, strlen(keybuf),
+	&handler->agg[agg_id], &value_len, flags);
+    if (rc != 0)
+	dbats_log(LOG_ERROR, "error getting %s: %s", keybuf, db_strerror(rc));
+    return rc;
+}
+
+static int write_agg(dbats_handler *handler, int agg_id)
+{
+    char keybuf[32];
+    sprintf(keybuf, "agg%d", agg_id);
+    int rc = raw_db_set(handler, handler->dbMeta, keybuf, strlen(keybuf),
+	&handler->agg[agg_id], sizeof(dbats_agg));
+    if (rc != 0)
+	dbats_log(LOG_ERROR, "error updating %s: %s", keybuf, db_strerror(rc));
+    return rc;
+}
+
+int dbats_agg_keep(dbats_handler *handler, int agg_id, int keep)
+{
+    int rc = 0;
+
+    if (agg_id < 0 || agg_id >= handler->cfg.num_aggs) {
+	dbats_log(LOG_ERROR, "bad agg_id %d", agg_id);
+	return EINVAL;
+    }
+
+    rc = begin_transaction(handler, "keep txn");
+    if (rc != 0) return rc;
+
+    rc = read_agg(handler, agg_id, DB_RMW);
+    if (rc != 0) goto abort;
+
+    if (agg_id == 0) {
+	for (int a = 1; a < handler->cfg.num_aggs; a++) {
+	    rc = read_agg(handler, a, 0);
+	    if (rc != 0) goto abort;
+	    if (keep > 0 && handler->agg[a].steps > keep) {
+		dbats_log(LOG_ERROR, "agg %d requires keeping at least %d "
+		    "primary data points", a, handler->agg[a].steps);
+		rc = EINVAL;
+		goto abort;
+	    }
+	}
+    }
+
+    dbats_agg *agg = &handler->agg[agg_id];
+    agg->keep = keep;
+
+    if (keep > 0) {
+	uint32_t end = agg->times.end - keep * agg->period;
+	if (agg->times.start <= end) {
+	    rc = delete_frags(handler, handler->dbData, "data", agg_id, 0, end);
+	    if (rc != 0) goto abort;
+	    rc = delete_frags(handler, handler->dbIsSet, "is_set", agg_id, 0, end);
+	    if (rc != 0) goto abort;
+	    agg->times.start = end + agg->period;
+	}
+    }
+
+    rc = write_agg(handler, agg_id); // write new values of keep and times.start
+    if (rc != 0) goto abort;
+
+    return commit_transaction(handler); // "keep txn"
+
+abort:
+    abort_transaction(handler);
+    return rc;
+}
+
 /*************************************************************************/
 
 // Free contents of in-memory tslice.
@@ -621,17 +748,15 @@ static int flush_tslice(dbats_handler *handler, int agg_id)
 {
     dbats_log(LOG_FINE, "Flush t=%u agg_id=%d", handler->tslice[agg_id]->time, agg_id);
     size_t frag_size = fragsize(handler);
-    fragkey_t dbkey;
     char *buf = NULL;
     int rc;
     int changed = 0;
 
     // Write fragments to the DB
-    dbkey.time = handler->tslice[agg_id]->time;
-    dbkey.agg_id = agg_id;
+    fragkey_t dbkey = { htonl(agg_id), htonl(handler->tslice[agg_id]->time), 0};
     for (int f = 0; f < handler->tslice[agg_id]->num_frags; f++) {
 	if (!handler->tslice[agg_id]->frag[f]) continue;
-	dbkey.frag_id = f;
+	dbkey.frag_id = htonl(f);
 	if (handler->cfg.readonly) {
 	    // do nothing
 	} else if (!handler->tslice[agg_id]->frag_changed[f]) {
@@ -672,16 +797,8 @@ static int flush_tslice(dbats_handler *handler, int agg_id)
     // minimize the time that the lock is held.
     if (changed) {
 	// get updated agg times from db
-	size_t value_len;
-	char keybuf[32];
-	sprintf(keybuf, "agg%d", agg_id);
-	value_len = sizeof(dbats_agg);
-	if ((rc = raw_db_get(handler, handler->dbMeta, keybuf, strlen(keybuf),
-	    &handler->agg[agg_id], &value_len, DB_RMW)) != 0)
-	{
-	    dbats_log(LOG_ERROR, "error getting %s: %s", keybuf, db_strerror(rc));
+	if ((rc = read_agg(handler, agg_id, DB_RMW)) != 0)
 	    return rc;
-	}
 
 	// write new agg times to db if needed
 	changed = 0;
@@ -696,12 +813,8 @@ static int flush_tslice(dbats_handler *handler, int agg_id)
 	    changed = 1;
 	}
 	if (changed) {
-	    rc = raw_db_set(handler, handler->dbMeta, keybuf, strlen(keybuf),
-		&handler->agg[agg_id], sizeof(dbats_agg));
-	    if (rc != 0) {
-		dbats_log(LOG_ERROR, "error updating %s: %s", keybuf, db_strerror(rc));
+	    if ((rc = write_agg(handler, agg_id)) != 0)
 		return rc;
-	    }
 	}
     }
 
@@ -831,10 +944,11 @@ static int load_isset(dbats_handler *handler, fragkey_t *dbkey, uint8_t **dest)
 	buf, &value_len, !handler->cfg.readonly ? DB_RMW : 0);
 
     dbats_log(LOG_FINE, "load_isset t=%u, agg_id=%u, frag_id=%u: "
-	"raw_db_get(is_set) = %d", dbkey->time, dbkey->agg_id, dbkey->frag_id, rc);
+	"raw_db_get(is_set) = %d",
+	ntohl(dbkey->time), ntohl(dbkey->agg_id), ntohl(dbkey->frag_id), rc);
 
     if (rc == DB_NOTFOUND) {
-	if (dbkey->time == handler->tslice[dbkey->agg_id]->time) {
+	if (ntohl(dbkey->time) == handler->tslice[ntohl(dbkey->agg_id)]->time) {
 	    memset(buf, 0, vec_size(ENTRIES_PER_FRAG));
 	    *dest = buf;
 	    buf = NULL;
@@ -852,8 +966,8 @@ static int load_isset(dbats_handler *handler, fragkey_t *dbkey, uint8_t **dest)
     *dest = buf;
     buf = NULL;
 
-    if (dbkey->agg_id == 0 && handler->active_last_data < dbkey->time)
-	handler->active_last_data = dbkey->time;
+    if (ntohl(dbkey->agg_id) == 0 && handler->active_last_data < ntohl(dbkey->time))
+	handler->active_last_data = ntohl(dbkey->time);
 
     return 0; // ok
 }
@@ -862,10 +976,7 @@ static int load_frag(dbats_handler *handler, uint32_t t, int agg_id,
     uint32_t frag_id)
 {
     // load fragment
-    fragkey_t dbkey;
-    dbkey.time = t;
-    dbkey.agg_id = agg_id;
-    dbkey.frag_id = frag_id;
+    fragkey_t dbkey = { htonl(agg_id), htonl(t), htonl(frag_id) };
     int rc;
 
     assert(!handler->tslice[agg_id]->is_set[frag_id]);
@@ -945,9 +1056,7 @@ static int instantiate_isset_frags(dbats_handler *handler, int frag_id)
 
     uint32_t t = handler->active_start;
     for (int ti = 0; ti < tn; ti++, t += handler->agg[0].period) {
-	fragkey_t dbkey;
-	dbkey.time = t;
-	dbkey.agg_id = 0;
+	fragkey_t dbkey = { htonl(0), htonl(t), 0 };
 	if (!handler->is_set[ti]) {
 	    handler->is_set[ti] = ecalloc(MAX_NUM_FRAGS, sizeof(uint8_t*), "handler->is_set[ti]");
 	    if (!handler->is_set[ti]) return errno ? errno : ENOMEM;
@@ -957,7 +1066,7 @@ static int instantiate_isset_frags(dbats_handler *handler, int frag_id)
 	    assert(!handler->is_set[ti][frag_id]);
 	    handler->is_set[ti][frag_id] = handler->tslice[0]->is_set[frag_id]; // share
 	} else if (!handler->is_set[ti][frag_id]) {
-	    dbkey.frag_id = frag_id;
+	    dbkey.frag_id = htonl(frag_id);
 	    assert(!handler->is_set[ti][frag_id]);
 	    int rc = load_isset(handler, &dbkey, &handler->is_set[ti][frag_id]);
 	    if (rc != 0 && rc != DB_NOTFOUND)
