@@ -43,7 +43,7 @@
 
 /* ************************************************** */
 
-#define DBATS_DB_VERSION     2   ///< Version of db format written by this API
+#define DBATS_DB_VERSION     3   ///< Version of db format written by this API
 
 #define DBATS_KEYLEN         128 ///< max length of key name
 
@@ -76,14 +76,14 @@ typedef struct {
     uint32_t end;
 } dbats_timerange_t;
 
-/// Aggregation parameters (read only).
+/// Time series parameters (read only).
 typedef struct {
     uint32_t func;           ///< aggregation function
     uint32_t steps;          ///< # of data points contributing to one agg value
-    uint32_t period;         ///< time covered by one full agg value (seconds)
+    uint32_t period;         ///< time covered by one value (seconds)
     uint32_t keep;           ///< number of data points to keep (0 means keep all)
     dbats_timerange_t times; ///< times of first and last data points
-} dbats_agg;
+} dbats_series_info;
 
 /** Configuration parameters (read only).
  *  Fields marked "(C)" are fixed when the database is created;
@@ -96,7 +96,7 @@ typedef struct {
     uint8_t exclusive;         ///< Obtain exclusive lock on whole db (O)
     uint8_t no_txn;            ///< Don't use transactions (O)
     uint8_t updatable;         ///< Allow updates to existing values (O)
-    uint16_t num_aggs;         ///< Number of aggregations (C)
+    uint16_t num_series;       ///< Number of time series (C)
     uint16_t values_per_entry; ///< Number of dbats_values in an entry (C)
     uint16_t entry_size;       ///< Size of an entry in bytes (C)
     uint32_t period;           ///< Primary sample period in seconds (C)
@@ -163,32 +163,31 @@ extern void dbats_close(dbats_handler *handler);
  *    - DBATS_AGG_AVG - average
  *    - DBATS_AGG_LAST - last
  *    - DBATS_AGG_SUM - sum
- *  @param[in] steps number of data points to included in an aggregate
+ *  @param[in] steps number of primary data points to include in an aggregate
+ *    point
  *  @return 0 for success, nonzero for error.
  */
 extern int dbats_aggregate(dbats_handler *handler, int func, int steps);
 
 /** Congfiure the number of data points to keep in a time series.
  *  @param[in] handler A dbats_handler created by dbats_open().
- *  @param[in] agg_id which aggregate's period to use (use 0 for the primary
- *    data series).
+ *  @param[in] sid time series id (0 for the primary series).
  *  @param[in] keep The number of data points to keep in the time series.
  *  @return 0 for success, nonzero for error.
  */
-extern int dbats_agg_keep(dbats_handler *handler, int agg_id, int keep);
+extern int dbats_series_limit(dbats_handler *handler, int sid, int keep);
 
-/** Round a time value down to a multiple of an aggregate's period.
+/** Round a time value down to a multiple of a time series' period.
  *  @param[in] handler A dbats_handler created by dbats_open().
- *  @param[in] agg_id which aggregate's period to use (use 0 for the primary
- *    data series).
+ *  @param[in] sid time series id (0 for the primary series).
  *  @param[in,out] t a unix time value (seconds since 1970-01-01 00:00:00
  *    UTC, without leap seconds).  Value will be rounded down to the nearest
  *    multiple of the data period, counting from 00:00 on the first Sunday of
  *    1970.
  *  @return the rounded time value (*t)
  */
-extern uint32_t dbats_normalize_time(const dbats_handler *handler, int agg_id,
-    uint32_t *t);
+extern uint32_t dbats_normalize_time(const dbats_handler *handler,
+    int sid, uint32_t *t);
 
 /** Select a time period to operate on in subsequent calls to dbats_get() and
  *  dbats_set().
@@ -302,12 +301,11 @@ extern int dbats_set_by_key (dbats_handler *handler, const char *key,
  *  @param[out] valuepp the address of a dbats_value*; after the call,
  *    *valuepp will point to an array of values_per_entry dbats_values
  *    read from the database.
- *  @param[in] agg_id which aggregate's value to get (use 0 for the primary
- *    data series).
+ *  @param[in] sid time series id (0 for the primary series).
  *  @return 0 for success, nonzero for error.
  */
 extern int dbats_get(dbats_handler *handler, uint32_t key_id,
-    const dbats_value **valuepp, int agg_id);
+    const dbats_value **valuepp, int sid);
 
 /** Read an array of double values from the database for the specified key and
  *  the time selected by dbats_select_time().
@@ -317,11 +315,11 @@ extern int dbats_get(dbats_handler *handler, uint32_t key_id,
  *  @param[out] valuepp the address of a double*; after the call,
  *    *valuepp will point to an array of values_per_entry double values
  *    read from the database.
- *  @param[in] agg_id which aggregate's value to get.
+ *  @param[in] sid time series id
  *  @return 0 for success, nonzero for error.
  */
 extern int dbats_get_double(dbats_handler *handler, uint32_t key_id,
-    const double **valuepp, int agg_id);
+    const double **valuepp, int sid);
 
 /** Read an array of dbats_values from the database for the specified key and the
  *  time selected by dbats_select_time().
@@ -333,12 +331,11 @@ extern int dbats_get_double(dbats_handler *handler, uint32_t key_id,
  *  @param[out] valuepp the address of a dbats_value*; after the call,
  *    *valuepp will point to an array of values_per_entry dbats_values
  *    read from the database.
- *  @param[in] agg_id which aggregate's value to get (use 0 for the primary
- *    data series).
+ *  @param[in] sid time series id (0 for the primary series).
  *  @return 0 for success, nonzero for error.
  */
 extern int dbats_get_by_key(dbats_handler *handler, const char *key,
-    const dbats_value **valuepp, int agg_id);
+    const dbats_value **valuepp, int sid);
 
 /** Get the number of keys in the database.
  *  @param[in] handler A dbats_handler created by dbats_open().
@@ -407,11 +404,13 @@ extern int dbats_walk_keyid_end(dbats_handler *handler);
  */
 extern const dbats_config *dbats_get_config(dbats_handler *handler);
 
-/** Get aggregation parameters from a DBATS database.
+/** Get time series parameters from a DBATS database.
  *  @param[in] handler A dbats_handler created by dbats_open().
- *  @param[in] agg_id The id of the aggregate.
- *  @return pointer to a dbats_agg describing the aggregate specified by agg_id.
+ *  @param[in] sid The id of the time series (0 for the primary series).
+ *  @return pointer to a dbats_series_info describing the series specified
+ *    by sid.
  */
-extern const dbats_agg *dbats_get_agg(dbats_handler *handler, int agg_id);
+extern const dbats_series_info *dbats_get_series_info(dbats_handler *handler,
+    int sid);
 
 extern void dbats_stat_print(const dbats_handler *handler);
