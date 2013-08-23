@@ -43,7 +43,7 @@
 
 /* ************************************************** */
 
-#define DBATS_DB_VERSION     1   ///< Version of db format written by this API
+#define DBATS_DB_VERSION     2   ///< Version of db format written by this API
 
 #define DBATS_KEYLEN         128 ///< max length of key name
 
@@ -81,6 +81,7 @@ typedef struct {
     uint32_t func;           ///< aggregation function
     uint32_t steps;          ///< # of data points contributing to one agg value
     uint32_t period;         ///< time covered by one full agg value (seconds)
+    uint32_t keep;           ///< number of data points to keep (0 means keep all)
     dbats_timerange_t times; ///< times of first and last data points
 } dbats_agg;
 
@@ -166,6 +167,15 @@ extern void dbats_close(dbats_handler *handler);
  *  @return 0 for success, nonzero for error.
  */
 extern int dbats_aggregate(dbats_handler *handler, int func, int steps);
+
+/** Congfiure the number of data points to keep in a time series.
+ *  @param[in] handler A dbats_handler created by dbats_open().
+ *  @param[in] agg_id which aggregate's period to use (use 0 for the primary
+ *    data series).
+ *  @param[in] keep The number of data points to keep in the time series.
+ *  @return 0 for success, nonzero for error.
+ */
+extern int dbats_agg_keep(dbats_handler *handler, int agg_id, int keep);
 
 /** Round a time value down to a multiple of an aggregate's period.
  *  @param[in] handler A dbats_handler created by dbats_open().
