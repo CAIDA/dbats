@@ -139,13 +139,16 @@ int main(int argc, char *argv[]) {
     const dbats_series_info *series = dbats_get_series_info(handler, 0);
     series0_period = series->period;
     if (end == 0)
-	end = series->times.end;
+	dbats_get_end_time(handler, 0, &end);
     if (begin == 0) {
-	begin = series->times.start;
+	// find earliest start time of all series
+	dbats_get_start_time(handler, 0, &begin);
 	for (int sid = 1; sid < cfg->num_series; sid++) {
+	    uint32_t series_begin;
+	    dbats_get_start_time(handler, sid, &series_begin);
 	    series = dbats_get_series_info(handler, sid);
-	    if (begin > series->times.start)
-		begin = series->times.start;
+	    if (begin > series_begin)
+		begin = series_begin;
 	}
     }
 
