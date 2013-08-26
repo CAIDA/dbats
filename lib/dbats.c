@@ -102,6 +102,8 @@ struct dbats_handler {
                                // (corresponding to is_set[0])
     uint32_t active_end;       // last timestamp in active period
     uint32_t active_last_data; // last timestamp in active period with data
+    uint32_t end_time;         // latest time for which a value has been set
+    uint32_t min_keep_time;    // earliest time for which a value can be set
     uint8_t ***is_set;         // each is_set[timeindex][fragid] is a bitvector
                                // indicating which cols have values
 };
@@ -349,8 +351,44 @@ static void raw_db_delete(const dbats_handler *dh, DB *db,
 #define series_info_key(dh, keybuf, sid) \
     sprintf(keybuf, dh->cfg.version < 3 ? "agg%d" : "series%d", sid)
 
-// Warning: never open the same db more than once in the same process, because
-// there must be only one DB_ENV per db per process.
+static int read_series_info(dbats_handler *dh, int sid, uint32_t flags)
+{
+    size_t value_len = sizeof(dbats_series_info);
+    char keybuf[32];
+    series_info_key(dh, keybuf, sid);
+
+    int rc = raw_db_get(dh, dh->dbMeta, keybuf, strlen(keybuf),
+	&dh->series[sid], &value_len, flags);
+    if (rc != 0)
+	dbats_log(LOG_ERROR, "error getting %s: %s", keybuf, db_strerror(rc));
+    return rc;
+}
+
+static int write_series_info(dbats_handler *dh, int sid)
+{
+    char keybuf[32];
+    series_info_key(dh, keybuf, sid);
+    int rc = raw_db_set(dh, dh->dbMeta, keybuf, strlen(keybuf),
+	&dh->series[sid], sizeof(dbats_series_info));
+    if (rc != 0)
+	dbats_log(LOG_ERROR, "error updating %s: %s", keybuf, db_strerror(rc));
+    return rc;
+}
+
+static int write_min_keep_time(dbats_handler *dh)
+{
+    const char *keybuf = "min_keep_time";
+    int rc = raw_db_set(dh, dh->dbMeta, keybuf, strlen(keybuf),
+	&dh->min_keep_time, sizeof(uint32_t));
+    if (rc != 0)
+	dbats_log(LOG_ERROR, "error setting %s: %s", keybuf, db_strerror(rc));
+    return rc;
+}
+
+/*************************************************************************/
+
+// Warning: never open the same dbats more than once in the same process,
+// because there must be only one DB_ENV per environment per process.
 // http://docs.oracle.com/cd/E17076_02/html/programmer_reference/transapp_app.html
 dbats_handler *dbats_open(const char *path,
     uint16_t values_per_entry,
@@ -382,7 +420,7 @@ dbats_handler *dbats_open(const char *path,
 	return NULL;
     }
 
-    dh->dbenv->set_errpfx(dh->dbenv, path);
+    dh->dbenv->set_errpfx(dh->dbenv, dh->path);
     dh->dbenv->set_errfile(dh->dbenv, stderr);
 
     dh->dbenv->set_verbose(dh->dbenv,
@@ -521,23 +559,14 @@ dbats_handler *dbats_open(const char *path,
 	dh->series[0].func = DBATS_AGG_NONE;
 	dh->series[0].steps = 1;
 	dh->series[0].period = dh->cfg.period;
+	rc = write_series_info(dh, 0);
+	if (rc != 0) return NULL;
+	rc = write_min_keep_time(dh);
+	if (rc != 0) return NULL;
     } else {
-	size_t value_len;
-	char keybuf[32];
 	for (int sid = 0; sid < dh->cfg.num_series; sid++) {
-	    series_info_key(dh, keybuf, sid);
-	    value_len = sizeof(dh->series[sid]);
-	    if ((rc = raw_db_get(dh, dh->dbMeta, keybuf, strlen(keybuf),
-		&dh->series[sid], &value_len, 0)) != 0)
-	    {
-		dbats_log(LOG_ERROR, "error reading %s: %s",
-		    keybuf, db_strerror(rc));
+	    if (read_series_info(dh, sid, 0) != 0)
 		return NULL;
-	    } else if (value_len != sizeof(dbats_series_info)) {
-		dbats_log(LOG_ERROR, "corrupt %s: size %zu != %zu",
-		    keybuf, value_len, sizeof(dbats_series_info));
-		return NULL;
-	    }
 	}
     }
 
@@ -603,14 +632,85 @@ int dbats_aggregate(dbats_handler *dh, int func, int steps)
     dh->series[sid].steps = steps;
     dh->series[sid].period = dh->series[0].period * steps;
 
-    char keybuf[32];
-    series_info_key(dh, keybuf, sid);
-    rc = raw_db_set(dh, dh->dbMeta, keybuf, strlen(keybuf),
-	&dh->series[sid], sizeof(dbats_series_info));
+    rc = write_series_info(dh, sid);
     if (rc != 0) return rc;
     rc = raw_db_set(dh, dh->dbMeta, "num_series", strlen("num_series"),
 	&dh->cfg.num_series, sizeof(dh->cfg.num_series));
     if (rc != 0) return rc;
+
+    return 0;
+}
+
+int dbats_get_start_time(dbats_handler *dh, int sid, uint32_t *start)
+{
+    int rc;
+    DBC *dbc;
+    rc = dh->dbData->cursor(dh->dbData, current_txn(dh), &dbc, 0);
+    if (rc != 0) {
+	dbats_log(LOG_ERROR, "dbats_get_start_time %d: cursor: %s", sid, db_strerror(rc));
+	return rc;
+    }
+    fragkey_t dbkey = { htonl(sid), htonl(0), htonl(0) };
+    DBT_in(dbt_key, &dbkey, sizeof(dbkey));
+    dbt_key.ulen = sizeof(dbkey);
+    DBT_null(dbt_data);
+    rc = dbc->get(dbc, &dbt_key, &dbt_data, DB_SET_RANGE);
+    if (rc == DB_NOTFOUND) return rc;
+    if (rc != 0) {
+	dbats_log(LOG_ERROR, "dbats_get_start_time %d: get: %s", sid, db_strerror(rc));
+	return rc;
+    }
+    *start = ntohl(dbkey.time);
+
+    rc = dbc->close(dbc);
+    if (rc != 0) {
+	dbats_log(LOG_ERROR, "dbats_get_start_time %d: close: %s", sid, db_strerror(rc));
+	return rc;
+    }
+
+    return 0;
+}
+
+int dbats_get_end_time(dbats_handler *dh, int sid, uint32_t *end)
+{
+    int rc;
+    DBC *dbc;
+    rc = dh->dbData->cursor(dh->dbData, current_txn(dh), &dbc, 0);
+    if (rc != 0) {
+	dbats_log(LOG_ERROR, "dbats_get_end_time %d: cursor: %s", sid, db_strerror(rc));
+	return rc;
+    }
+    fragkey_t dbkey = { htonl(sid+1), htonl(0), htonl(0) };
+    DBT_in(dbt_key, &dbkey, sizeof(dbkey));
+    dbt_key.ulen = sizeof(dbkey);
+    DBT_null(dbt_data);
+    rc = dbc->get(dbc, &dbt_key, &dbt_data, DB_SET_RANGE);
+
+    if (rc == 0) {
+	rc = dbc->get(dbc, &dbt_key, &dbt_data, DB_PREV);
+    } else if (rc == DB_NOTFOUND) {
+	rc = dbc->get(dbc, &dbt_key, &dbt_data, DB_LAST);
+    } else {
+	dbats_log(LOG_ERROR, "dbats_get_end_time %d: get: %s", sid, db_strerror(rc));
+	return rc;
+    }
+
+    if (rc == DB_NOTFOUND)
+	return rc;
+    if (rc != 0) {
+	dbats_log(LOG_ERROR, "dbats_get_end_time %d: prev: %s", sid, db_strerror(rc));
+	return rc;
+    }
+    if (ntohl(dbkey.sid) != sid)
+	return DB_NOTFOUND;
+
+    *end = ntohl(dbkey.time);
+
+    rc = dbc->close(dbc);
+    if (rc != 0) {
+	dbats_log(LOG_ERROR, "dbats_get_end_time %d: close: %s", sid, db_strerror(rc));
+	return rc;
+    }
 
     return 0;
 }
@@ -657,31 +757,43 @@ static int delete_frags(dbats_handler *dh, DB *db, const char *name,
 	}
 	rc = dbc->get(dbc, &dbt_key, &dbt_data, DB_NEXT);
     }
+    rc = dbc->close(dbc);
+    if (rc != 0) {
+	dbats_log(LOG_ERROR, "delete_frags %s %d %u..%u: close: %s", name,
+	    sid, start, end, db_strerror(rc));
+	return rc;
+    }
     return 0;
 }
 
-static int read_series_info(dbats_handler *dh, int sid, uint32_t flags)
+// Delete values earlier than the keep limit
+static int truncate_series(dbats_handler *dh, int sid)
 {
-    size_t value_len = sizeof(dbats_series_info);
-    char keybuf[32];
-    series_info_key(dh, keybuf, sid);
+    dbats_log(LOG_FINE, "truncate_series %d", sid);
+    int rc;
+    if ((rc = read_series_info(dh, sid, DB_RMW)) != 0)
+	return rc;
 
-    int rc = raw_db_get(dh, dh->dbMeta, keybuf, strlen(keybuf),
-	&dh->series[sid], &value_len, flags);
-    if (rc != 0)
-	dbats_log(LOG_ERROR, "error getting %s: %s", keybuf, db_strerror(rc));
-    return rc;
-}
-
-static int write_series_info(dbats_handler *dh, int sid)
-{
-    char keybuf[32];
-    series_info_key(dh, keybuf, sid);
-    int rc = raw_db_set(dh, dh->dbMeta, keybuf, strlen(keybuf),
-	&dh->series[sid], sizeof(dbats_series_info));
-    if (rc != 0)
-	dbats_log(LOG_ERROR, "error updating %s: %s", keybuf, db_strerror(rc));
-    return rc;
+    dbats_series_info *series = &dh->series[sid];
+    if (series->keep > 0) {
+	uint32_t start, end;
+	dbats_get_start_time(dh, sid, &start);
+	dbats_get_end_time(dh, sid, &end);
+	uint32_t keep_time = (series->keep-1) * series->period;
+	uint32_t new_start = keep_time > end ? 0 : end - keep_time;
+	if (sid == 0 && dh->min_keep_time < new_start) {
+	    dh->min_keep_time = new_start;
+	    rc = write_min_keep_time(dh);
+	    if (rc != 0) return rc;
+	}
+	if (start < new_start) {
+	    rc = delete_frags(dh, dh->dbData, "data", sid, 0, new_start);
+	    if (rc != 0) return rc;
+	    rc = delete_frags(dh, dh->dbIsSet, "is_set", sid, 0, new_start);
+	    if (rc != 0) return rc;
+	}
+    }
+    return 0;
 }
 
 int dbats_series_limit(dbats_handler *dh, int sid, int keep)
@@ -712,21 +824,11 @@ int dbats_series_limit(dbats_handler *dh, int sid, int keep)
 	}
     }
 
-    dbats_series_info *series = &dh->series[sid];
-    series->keep = keep;
+    dh->series[sid].keep = keep;
+    rc = truncate_series(dh, sid);
+    if (rc != 0) goto abort;
 
-    if (keep > 0) {
-	uint32_t end = series->times.end - keep * series->period;
-	if (series->times.start <= end) {
-	    rc = delete_frags(dh, dh->dbData, "data", sid, 0, end);
-	    if (rc != 0) goto abort;
-	    rc = delete_frags(dh, dh->dbIsSet, "is_set", sid, 0, end);
-	    if (rc != 0) goto abort;
-	    series->times.start = end + series->period;
-	}
-    }
-
-    rc = write_series_info(dh, sid); // write new values of keep and times.start
+    rc = write_series_info(dh, sid); // write new keep
     if (rc != 0) goto abort;
 
     return commit_transaction(dh); // "keep txn"
@@ -768,7 +870,6 @@ static int flush_tslice(dbats_handler *dh, int sid)
     size_t frag_size = fragsize(dh);
     char *buf = NULL;
     int rc;
-    int changed = 0;
 
     // Write fragments to the DB
     fragkey_t dbkey = { htonl(sid), htonl(dh->tslice[sid]->time), 0};
@@ -803,7 +904,6 @@ static int flush_tslice(dbats_handler *dh, int sid)
 		if (rc != 0) return rc;
 	    }
 	    dh->tslice[sid]->frag_changed[f] = 0;
-	    changed = 1;
 
 	    rc = raw_db_set(dh, dh->dbIsSet, &dbkey, sizeof(dbkey),
 		dh->tslice[sid]->is_set[f], vec_size(ENTRIES_PER_FRAG));
@@ -812,29 +912,9 @@ static int flush_tslice(dbats_handler *dh, int sid)
     }
     if (buf) free(buf);
 
-    // We read and write series.times as the last step of a transaction to
-    // minimize the time that the lock is held.
-    if (changed) {
-	// get updated series times from db
-	if ((rc = read_series_info(dh, sid, DB_RMW)) != 0)
-	    return rc;
-
-	// write new series times to db if needed
-	changed = 0;
-	if (dh->series[sid].times.start == 0 ||
-	    dh->series[sid].times.start > dh->tslice[sid]->time)
-	{
-	    dh->series[sid].times.start = dh->tslice[sid]->time;
-	    changed = 1;
-	}
-	if (dh->series[sid].times.end < dh->tslice[sid]->time) {
-	    dh->series[sid].times.end = dh->tslice[sid]->time;
-	    changed = 1;
-	}
-	if (changed) {
-	    if ((rc = write_series_info(dh, sid)) != 0)
-		return rc;
-	}
+    if (!dh->cfg.readonly) {
+	rc = truncate_series(dh, sid);
+	if (rc != 0) return rc;
     }
 
     if (!dh->cfg.exclusive || !dh->is_open) {
@@ -1134,20 +1214,20 @@ int dbats_select_time(dbats_handler *dh, uint32_t time_value, uint32_t flags)
     uint32_t min_time = 0;
     uint32_t max_time = 0;
 
-    if (dh->serialize) {
-	// Lock "series0" to enforce one writer at a time.
-	// Timeslice transactions are sufficiently complex that they end up
-	// being serialized anyway.  By serializing up front, we avoid all
-	// deadlocks and don't need sub-transactions around dbats_get() and
-	// dbats_set().
+    if (!dh->cfg.readonly) {
+	dbats_get_end_time(dh, 0, &dh->end_time);
+
+	// Locking min_time for writing forces writers to be serialized (one at
+	// a time).  Even if we did not need to lock min_time, it would still
+	// be desirable to serialize writers, since simultaneous unserialized
+	// writers would end up deadlocking with each other anyway.
 	int timeout = 10;
-	const char *keybuf = "series0";
+	const char *keybuf = "min_keep_time";
 	while (1) {
 	    size_t value_len;
-	    value_len = sizeof(dbats_series_info);
-	    int dbflags = dh->cfg.readonly ? 0 : DB_RMW;
+	    value_len = sizeof(uint32_t);
 	    rc = raw_db_get(dh, dh->dbMeta, keybuf, strlen(keybuf),
-		&dh->series[0], &value_len, dbflags);
+		&dh->min_keep_time, &value_len, DB_RMW);
 	    if (rc == 0) break;
 	    if (rc != DB_LOCK_DEADLOCK || --timeout <= 0) {
 		dbats_log(LOG_ERROR, "error getting %s: %s",
@@ -1157,7 +1237,7 @@ int dbats_select_time(dbats_handler *dh, uint32_t time_value, uint32_t flags)
 	    dbats_log(LOG_FINE, "select_time %u: get %s: deadlock, timeout=%d",
 		time_value, keybuf, timeout);
 	}
-	dbats_log(LOG_FINE, "select_time %u: got %s", time_value, keybuf);
+	dbats_log(LOG_FINE, "select_time %u: got %s = %u", time_value, keybuf, dh->min_keep_time);
     }
 
     for (int sid = 0; sid < dh->cfg.num_series; sid++) {
@@ -1165,6 +1245,15 @@ int dbats_select_time(dbats_handler *dh, uint32_t time_value, uint32_t flags)
 	uint32_t t = time_value;
 
 	dbats_normalize_time(dh, sid, &t);
+
+	if (!dh->cfg.readonly) {
+	    if (t < dh->min_keep_time) {
+		dbats_log(LOG_ERROR, "select_time %u: illegal attempt to set "
+		    "value in series %d at time %u before series limit %u",
+		    time_value, sid, t, dh->min_keep_time);
+		return EINVAL;
+	    }
+	}
 
 	if (dh->cfg.exclusive) {
 	    if (tslice->time == t) {
@@ -1385,6 +1474,15 @@ retry:
 
     // For each sid, aggregate *valuep into tslice[sid].
     for (int sid = 1; sid < dh->cfg.num_series; sid++) {
+
+	if (dh->series[sid].keep > 0) {
+	    // Skip if the time is outside of series' keep limit
+	    uint32_t keep_time = (dh->series[sid].keep-1) * dh->series[sid].period;
+	    if (keep_time < dh->end_time &&
+		dh->tslice[sid]->time < dh->end_time - keep_time)
+		    continue;
+	}
+
 	if ((rc = instantiate_frag(dh, sid, frag_id)) != 0) {
 	    if (!dh->serialize) {
 		abort_transaction(dh); // set txn

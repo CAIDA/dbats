@@ -71,18 +71,12 @@
 /// Labels for aggregation functions
 extern const char *dbats_agg_func_label[];
 
-typedef struct {
-    uint32_t start;
-    uint32_t end;
-} dbats_timerange_t;
-
 /// Time series parameters (read only).
 typedef struct {
     uint32_t func;           ///< aggregation function
     uint32_t steps;          ///< # of data points contributing to one agg value
     uint32_t period;         ///< time covered by one value (seconds)
     uint32_t keep;           ///< number of data points to keep (0 means keep all)
-    dbats_timerange_t times; ///< times of first and last data points
 } dbats_series_info;
 
 /** Configuration parameters (read only).
@@ -168,6 +162,26 @@ extern void dbats_close(dbats_handler *handler);
  *  @return 0 for success, nonzero for error.
  */
 extern int dbats_aggregate(dbats_handler *handler, int func, int steps);
+
+/** Get the earliest timestamp in a series.
+ *  @param[in] handler A dbats_handler created by dbats_open().
+ *  @param[in] sid time series id (0 for the primary series).
+ *  @param[out] start A pointer to a uint32_t that will be filled in with
+ *    the time of the earliest entry in the series.
+ *  @return 0 for success, DB_NOTFOUND if the series is empty,
+ *    or other nonzero value for error.
+ */
+extern int dbats_get_start_time(dbats_handler *handler, int sid, uint32_t *start);
+
+/** Get the latest timestamp in a series.
+ *  @param[in] handler A dbats_handler created by dbats_open().
+ *  @param[in] sid time series id (0 for the primary series).
+ *  @param[out] end A pointer to a uint32_t that will be filled in with
+ *    the time of the latest entry in the series.
+ *  @return 0 for success, DB_NOTFOUND if the series is empty,
+ *    or other nonzero value for error.
+ */
+extern int dbats_get_end_time(dbats_handler *handler, int sid, uint32_t *end);
 
 /** Congfiure the number of data points to keep in a time series.
  *  @param[in] handler A dbats_handler created by dbats_open().
