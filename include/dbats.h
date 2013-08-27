@@ -184,10 +184,22 @@ extern int dbats_get_start_time(dbats_handler *handler, int sid, uint32_t *start
 extern int dbats_get_end_time(dbats_handler *handler, int sid, uint32_t *end);
 
 /** Congfiure the number of data points to keep in a time series.
+ *  When a transaction started by dbats_select_time() is committed, any data
+ *  points that are <code>keep</code> periods or more older than the latest
+ *  point ever set (for any key) will be deleted.
+ *  Once a point is deleted for being outside the limit, it can not be set
+ *  again, even if the limit is changed.
+ *  The limit for the primary data series (sid 0) can not be smaller than the
+ *  number of steps in the smallest aggregate.
  *  @param[in] handler A dbats_handler created by dbats_open().
  *  @param[in] sid time series id (0 for the primary series).
- *  @param[in] keep The number of data points to keep in the time series.
- *  @return 0 for success, nonzero for error.
+ *  @param[in] keep The number of data points to keep in the time series, or
+ *    0 to keep all points.
+ *  @return
+ *    - 0 for success;
+ *    - EINVAL if sid does not refer to a valid series or if the limit is too
+ *      small;
+ *    - other nonzero value for other errors.
  */
 extern int dbats_series_limit(dbats_handler *handler, int sid, int keep);
 
@@ -217,7 +229,11 @@ extern uint32_t dbats_normalize_time(const dbats_handler *handler,
  *  @param[in] flags a bitwise-OR combination of any of the following:
  *    - DBATS_PRELOAD - load data immediately instead of waiting until it's
  *      needed (rarely useful)
- *  @return 0 for success, nonzero for error.
+ *  @return
+ *    - 0 for success;
+ *    - EINVAL if the database was not opened with DBATS_READONLY and the
+ *      selected time is outside the keep limit set by dbats_series_limit();
+ *    - other nonzero value for other errors.
  */
 extern int dbats_select_time(dbats_handler *handler,
     uint32_t time_value, uint32_t flags);
