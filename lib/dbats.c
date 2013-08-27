@@ -715,17 +715,17 @@ int dbats_get_end_time(dbats_handler *dh, int sid, uint32_t *end)
     return 0;
 }
 
-// "DELETE FROM db WHERE db.sid = sid AND db.time BETWEEN start AND end"
+// "DELETE FROM db WHERE db.sid = sid AND db.time >= start AND db.time < end"
 static int delete_frags(dbats_handler *dh, DB *db, const char *name,
     int sid, uint32_t start, uint32_t end)
 {
-    dbats_log(LOG_FINE, "delete_frags %s %d %u..%u", name,
+    dbats_log(LOG_FINE, "delete_frags %s %d [%u,%u)", name,
 	sid, start, end);
     int rc;
     DBC *dbc;
     rc = db->cursor(db, current_txn(dh), &dbc, 0);
     if (rc != 0) {
-	dbats_log(LOG_ERROR, "delete_frags %s %d %u..%u: cursor: %s", name,
+	dbats_log(LOG_ERROR, "delete_frags %s %d [%u,%u): cursor: %s", name,
 	    sid, start, end, db_strerror(rc));
 	return rc;
     }
@@ -744,7 +744,7 @@ static int delete_frags(dbats_handler *dh, DB *db, const char *name,
 		db_strerror(rc));
 	    return rc;
 	}
-	if (ntohl(dbkey.sid) != sid || ntohl(dbkey.time) > end) break;
+	if (ntohl(dbkey.sid) != sid || ntohl(dbkey.time) >= end) break;
 	rc = dbc->del(dbc, 0);
 	if (rc != 0) {
 	    dbats_log(LOG_ERROR, "delete_frags %s %d %u %d: del: %s", name,
@@ -759,7 +759,7 @@ static int delete_frags(dbats_handler *dh, DB *db, const char *name,
     }
     rc = dbc->close(dbc);
     if (rc != 0) {
-	dbats_log(LOG_ERROR, "delete_frags %s %d %u..%u: close: %s", name,
+	dbats_log(LOG_ERROR, "delete_frags %s %d [%u,%u): close: %s", name,
 	    sid, start, end, db_strerror(rc));
 	return rc;
     }
@@ -771,8 +771,6 @@ static int truncate_series(dbats_handler *dh, int sid)
 {
     dbats_log(LOG_FINE, "truncate_series %d", sid);
     int rc;
-    if ((rc = read_series_info(dh, sid, DB_RMW)) != 0)
-	return rc;
 
     dbats_series_info *series = &dh->series[sid];
     if (series->keep > 0) {
@@ -780,7 +778,7 @@ static int truncate_series(dbats_handler *dh, int sid)
 	dbats_get_start_time(dh, sid, &start);
 	dbats_get_end_time(dh, sid, &end);
 	uint32_t keep_time = (series->keep-1) * series->period;
-	uint32_t new_start = keep_time > end ? 0 : end - keep_time;
+	uint32_t new_start = (keep_time > end) ? 0 : (end - keep_time);
 	if (sid == 0 && dh->min_keep_time < new_start) {
 	    dh->min_keep_time = new_start;
 	    rc = write_min_keep_time(dh);
@@ -1208,6 +1206,18 @@ int dbats_select_time(dbats_handler *dh, uint32_t time_value, uint32_t flags)
 
     if ((rc = begin_transaction(dh, "tslice txn")) != 0)
 	return rc;
+
+    {
+	size_t value_len;
+	value_len = sizeof(dh->cfg.num_series);
+	rc = raw_db_get(dh, dh->dbMeta, "num_series", sizeof("num_series")-1,
+	    &dh->cfg.num_series, &value_len, 0);
+	if (rc != 0) return rc;
+	for (int sid = 0; sid < dh->cfg.num_series; sid++) {
+	    if (read_series_info(dh, sid, 0) != 0)
+		return rc;
+	}
+    }
 
     dh->preload = !!(flags & DBATS_PRELOAD);
 
