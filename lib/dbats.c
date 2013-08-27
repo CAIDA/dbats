@@ -321,21 +321,25 @@ static int raw_db_set(dbats_handler *dh, DB *db,
 #define QLZ_OVERHEAD 400
 
 // Get a value from the database.
-// Before the call, *value_len must contain the length of the memory pointed
-// to by value.
-// After the call, *value_len will contain the length of data written into
-// the memory pointed to by value.
-static int raw_db_get(dbats_handler *dh, DB* db,
-    const void *key, uint32_t key_len, void *value, size_t *value_len,
+// buflen must contain the length of the memory pointed to by value.
+// If value_len_p != NULL, then after the call, *value_len_p will contain the
+// length of data written into the memory pointed to by value.
+static int raw_db_get(dbats_handler *dh, DB* db, const void *key,
+    uint32_t key_len, void *value, size_t buflen, size_t *value_len_p,
     uint32_t dbflags)
 {
     int rc;
 
     DBT_in(dbt_key, (void*)key, key_len);
-    DBT_out(dbt_data, value, *value_len);
+    DBT_out(dbt_data, value, buflen);
     rc = db->get(db, current_txn(dh), &dbt_key, &dbt_data, dbflags);
     if (rc == 0) {
-	*value_len = dbt_data.size;
+	if (value_len_p) {
+	    *value_len_p = dbt_data.size;
+	} else if (dbt_data.size != buflen) {
+	    dbats_log(LOG_WARNING, "raw_db_get: expected %" PRIu32 ", got %" PRIu32,
+		dbt_data.ulen, dbt_data.size);
+	}
 	return 0;
     }
     if (rc != DB_NOTFOUND)
@@ -362,8 +366,11 @@ static void raw_db_delete(const dbats_handler *dh, DB *db,
 }
 */
 
-#define CFG_SET(dh, key, value) \
-    raw_db_set(dh, dh->dbMeta, key, strlen(key), &value, sizeof(value))
+#define CFG_SET(dh, key, val) \
+    raw_db_set(dh, dh->dbMeta, key, strlen(key), &val, sizeof(val))
+
+#define CFG_GET(dh, key, val, flags) \
+    raw_db_get(dh, dh->dbMeta, key, strlen(key), &val, sizeof(val), NULL, flags)
 
 /*************************************************************************/
 
@@ -377,11 +384,9 @@ static void raw_db_delete(const dbats_handler *dh, DB *db,
 
 static int read_bundle_info(dbats_handler *dh, int bid, uint32_t flags)
 {
-    size_t value_len = sizeof(dbats_bundle_info);
     char keybuf[32];
     bundle_info_key(dh, keybuf, bid);
-    return raw_db_get(dh, dh->dbMeta, keybuf, strlen(keybuf),
-	&dh->bundle[bid], &value_len, flags);
+    return CFG_GET(dh, keybuf, dh->bundle[bid], flags);
 }
 
 static int write_bundle_info(dbats_handler *dh, int bid)
@@ -515,16 +520,13 @@ dbats_handler *dbats_open(const char *path,
 
 #define initcfg(field, key, defaultval) \
     do { \
-	size_t value_len = sizeof(dh->cfg.field); \
 	if (is_new) { \
 	    dh->cfg.field = (defaultval); \
 	    if (CFG_SET(dh, key, dh->cfg.field) != 0) \
 		goto abort; \
 	} else { \
 	    int writelock = !dh->cfg.readonly || dh->cfg.exclusive; \
-	    if (raw_db_get(dh, dh->dbMeta, key, strlen(key), \
-		&dh->cfg.field, &value_len, writelock ? DB_RMW : 0) != 0) \
-	    { \
+	    if (CFG_GET(dh, key, dh->cfg.field, writelock ? DB_RMW : 0) != 0) {\
 		dbats_log(LOG_ERROR, "%s: missing config: %s", path, key); \
 		goto abort; \
 	    } \
@@ -1033,13 +1035,12 @@ static int load_isset(dbats_handler *dh, fragkey_t *dbkey, uint8_t **dest)
 {
     static uint8_t *buf = NULL; // can recycle memory across calls
     int rc;
-    size_t value_len = vec_size(ENTRIES_PER_FRAG);
 
     if (!buf && !(buf = emalloc(vec_size(ENTRIES_PER_FRAG), "is_set")))
 	return errno ? errno : ENOMEM; // error
 
     rc = raw_db_get(dh, dh->dbIsSet, dbkey, sizeof(*dbkey),
-	buf, &value_len, !dh->cfg.readonly ? DB_RMW : 0);
+	buf, vec_size(ENTRIES_PER_FRAG), NULL, !dh->cfg.readonly ? DB_RMW : 0);
 
     dbats_log(LOG_FINE, "load_isset t=%u, bid=%u, frag_id=%u: "
 	"raw_db_get(is_set) = %d",
@@ -1060,7 +1061,6 @@ static int load_isset(dbats_handler *dh, fragkey_t *dbkey, uint8_t **dest)
 	return rc; // error
     }
 
-    // assert(value_len == vec_size(ENTRIES_PER_FRAG));
     *dest = buf;
     buf = NULL;
 
@@ -1089,9 +1089,9 @@ static int load_frag(dbats_handler *dh, uint32_t t, int bid,
 	if (!dh->db_get_buf) return errno ? errno : ENOMEM;
     }
 
-    size_t value_len = dh->db_get_buf_len;
-    rc = raw_db_get(dh, dh->dbData, &dbkey, sizeof(dbkey),
-	dh->db_get_buf, &value_len, !dh->cfg.readonly ? DB_RMW : 0);
+    size_t value_len;
+    rc = raw_db_get(dh, dh->dbData, &dbkey, sizeof(dbkey), dh->db_get_buf,
+	dh->db_get_buf_len, &value_len, !dh->cfg.readonly ? DB_RMW : 0);
     dbats_log(LOG_FINE, "load_frag t=%u, bid=%u, frag_id=%u: "
 	"raw_db_get(frag) = %d", t, bid, frag_id, rc);
     if (rc != 0) {
@@ -1121,7 +1121,7 @@ static int load_frag(dbats_handler *dh, uint32_t t, int bid,
 	// assert(len == fragsize(dh));
 	dbats_log(LOG_VERYFINE, "decompressed frag t=%u, bid=%u, frag_id=%u: "
 	    "%u -> %u (%.1f%%)",
-	    t, bid, frag_id, value_len, len, len*100.0/value_len);
+	    t, bid, frag_id, dh->db_get_buf_len, len, len*100.0/value_len);
 
     } else {
 	// copy fragment
@@ -1209,9 +1209,7 @@ int dbats_select_time(dbats_handler *dh, uint32_t time_value, uint32_t flags)
 	return rc;
 
     {
-	size_t value_len = sizeof(dh->cfg.num_bundles);
-	rc = raw_db_get(dh, dh->dbMeta, num_bundles_key(dh),
-	    strlen(num_bundles_key(dh)), &dh->cfg.num_bundles, &value_len, 0);
+	rc = CFG_GET(dh, num_bundles_key(dh), dh->cfg.num_bundles, 0);
 	if (rc != 0) return rc;
 	for (int bid = 0; bid < dh->cfg.num_bundles; bid++) {
 	    if (read_bundle_info(dh, bid, 0) != 0)
@@ -1234,9 +1232,7 @@ int dbats_select_time(dbats_handler *dh, uint32_t time_value, uint32_t flags)
 	int timeout = 10;
 	const char *keybuf = "min_keep_time";
 	while (1) {
-	    size_t value_len = sizeof(uint32_t);
-	    rc = raw_db_get(dh, dh->dbMeta, keybuf, strlen(keybuf),
-		&dh->min_keep_time, &value_len, DB_RMW);
+	    rc = CFG_GET(dh, keybuf, dh->min_keep_time, DB_RMW);
 	    if (rc == 0) break;
 	    if (rc != DB_LOCK_DEADLOCK || --timeout <= 0) {
 		dbats_log(LOG_ERROR, "error getting %s: %s",
@@ -1322,12 +1318,10 @@ int dbats_select_time(dbats_handler *dh, uint32_t time_value, uint32_t flags)
 int dbats_get_key_id(dbats_handler *dh, const char *key,
     uint32_t *key_id_p, uint32_t flags)
 {
-    size_t keylen = strlen(key);
-    size_t len = sizeof(*key_id_p);
     int rc;
 
-    rc = raw_db_get(dh, dh->dbKeyname, key, keylen, key_id_p, &len,
-	DB_READ_COMMITTED);
+    rc = raw_db_get(dh, dh->dbKeyname, key, strlen(key), key_id_p,
+	sizeof(*key_id_p), NULL, DB_READ_COMMITTED);
     if (rc == 0) {
 	// found it
 	dbats_log(LOG_FINEST, "Found key #%u: %s", *key_id_p, key);
@@ -1379,10 +1373,10 @@ int dbats_get_key_name(dbats_handler *dh, uint32_t key_id, char *namebuf)
 {
     int rc;
     db_recno_t recno = key_id + 1;
-    uint32_t value_len = DBATS_KEYLEN - 1;
+    uint32_t value_len;
 
     rc = raw_db_get(dh, dh->dbKeyid, &recno, sizeof(recno),
-	namebuf, &value_len, DB_READ_COMMITTED);
+	namebuf, DBATS_KEYLEN - 1, &value_len, DB_READ_COMMITTED);
     if (rc != 0) return rc;
     namebuf[value_len] = '\0';
     return 0;
