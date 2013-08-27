@@ -268,6 +268,25 @@ static int raw_db_open(dbats_handler *dh, DB **dbp, const char *name,
     return 0;
 }
 
+static void log_error(dbats_handler *dh, DB *db, const char *type,
+    const void *key, uint32_t key_len, int rc)
+{
+    char keybuf[DBATS_KEYLEN] = "";
+    if (db == dh->dbData || db == dh->dbIsSet) {
+	fragkey_t *fragkey = (fragkey_t*)key;
+	sprintf(keybuf, "bid=%d t=%u frag=%u",
+	    fragkey->bid, fragkey->time, fragkey->frag_id);
+    } else if (db == dh->dbMeta || db == dh->dbKeyname) {
+	sprintf(keybuf, "%.*s", key_len, (char*)key);
+    } else if (db == dh->dbKeyid) {
+	sprintf(keybuf, "#%u", *(db_recno_t*)key);
+    }
+    const char *dbname;
+    db->get_dbname(db, &dbname, NULL);
+    dbats_log(LOG_WARNING, "Error in raw_db_%s: %s: %s: %s",
+	type, dbname, keybuf, db_strerror(rc));
+}
+
 static int raw_db_set(dbats_handler *dh, DB *db,
     const void *key, uint32_t key_len,
     const void *value, uint32_t value_len)
@@ -276,7 +295,7 @@ static int raw_db_set(dbats_handler *dh, DB *db,
 
     if (db == dh->dbData) {
 	fragkey_t *fragkey = (fragkey_t*)key;
-	dbats_log(LOG_FINEST, "raw_db_set Data: bundle=%d t=%u frag=%u, "
+	dbats_log(LOG_FINEST, "raw_db_set Data: bid=%d t=%u frag=%u, "
 	    "compress=%d, len=%u", fragkey->bid, fragkey->time,
 	    fragkey->frag_id, *(uint8_t*)value, value_len);
     }
@@ -293,10 +312,7 @@ static int raw_db_set(dbats_handler *dh, DB *db,
     DBT_in(dbt_data, (void*)value, value_len);
 
     if ((rc = db->put(db, current_txn(dh), &dbt_key, &dbt_data, 0)) != 0) {
-	const char *dbname;
-	db->get_dbname(db, &dbname, NULL);
-	dbats_log(LOG_WARNING, "Error in raw_db_set: %s: %s",
-	    dbname, db_strerror(rc));
+	log_error(dh, db, "set", key, key_len, rc);
 	return rc;
     }
     return 0;
@@ -323,7 +339,7 @@ static int raw_db_get(dbats_handler *dh, DB* db,
 	return 0;
     }
     if (rc != DB_NOTFOUND)
-	dbats_log(LOG_FINE, "raw_db_get failed: %s", db_strerror(rc));
+	log_error(dh, db, "get", key, key_len, rc);
     if (rc == DB_BUFFER_SMALL) {
 	dbats_log(LOG_WARNING, "raw_db_get: had %" PRIu32 ", needed %" PRIu32,
 	    dbt_data.ulen, dbt_data.size);
@@ -346,44 +362,33 @@ static void raw_db_delete(const dbats_handler *dh, DB *db,
 }
 */
 
+#define CFG_SET(dh, key, value) \
+    raw_db_set(dh, dh->dbMeta, key, strlen(key), &value, sizeof(value))
+
 /*************************************************************************/
 
 #define bundle_info_key(dh, keybuf, bid) \
     sprintf(keybuf, dh->cfg.version >= 4 ? "bundle%d" : \
 	dh->cfg.version >= 3 ? "series%d" : "agg%d", bid)
 
+#define num_bundles_key(dh) \
+    (dh->cfg.version >= 4 ? "num_bundles" : \
+	dh->cfg.version >= 3 ? "num_series" : "num_aggs")
+
 static int read_bundle_info(dbats_handler *dh, int bid, uint32_t flags)
 {
     size_t value_len = sizeof(dbats_bundle_info);
     char keybuf[32];
     bundle_info_key(dh, keybuf, bid);
-
-    int rc = raw_db_get(dh, dh->dbMeta, keybuf, strlen(keybuf),
+    return raw_db_get(dh, dh->dbMeta, keybuf, strlen(keybuf),
 	&dh->bundle[bid], &value_len, flags);
-    if (rc != 0)
-	dbats_log(LOG_ERROR, "error getting %s: %s", keybuf, db_strerror(rc));
-    return rc;
 }
 
 static int write_bundle_info(dbats_handler *dh, int bid)
 {
     char keybuf[32];
     bundle_info_key(dh, keybuf, bid);
-    int rc = raw_db_set(dh, dh->dbMeta, keybuf, strlen(keybuf),
-	&dh->bundle[bid], sizeof(dbats_bundle_info));
-    if (rc != 0)
-	dbats_log(LOG_ERROR, "error updating %s: %s", keybuf, db_strerror(rc));
-    return rc;
-}
-
-static int write_min_keep_time(dbats_handler *dh)
-{
-    const char *keybuf = "min_keep_time";
-    int rc = raw_db_set(dh, dh->dbMeta, keybuf, strlen(keybuf),
-	&dh->min_keep_time, sizeof(uint32_t));
-    if (rc != 0)
-	dbats_log(LOG_ERROR, "error setting %s: %s", keybuf, db_strerror(rc));
-    return rc;
+    return CFG_SET(dh, keybuf, dh->bundle[bid]);
 }
 
 /*************************************************************************/
@@ -508,35 +513,34 @@ dbats_handler *dbats_open(const char *path,
 
     dh->cfg.entry_size = sizeof(dbats_value); // for db_get_buf_len
 
-#define initcfg(field, defaultval) \
+#define initcfg(field, key, defaultval) \
     do { \
 	size_t value_len = sizeof(dh->cfg.field); \
 	if (is_new) { \
 	    dh->cfg.field = (defaultval); \
-	    if (raw_db_set(dh, dh->dbMeta, #field, strlen(#field), \
-		&dh->cfg.field, value_len) != 0) \
-		    goto abort; \
+	    if (CFG_SET(dh, key, dh->cfg.field) != 0) \
+		goto abort; \
 	} else { \
 	    int writelock = !dh->cfg.readonly || dh->cfg.exclusive; \
-	    if (raw_db_get(dh, dh->dbMeta, #field, strlen(#field), \
+	    if (raw_db_get(dh, dh->dbMeta, key, strlen(key), \
 		&dh->cfg.field, &value_len, writelock ? DB_RMW : 0) != 0) \
 	    { \
-		dbats_log(LOG_ERROR, "%s: missing config: %s", path, #field); \
+		dbats_log(LOG_ERROR, "%s: missing config: %s", path, key); \
 		goto abort; \
 	    } \
 	} \
-	dbats_log(LOG_CONFIG, "cfg: %s = %u", #field, dh->cfg.field); \
+	dbats_log(LOG_CONFIG, "cfg: %s = %u", key, dh->cfg.field); \
     } while (0)
 
-    initcfg(version,           DBATS_DB_VERSION);
-    initcfg(period,            period);
-    initcfg(values_per_entry,  values_per_entry);
-    initcfg(num_bundles,       1);
+    initcfg(version,          "version",           DBATS_DB_VERSION);
+    initcfg(period,           "period",            period);
+    initcfg(values_per_entry, "values_per_entry",  values_per_entry);
+    initcfg(num_bundles,      num_bundles_key(dh), 1);
 
 #undef initcfg
 
-    if (dh->cfg.version != DBATS_DB_VERSION) {
-	dbats_log(LOG_ERROR, "database version %d != library version %d",
+    if (dh->cfg.version > DBATS_DB_VERSION) {
+	dbats_log(LOG_ERROR, "database version %d > library version %d",
 	    dh->cfg.version, DBATS_DB_VERSION);
 	return NULL;
     }
@@ -562,7 +566,7 @@ dbats_handler *dbats_open(const char *path,
 	dh->bundle[0].period = dh->cfg.period;
 	rc = write_bundle_info(dh, 0);
 	if (rc != 0) return NULL;
-	rc = write_min_keep_time(dh);
+	rc = CFG_SET(dh, "min_keep_time", dh->min_keep_time);
 	if (rc != 0) return NULL;
     } else {
 	for (int bid = 0; bid < dh->cfg.num_bundles; bid++) {
@@ -584,8 +588,7 @@ dbats_handler *dbats_open(const char *path,
 	    if (!dh->state_compress) return NULL;
 	}
 
-	rc = raw_db_set(dh, dh->dbMeta, "bundle0", strlen("bundle0"),
-	    &dh->bundle[0], sizeof(dbats_bundle_info));
+	rc = CFG_SET(dh, "bundle0", dh->bundle[0]);
 	if (rc != 0) goto abort;
     }
 
@@ -617,7 +620,7 @@ int dbats_aggregate(dbats_handler *dh, int func, int steps)
     }
 
     if (dh->cfg.num_bundles >= MAX_NUM_BUNDLES) {
-	dbats_log(LOG_ERROR, "Too many time bundles (%d)", MAX_NUM_BUNDLES);
+	dbats_log(LOG_ERROR, "Too many bundles (%d)", MAX_NUM_BUNDLES);
 	return ENOMEM;
     }
 
@@ -633,8 +636,7 @@ int dbats_aggregate(dbats_handler *dh, int func, int steps)
 
     rc = write_bundle_info(dh, bid);
     if (rc != 0) return rc;
-    rc = raw_db_set(dh, dh->dbMeta, "num_bundles", strlen("num_bundles"),
-	&dh->cfg.num_bundles, sizeof(dh->cfg.num_bundles));
+    rc = CFG_SET(dh, num_bundles_key(dh), dh->cfg.num_bundles);
     if (rc != 0) return rc;
 
     return 0;
@@ -780,7 +782,7 @@ static int truncate_bundle(dbats_handler *dh, int bid)
 	uint32_t new_start = (keep_time > end) ? 0 : (end - keep_time);
 	if (bid == 0 && dh->min_keep_time < new_start) {
 	    dh->min_keep_time = new_start;
-	    rc = write_min_keep_time(dh);
+	    rc = CFG_SET(dh, "min_keep_time", dh->min_keep_time);
 	    if (rc != 0) return rc;
 	}
 	if (start < new_start) {
@@ -1207,10 +1209,9 @@ int dbats_select_time(dbats_handler *dh, uint32_t time_value, uint32_t flags)
 	return rc;
 
     {
-	size_t value_len;
-	value_len = sizeof(dh->cfg.num_bundles);
-	rc = raw_db_get(dh, dh->dbMeta, "num_bundles", sizeof("num_bundles")-1,
-	    &dh->cfg.num_bundles, &value_len, 0);
+	size_t value_len = sizeof(dh->cfg.num_bundles);
+	rc = raw_db_get(dh, dh->dbMeta, num_bundles_key(dh),
+	    strlen(num_bundles_key(dh)), &dh->cfg.num_bundles, &value_len, 0);
 	if (rc != 0) return rc;
 	for (int bid = 0; bid < dh->cfg.num_bundles; bid++) {
 	    if (read_bundle_info(dh, bid, 0) != 0)
@@ -1233,8 +1234,7 @@ int dbats_select_time(dbats_handler *dh, uint32_t time_value, uint32_t flags)
 	int timeout = 10;
 	const char *keybuf = "min_keep_time";
 	while (1) {
-	    size_t value_len;
-	    value_len = sizeof(uint32_t);
+	    size_t value_len = sizeof(uint32_t);
 	    rc = raw_db_get(dh, dh->dbMeta, keybuf, strlen(keybuf),
 		&dh->min_keep_time, &value_len, DB_RMW);
 	    if (rc == 0) break;
