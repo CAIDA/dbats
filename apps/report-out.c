@@ -81,7 +81,7 @@ int main(int argc, char *argv[]) {
     progname = argv[0];
     int outtype = OT_TEXT;
     int open_flags = DBATS_READONLY;
-    uint32_t series0_period;
+    uint32_t bundle0_period;
 
     int c;
     while ((c = getopt(argc, argv, "v:xk:b:e:o:")) != -1) {
@@ -136,19 +136,19 @@ int main(int argc, char *argv[]) {
 
     const dbats_config *cfg = dbats_get_config(handler);
 
-    const dbats_series_info *series = dbats_get_series_info(handler, 0);
-    series0_period = series->period;
+    const dbats_bundle_info *bundle = dbats_get_bundle_info(handler, 0);
+    bundle0_period = bundle->period;
     if (end == 0)
 	dbats_get_end_time(handler, 0, &end);
     if (begin == 0) {
-	// find earliest start time of all series
+	// find earliest start time of all bundles
 	dbats_get_start_time(handler, 0, &begin);
-	for (int sid = 1; sid < cfg->num_series; sid++) {
-	    uint32_t series_begin;
-	    dbats_get_start_time(handler, sid, &series_begin);
-	    series = dbats_get_series_info(handler, sid);
-	    if (begin > series_begin)
-		begin = series_begin;
+	for (int sid = 1; sid < cfg->num_bundles; sid++) {
+	    uint32_t bundle_begin;
+	    dbats_get_start_time(handler, sid, &bundle_begin);
+	    bundle = dbats_get_bundle_info(handler, sid);
+	    if (begin > bundle_begin)
+		begin = bundle_begin;
 	}
     }
 
@@ -166,32 +166,32 @@ int main(int argc, char *argv[]) {
     if (outtype == OT_GNUPLOT) {
 	fprintf(out, "set style data steps\n");
 	fprintf(out, "set xrange [%" PRIu32 ":%" PRIu32 "]\n",
-	    0, end + series0_period - begin);
-	const dbats_series_info *series1;
-	if (cfg->num_series > 0) {
-	    series1 = dbats_get_series_info(handler, 1);
-	    fprintf(out, "set xtics %d\n", series1->period);
-	    fprintf(out, "set mxtics %d\n", series1->steps);
+	    0, end + bundle0_period - begin);
+	const dbats_bundle_info *bundle1;
+	if (cfg->num_bundles > 0) {
+	    bundle1 = dbats_get_bundle_info(handler, 1);
+	    fprintf(out, "set xtics %d\n", bundle1->period);
+	    fprintf(out, "set mxtics %d\n", bundle1->steps);
 	    fprintf(out, "set grid xtics\n");
 	}
 	const char *prefix = "plot";
-	for (int sid = 0; sid < cfg->num_series; sid++) {
-	    series = dbats_get_series_info(handler, sid);
+	for (int sid = 0; sid < cfg->num_bundles; sid++) {
+	    bundle = dbats_get_bundle_info(handler, sid);
 	    fprintf(out, "%s '-' using ($1-%"PRIu32"):($2) "
 		"linecolor %d title \"%"PRIu32"s %s\"",
-		prefix, begin, sid, series->period,
-		dbats_agg_func_label[series->func]);
+		prefix, begin, sid, bundle->period,
+		dbats_agg_func_label[bundle->func]);
 	    prefix = ",";
 	}
 	fprintf(out, "\n");
     }
 
-    for (int sid = 0; sid < cfg->num_series; sid++) {
-	series = dbats_get_series_info(handler, sid);
+    for (int sid = 0; sid < cfg->num_bundles; sid++) {
+	bundle = dbats_get_bundle_info(handler, sid);
 	char strval[64];
 	strval[0] = '\0';
 	uint32_t t;
-	for (t = begin; t <= end; t += series->period) {
+	for (t = begin; t <= end; t += bundle->period) {
 	    int rc;
 
 	    if ((rc = dbats_select_time(handler, t, 0)) == -1) {
@@ -199,7 +199,7 @@ int main(int argc, char *argv[]) {
 		continue;
 	    }
 
-	    if (series->func == DBATS_AGG_AVG) {
+	    if (bundle->func == DBATS_AGG_AVG) {
 		const double *values;
 		for (int k = 0; k < n_keys; k++) {
 		    rc = dbats_get_double(handler, keys[k].keyid, &values, sid);

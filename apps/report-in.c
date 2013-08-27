@@ -73,7 +73,7 @@ int main(int argc, char *argv[]) {
     if (!handler) return -1;
 
     const dbats_config *cfg = dbats_get_config(handler);
-    if (cfg->num_series == 1) {
+    if (cfg->num_bundles == 1) {
 	dbats_log(LOG_INFO, "report-in: config aggs");
 	if (dbats_aggregate(handler, DBATS_AGG_MIN, 10) != 0)
 	    return -1;

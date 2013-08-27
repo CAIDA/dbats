@@ -24,7 +24,7 @@
 // Limits
 #define ENTRIES_PER_FRAG    10000 // number of entries in a fragment
 #define MAX_NUM_FRAGS       16384 // max number of fragments in a tslice
-#define MAX_NUM_SERIES         16 // max number of time series
+#define MAX_NUM_BUNDLES        16 // max number of time series bundles
 
 #define HAVE_SET_LK_EXCLUSIVE 0
 
@@ -42,8 +42,8 @@ ct_assert((sizeof(double) <= sizeof(dbats_value)), dbats_value_is_smaller_than_d
 #define vec_reset(vec, i) (vec[(i)/8] &= ~(1<<((i)%8)))  // reset the ith bit
 #define vec_test(vec, i)  (vec && (vec[(i)/8] & (1<<((i)%8)))) // test ith bit
 
-#define valueptr(dh, sid, frag_id, offset) \
-    ((dbats_value*)(&dh->tslice[sid]->frag[frag_id]->data[offset * dh->cfg.entry_size]))
+#define valueptr(dh, bid, frag_id, offset) \
+    ((dbats_value*)(&dh->tslice[bid]->frag[frag_id]->data[offset * dh->cfg.entry_size]))
 
 // "Fragment", containing a large subset of entries for a timeslice
 typedef struct dbats_frag {
@@ -68,7 +68,7 @@ typedef struct dbats_tslice {
     (sizeof(dbats_frag) + ENTRIES_PER_FRAG * (dh)->cfg.entry_size)
 
 typedef struct {
-    uint32_t sid;
+    uint32_t bid;
     uint32_t time;
     uint32_t frag_id;
 } fragkey_t;
@@ -87,12 +87,12 @@ struct dbats_handler {
     DB *dbMeta;                // config parameters
     DB *dbKeyname;             // key name -> key id
     DB *dbKeyid;               // recno -> key name (note: keyid == recno - 1)
-    DB *dbData;                // {sid, time, frag_id} -> value fragment
-    DB *dbIsSet;               // {sid, time, frag_id} -> is_set fragment
+    DB *dbData;                // {bid, time, frag_id} -> value fragment
+    DB *dbIsSet;               // {bid, time, frag_id} -> is_set fragment
     DBC *keyname_cursor;       // for iterating over key names
     DBC *keyid_cursor;         // for iterating over key ids
-    dbats_tslice **tslice;     // a tslice for each time series
-    dbats_series_info *series; // parameters for each time series
+    dbats_tslice **tslice;     // a tslice for each time series bundle
+    dbats_bundle_info *bundle; // parameters for each time series bundle
     uint8_t *db_get_buf;       // buffer for data fragment
     size_t db_get_buf_len;
     DB_TXN *txn[N_TXN];        // stack of transactions ([0] is NULL)
@@ -276,8 +276,8 @@ static int raw_db_set(dbats_handler *dh, DB *db,
 
     if (db == dh->dbData) {
 	fragkey_t *fragkey = (fragkey_t*)key;
-	dbats_log(LOG_FINEST, "raw_db_set Data: series=%d t=%u frag=%u, "
-	    "compress=%d, len=%u", fragkey->sid, fragkey->time,
+	dbats_log(LOG_FINEST, "raw_db_set Data: bundle=%d t=%u frag=%u, "
+	    "compress=%d, len=%u", fragkey->bid, fragkey->time,
 	    fragkey->frag_id, *(uint8_t*)value, value_len);
     }
 
@@ -348,28 +348,29 @@ static void raw_db_delete(const dbats_handler *dh, DB *db,
 
 /*************************************************************************/
 
-#define series_info_key(dh, keybuf, sid) \
-    sprintf(keybuf, dh->cfg.version < 3 ? "agg%d" : "series%d", sid)
+#define bundle_info_key(dh, keybuf, bid) \
+    sprintf(keybuf, dh->cfg.version >= 4 ? "bundle%d" : \
+	dh->cfg.version >= 3 ? "series%d" : "agg%d", bid)
 
-static int read_series_info(dbats_handler *dh, int sid, uint32_t flags)
+static int read_bundle_info(dbats_handler *dh, int bid, uint32_t flags)
 {
-    size_t value_len = sizeof(dbats_series_info);
+    size_t value_len = sizeof(dbats_bundle_info);
     char keybuf[32];
-    series_info_key(dh, keybuf, sid);
+    bundle_info_key(dh, keybuf, bid);
 
     int rc = raw_db_get(dh, dh->dbMeta, keybuf, strlen(keybuf),
-	&dh->series[sid], &value_len, flags);
+	&dh->bundle[bid], &value_len, flags);
     if (rc != 0)
 	dbats_log(LOG_ERROR, "error getting %s: %s", keybuf, db_strerror(rc));
     return rc;
 }
 
-static int write_series_info(dbats_handler *dh, int sid)
+static int write_bundle_info(dbats_handler *dh, int bid)
 {
     char keybuf[32];
-    series_info_key(dh, keybuf, sid);
+    bundle_info_key(dh, keybuf, bid);
     int rc = raw_db_set(dh, dh->dbMeta, keybuf, strlen(keybuf),
-	&dh->series[sid], sizeof(dbats_series_info));
+	&dh->bundle[bid], sizeof(dbats_bundle_info));
     if (rc != 0)
 	dbats_log(LOG_ERROR, "error updating %s: %s", keybuf, db_strerror(rc));
     return rc;
@@ -530,7 +531,7 @@ dbats_handler *dbats_open(const char *path,
     initcfg(version,           DBATS_DB_VERSION);
     initcfg(period,            period);
     initcfg(values_per_entry,  values_per_entry);
-    initcfg(num_series,        1);
+    initcfg(num_bundles,       1);
 
 #undef initcfg
 
@@ -540,39 +541,39 @@ dbats_handler *dbats_open(const char *path,
 	return NULL;
     }
 
-    if (dh->cfg.num_series > MAX_NUM_SERIES) {
-	dbats_log(LOG_ERROR, "num_series %d > %d", dh->cfg.num_series,
-	    MAX_NUM_SERIES);
+    if (dh->cfg.num_bundles > MAX_NUM_BUNDLES) {
+	dbats_log(LOG_ERROR, "num_bundles %d > %d", dh->cfg.num_bundles,
+	    MAX_NUM_BUNDLES);
 	return NULL;
     }
 
-    dh->series = emalloc(MAX_NUM_SERIES * sizeof(*dh->series), "dh->series");
-    if (!dh->series) return NULL;
-    dh->tslice = emalloc(MAX_NUM_SERIES * sizeof(*dh->tslice), "dh->tslice");
+    dh->bundle = emalloc(MAX_NUM_BUNDLES * sizeof(*dh->bundle), "dh->bundle");
+    if (!dh->bundle) return NULL;
+    dh->tslice = emalloc(MAX_NUM_BUNDLES * sizeof(*dh->tslice), "dh->tslice");
     if (!dh->tslice) return NULL;
 
     dh->cfg.entry_size = dh->cfg.values_per_entry * sizeof(dbats_value);
 
-    // load metadata for time series
+    // load metadata for time series bundles
     if (is_new) {
-	memset(&dh->series[0], 0, sizeof(dbats_series_info));
-	dh->series[0].func = DBATS_AGG_NONE;
-	dh->series[0].steps = 1;
-	dh->series[0].period = dh->cfg.period;
-	rc = write_series_info(dh, 0);
+	memset(&dh->bundle[0], 0, sizeof(dbats_bundle_info));
+	dh->bundle[0].func = DBATS_AGG_NONE;
+	dh->bundle[0].steps = 1;
+	dh->bundle[0].period = dh->cfg.period;
+	rc = write_bundle_info(dh, 0);
 	if (rc != 0) return NULL;
 	rc = write_min_keep_time(dh);
 	if (rc != 0) return NULL;
     } else {
-	for (int sid = 0; sid < dh->cfg.num_series; sid++) {
-	    if (read_series_info(dh, sid, 0) != 0)
+	for (int bid = 0; bid < dh->cfg.num_bundles; bid++) {
+	    if (read_bundle_info(dh, bid, 0) != 0)
 		return NULL;
 	}
     }
 
-    // allocate tslice for each time series
-    for (int sid = 0; sid < dh->cfg.num_series; sid++) {
-	if (!(dh->tslice[sid] = ecalloc(1, sizeof(dbats_tslice), "tslice")))
+    // allocate tslice for each time series bundle
+    for (int bid = 0; bid < dh->cfg.num_bundles; bid++) {
+	if (!(dh->tslice[bid] = ecalloc(1, sizeof(dbats_tslice), "tslice")))
 	    return NULL;
     }
 
@@ -583,8 +584,8 @@ dbats_handler *dbats_open(const char *path,
 	    if (!dh->state_compress) return NULL;
 	}
 
-	rc = raw_db_set(dh, dh->dbMeta, "series0", strlen("series0"),
-	    &dh->series[0], sizeof(dbats_series_info));
+	rc = raw_db_set(dh, dh->dbMeta, "bundle0", strlen("bundle0"),
+	    &dh->bundle[0], sizeof(dbats_bundle_info));
 	if (rc != 0) goto abort;
     }
 
@@ -613,74 +614,72 @@ int dbats_aggregate(dbats_handler *dh, int func, int steps)
 	dbats_log(LOG_ERROR,
 	    "Adding a new aggregation to existing data is not yet supported.");
 	return -1;
-	// If we're going to allow this, we have to make all references to
-	// series[] and num_series read from db instead of memory.
     }
 
-    if (dh->cfg.num_series >= MAX_NUM_SERIES) {
-	dbats_log(LOG_ERROR, "Too many time series (%d)", MAX_NUM_SERIES);
+    if (dh->cfg.num_bundles >= MAX_NUM_BUNDLES) {
+	dbats_log(LOG_ERROR, "Too many time bundles (%d)", MAX_NUM_BUNDLES);
 	return ENOMEM;
     }
 
-    int sid = dh->cfg.num_series++;
+    int bid = dh->cfg.num_bundles++;
 
-    if (!(dh->tslice[sid] = ecalloc(1, sizeof(dbats_tslice), "tslice")))
+    if (!(dh->tslice[bid] = ecalloc(1, sizeof(dbats_tslice), "tslice")))
 	return errno ? errno : ENOMEM;
 
-    memset(&dh->series[sid], 0, sizeof(dbats_series_info));
-    dh->series[sid].func = func;
-    dh->series[sid].steps = steps;
-    dh->series[sid].period = dh->series[0].period * steps;
+    memset(&dh->bundle[bid], 0, sizeof(dbats_bundle_info));
+    dh->bundle[bid].func = func;
+    dh->bundle[bid].steps = steps;
+    dh->bundle[bid].period = dh->bundle[0].period * steps;
 
-    rc = write_series_info(dh, sid);
+    rc = write_bundle_info(dh, bid);
     if (rc != 0) return rc;
-    rc = raw_db_set(dh, dh->dbMeta, "num_series", strlen("num_series"),
-	&dh->cfg.num_series, sizeof(dh->cfg.num_series));
+    rc = raw_db_set(dh, dh->dbMeta, "num_bundles", strlen("num_bundles"),
+	&dh->cfg.num_bundles, sizeof(dh->cfg.num_bundles));
     if (rc != 0) return rc;
 
     return 0;
 }
 
-int dbats_get_start_time(dbats_handler *dh, int sid, uint32_t *start)
+int dbats_get_start_time(dbats_handler *dh, int bid, uint32_t *start)
 {
     int rc;
     DBC *dbc;
     rc = dh->dbData->cursor(dh->dbData, current_txn(dh), &dbc, 0);
     if (rc != 0) {
-	dbats_log(LOG_ERROR, "dbats_get_start_time %d: cursor: %s", sid, db_strerror(rc));
+	dbats_log(LOG_ERROR, "dbats_get_start_time %d: cursor: %s", bid, db_strerror(rc));
 	return rc;
     }
-    fragkey_t dbkey = { htonl(sid), htonl(0), htonl(0) };
+    fragkey_t dbkey = { htonl(bid), htonl(0), htonl(0) };
     DBT_in(dbt_key, &dbkey, sizeof(dbkey));
     dbt_key.ulen = sizeof(dbkey);
     DBT_null(dbt_data);
     rc = dbc->get(dbc, &dbt_key, &dbt_data, DB_SET_RANGE);
     if (rc == DB_NOTFOUND) return rc;
     if (rc != 0) {
-	dbats_log(LOG_ERROR, "dbats_get_start_time %d: get: %s", sid, db_strerror(rc));
+	dbats_log(LOG_ERROR, "dbats_get_start_time %d: get: %s", bid, db_strerror(rc));
 	return rc;
     }
     *start = ntohl(dbkey.time);
 
     rc = dbc->close(dbc);
     if (rc != 0) {
-	dbats_log(LOG_ERROR, "dbats_get_start_time %d: close: %s", sid, db_strerror(rc));
+	dbats_log(LOG_ERROR, "dbats_get_start_time %d: close: %s", bid, db_strerror(rc));
 	return rc;
     }
 
     return 0;
 }
 
-int dbats_get_end_time(dbats_handler *dh, int sid, uint32_t *end)
+int dbats_get_end_time(dbats_handler *dh, int bid, uint32_t *end)
 {
     int rc;
     DBC *dbc;
     rc = dh->dbData->cursor(dh->dbData, current_txn(dh), &dbc, 0);
     if (rc != 0) {
-	dbats_log(LOG_ERROR, "dbats_get_end_time %d: cursor: %s", sid, db_strerror(rc));
+	dbats_log(LOG_ERROR, "dbats_get_end_time %d: cursor: %s", bid, db_strerror(rc));
 	return rc;
     }
-    fragkey_t dbkey = { htonl(sid+1), htonl(0), htonl(0) };
+    fragkey_t dbkey = { htonl(bid+1), htonl(0), htonl(0) };
     DBT_in(dbt_key, &dbkey, sizeof(dbkey));
     dbt_key.ulen = sizeof(dbkey);
     DBT_null(dbt_data);
@@ -691,142 +690,142 @@ int dbats_get_end_time(dbats_handler *dh, int sid, uint32_t *end)
     } else if (rc == DB_NOTFOUND) {
 	rc = dbc->get(dbc, &dbt_key, &dbt_data, DB_LAST);
     } else {
-	dbats_log(LOG_ERROR, "dbats_get_end_time %d: get: %s", sid, db_strerror(rc));
+	dbats_log(LOG_ERROR, "dbats_get_end_time %d: get: %s", bid, db_strerror(rc));
 	return rc;
     }
 
     if (rc == DB_NOTFOUND)
 	return rc;
     if (rc != 0) {
-	dbats_log(LOG_ERROR, "dbats_get_end_time %d: prev: %s", sid, db_strerror(rc));
+	dbats_log(LOG_ERROR, "dbats_get_end_time %d: prev: %s", bid, db_strerror(rc));
 	return rc;
     }
-    if (ntohl(dbkey.sid) != sid)
+    if (ntohl(dbkey.bid) != bid)
 	return DB_NOTFOUND;
 
     *end = ntohl(dbkey.time);
 
     rc = dbc->close(dbc);
     if (rc != 0) {
-	dbats_log(LOG_ERROR, "dbats_get_end_time %d: close: %s", sid, db_strerror(rc));
+	dbats_log(LOG_ERROR, "dbats_get_end_time %d: close: %s", bid, db_strerror(rc));
 	return rc;
     }
 
     return 0;
 }
 
-// "DELETE FROM db WHERE db.sid = sid AND db.time >= start AND db.time < end"
+// "DELETE FROM db WHERE db.bid = bid AND db.time >= start AND db.time < end"
 static int delete_frags(dbats_handler *dh, DB *db, const char *name,
-    int sid, uint32_t start, uint32_t end)
+    int bid, uint32_t start, uint32_t end)
 {
     dbats_log(LOG_FINE, "delete_frags %s %d [%u,%u)", name,
-	sid, start, end);
+	bid, start, end);
     int rc;
     DBC *dbc;
     rc = db->cursor(db, current_txn(dh), &dbc, 0);
     if (rc != 0) {
 	dbats_log(LOG_ERROR, "delete_frags %s %d [%u,%u): cursor: %s", name,
-	    sid, start, end, db_strerror(rc));
+	    bid, start, end, db_strerror(rc));
 	return rc;
     }
-    fragkey_t dbkey = { htonl(sid), htonl(start), htonl(0) };
+    fragkey_t dbkey = { htonl(bid), htonl(start), htonl(0) };
     DBT_in(dbt_key, &dbkey, sizeof(dbkey));
     dbt_key.ulen = sizeof(dbkey);
     DBT_null(dbt_data);
-    // Range cursor search depends on dbkey being {sid, time, frag_id}, in
+    // Range cursor search depends on dbkey being {bid, time, frag_id}, in
     // that order, with big endian values.
     rc = dbc->get(dbc, &dbt_key, &dbt_data, DB_SET_RANGE);
     while (1) {
 	if (rc == DB_NOTFOUND) break;
 	if (rc != 0) {
 	    dbats_log(LOG_ERROR, "delete_frags %s %d %u %d: get: %s", name,
-		ntohl(dbkey.sid), ntohl(dbkey.time), ntohl(dbkey.frag_id),
+		ntohl(dbkey.bid), ntohl(dbkey.time), ntohl(dbkey.frag_id),
 		db_strerror(rc));
 	    return rc;
 	}
-	if (ntohl(dbkey.sid) != sid || ntohl(dbkey.time) >= end) break;
+	if (ntohl(dbkey.bid) != bid || ntohl(dbkey.time) >= end) break;
 	rc = dbc->del(dbc, 0);
 	if (rc != 0) {
 	    dbats_log(LOG_ERROR, "delete_frags %s %d %u %d: del: %s", name,
-		ntohl(dbkey.sid), ntohl(dbkey.time), ntohl(dbkey.frag_id),
+		ntohl(dbkey.bid), ntohl(dbkey.time), ntohl(dbkey.frag_id),
 		db_strerror(rc));
 	    return rc;
 	} else {
 	    dbats_log(LOG_FINE, "delete_frags %d %u %d",
-		ntohl(dbkey.sid), ntohl(dbkey.time), ntohl(dbkey.frag_id));
+		ntohl(dbkey.bid), ntohl(dbkey.time), ntohl(dbkey.frag_id));
 	}
 	rc = dbc->get(dbc, &dbt_key, &dbt_data, DB_NEXT);
     }
     rc = dbc->close(dbc);
     if (rc != 0) {
 	dbats_log(LOG_ERROR, "delete_frags %s %d [%u,%u): close: %s", name,
-	    sid, start, end, db_strerror(rc));
+	    bid, start, end, db_strerror(rc));
 	return rc;
     }
     return 0;
 }
 
 // Delete values earlier than the keep limit
-static int truncate_series(dbats_handler *dh, int sid)
+static int truncate_bundle(dbats_handler *dh, int bid)
 {
-    dbats_log(LOG_FINE, "truncate_series %d", sid);
+    dbats_log(LOG_FINE, "truncate_bundle %d", bid);
     int rc;
 
-    dbats_series_info *series = &dh->series[sid];
-    if (series->keep > 0) {
+    dbats_bundle_info *bundle = &dh->bundle[bid];
+    if (bundle->keep > 0) {
 	uint32_t start, end;
-	dbats_get_start_time(dh, sid, &start);
-	dbats_get_end_time(dh, sid, &end);
-	uint32_t keep_time = (series->keep-1) * series->period;
+	dbats_get_start_time(dh, bid, &start);
+	dbats_get_end_time(dh, bid, &end);
+	uint32_t keep_time = (bundle->keep-1) * bundle->period;
 	uint32_t new_start = (keep_time > end) ? 0 : (end - keep_time);
-	if (sid == 0 && dh->min_keep_time < new_start) {
+	if (bid == 0 && dh->min_keep_time < new_start) {
 	    dh->min_keep_time = new_start;
 	    rc = write_min_keep_time(dh);
 	    if (rc != 0) return rc;
 	}
 	if (start < new_start) {
-	    rc = delete_frags(dh, dh->dbData, "data", sid, 0, new_start);
+	    rc = delete_frags(dh, dh->dbData, "data", bid, 0, new_start);
 	    if (rc != 0) return rc;
-	    rc = delete_frags(dh, dh->dbIsSet, "is_set", sid, 0, new_start);
+	    rc = delete_frags(dh, dh->dbIsSet, "is_set", bid, 0, new_start);
 	    if (rc != 0) return rc;
 	}
     }
     return 0;
 }
 
-int dbats_series_limit(dbats_handler *dh, int sid, int keep)
+int dbats_series_limit(dbats_handler *dh, int bid, int keep)
 {
     int rc = 0;
 
-    if (sid < 0 || sid >= dh->cfg.num_series) {
-	dbats_log(LOG_ERROR, "bad sid %d", sid);
+    if (bid < 0 || bid >= dh->cfg.num_bundles) {
+	dbats_log(LOG_ERROR, "bad bid %d", bid);
 	return EINVAL;
     }
 
     rc = begin_transaction(dh, "keep txn");
     if (rc != 0) return rc;
 
-    rc = read_series_info(dh, sid, DB_RMW);
+    rc = read_bundle_info(dh, bid, DB_RMW);
     if (rc != 0) goto abort;
 
-    if (sid == 0) {
-	for (int a = 1; a < dh->cfg.num_series; a++) {
-	    rc = read_series_info(dh, a, 0);
+    if (bid == 0) {
+	for (int a = 1; a < dh->cfg.num_bundles; a++) {
+	    rc = read_bundle_info(dh, a, 0);
 	    if (rc != 0) goto abort;
-	    if (keep > 0 && dh->series[a].steps > keep) {
-		dbats_log(LOG_ERROR, "series %d requires keeping at least %d "
-		    "primary data points", a, dh->series[a].steps);
+	    if (keep > 0 && dh->bundle[a].steps > keep) {
+		dbats_log(LOG_ERROR, "bundle %d requires keeping at least %d "
+		    "primary data points", a, dh->bundle[a].steps);
 		rc = EINVAL;
 		goto abort;
 	    }
 	}
     }
 
-    dh->series[sid].keep = keep;
-    rc = truncate_series(dh, sid);
+    dh->bundle[bid].keep = keep;
+    rc = truncate_bundle(dh, bid);
     if (rc != 0) goto abort;
 
-    rc = write_series_info(dh, sid); // write new keep
+    rc = write_bundle_info(dh, bid); // write new keep
     if (rc != 0) goto abort;
 
     return commit_transaction(dh); // "keep txn"
@@ -839,10 +838,10 @@ abort:
 /*************************************************************************/
 
 // Free contents of in-memory tslice.
-static int clear_tslice(dbats_handler *dh, int sid)
+static int clear_tslice(dbats_handler *dh, int bid)
 {
-    dbats_tslice *tslice = dh->tslice[sid];
-    dbats_log(LOG_FINE, "Free tslice t=%u sid=%d", tslice->time, sid);
+    dbats_tslice *tslice = dh->tslice[bid];
+    dbats_log(LOG_FINE, "Free tslice t=%u bid=%d", tslice->time, bid);
 
     for (int f = 0; f < tslice->num_frags; f++) {
 	if (tslice->frag[f]) {
@@ -862,21 +861,21 @@ static int clear_tslice(dbats_handler *dh, int sid)
 
 // Writes tslice to db (unless db is readonly).
 // Also cleans up in-memory tslice, even if db is readonly.
-static int flush_tslice(dbats_handler *dh, int sid)
+static int flush_tslice(dbats_handler *dh, int bid)
 {
-    dbats_log(LOG_FINE, "Flush t=%u sid=%d", dh->tslice[sid]->time, sid);
+    dbats_log(LOG_FINE, "Flush t=%u bid=%d", dh->tslice[bid]->time, bid);
     size_t frag_size = fragsize(dh);
     char *buf = NULL;
     int rc;
 
     // Write fragments to the DB
-    fragkey_t dbkey = { htonl(sid), htonl(dh->tslice[sid]->time), 0};
-    for (int f = 0; f < dh->tslice[sid]->num_frags; f++) {
-	if (!dh->tslice[sid]->frag[f]) continue;
+    fragkey_t dbkey = { htonl(bid), htonl(dh->tslice[bid]->time), 0};
+    for (int f = 0; f < dh->tslice[bid]->num_frags; f++) {
+	if (!dh->tslice[bid]->frag[f]) continue;
 	dbkey.frag_id = htonl(f);
 	if (dh->cfg.readonly) {
 	    // do nothing
-	} else if (!dh->tslice[sid]->frag_changed[f]) {
+	} else if (!dh->tslice[bid]->frag_changed[f]) {
 	    dbats_log(LOG_VERYFINE, "Skipping frag %d (unchanged)", f);
 	} else {
 	    if (dh->cfg.compress) {
@@ -886,8 +885,8 @@ static int flush_tslice(dbats_handler *dh, int sid)
 		    if (!buf) return errno ? errno : ENOMEM;
 		}
 		buf[0] = 1; // compression flag
-		dh->tslice[sid]->frag[f]->compressed = 1;
-		size_t compress_len = qlz_compress(dh->tslice[sid]->frag[f],
+		dh->tslice[bid]->frag[f]->compressed = 1;
+		size_t compress_len = qlz_compress(dh->tslice[bid]->frag[f],
 		    buf+1, frag_size, dh->state_compress);
 		dbats_log(LOG_VERYFINE, "Frag %d compression: %zu -> %zu (%.1f %%)",
 		    f, frag_size, compress_len, compress_len*100.0/frag_size);
@@ -895,28 +894,28 @@ static int flush_tslice(dbats_handler *dh, int sid)
 		    buf, compress_len + 1);
 		if (rc != 0) return rc;
 	    } else {
-		dh->tslice[sid]->frag[f]->compressed = 0;
+		dh->tslice[bid]->frag[f]->compressed = 0;
 		dbats_log(LOG_VERYFINE, "Frag %d write: %zu", f, frag_size);
 		rc = raw_db_set(dh, dh->dbData, &dbkey, sizeof(dbkey),
-		    dh->tslice[sid]->frag[f], frag_size);
+		    dh->tslice[bid]->frag[f], frag_size);
 		if (rc != 0) return rc;
 	    }
-	    dh->tslice[sid]->frag_changed[f] = 0;
+	    dh->tslice[bid]->frag_changed[f] = 0;
 
 	    rc = raw_db_set(dh, dh->dbIsSet, &dbkey, sizeof(dbkey),
-		dh->tslice[sid]->is_set[f], vec_size(ENTRIES_PER_FRAG));
+		dh->tslice[bid]->is_set[f], vec_size(ENTRIES_PER_FRAG));
 	    if (rc != 0) return rc;
 	}
     }
     if (buf) free(buf);
 
     if (!dh->cfg.readonly) {
-	rc = truncate_series(dh, sid);
+	rc = truncate_bundle(dh, bid);
 	if (rc != 0) return rc;
     }
 
     if (!dh->cfg.exclusive || !dh->is_open) {
-	clear_tslice(dh, sid);
+	clear_tslice(dh, bid);
     }
 
     return 0;
@@ -927,7 +926,7 @@ static int flush_tslice(dbats_handler *dh, int sid)
 static void free_isset(dbats_handler *dh)
 {
     if (dh->is_set) {
-	int tn = (dh->active_end - dh->active_start) / dh->series[0].period + 1;
+	int tn = (dh->active_end - dh->active_start) / dh->bundle[0].period + 1;
 	for (int ti = 0; ti < tn; ti++) {
 	    if (dh->is_set[ti]) {
 		for (int f = 0; f < dh->tslice[0]->num_frags; f++) {
@@ -953,8 +952,8 @@ int dbats_commit(dbats_handler *dh)
 
     free_isset(dh);
 
-    for (int sid = 0; sid < dh->cfg.num_series; sid++) {
-	int rc = flush_tslice(dh, sid);
+    for (int bid = 0; bid < dh->cfg.num_bundles; bid++) {
+	int rc = flush_tslice(dh, bid);
 	if (rc != 0) {
 	    abort_transaction(dh);
 	    return rc;
@@ -971,8 +970,8 @@ int dbats_abort(dbats_handler *dh)
 
     free_isset(dh);
 
-    for (int sid = 0; sid < dh->cfg.num_series; sid++) {
-	clear_tslice(dh, sid);
+    for (int bid = 0; bid < dh->cfg.num_bundles; bid++) {
+	clear_tslice(dh, bid);
     }
 
     return abort_transaction(dh);
@@ -993,13 +992,13 @@ void dbats_close(dbats_handler *dh)
 	dh->n_internal_txn--;
     }
 
-    for (int sid = 0; sid < dh->cfg.num_series; sid++) {
-	free(dh->tslice[sid]);
-	dh->tslice[sid] = NULL;
+    for (int bid = 0; bid < dh->cfg.num_bundles; bid++) {
+	free(dh->tslice[bid]);
+	dh->tslice[bid] = NULL;
     }
 
     if (dh->db_get_buf) free(dh->db_get_buf);
-    if (dh->series) free(dh->series);
+    if (dh->bundle) free(dh->bundle);
     if (dh->tslice) free(dh->tslice);
 
     //dh->dbMeta->close(dh->dbMeta, 0);
@@ -1020,9 +1019,9 @@ void dbats_close(dbats_handler *dh)
 
 static const time_t time_base = 259200; // 00:00 on first sunday of 1970, UTC
 
-uint32_t dbats_normalize_time(const dbats_handler *dh, int sid, uint32_t *t)
+uint32_t dbats_normalize_time(const dbats_handler *dh, int bid, uint32_t *t)
 {
-    *t -= (*t - time_base) % dh->series[sid].period;
+    *t -= (*t - time_base) % dh->bundle[bid].period;
     return *t;
 }
 
@@ -1040,12 +1039,12 @@ static int load_isset(dbats_handler *dh, fragkey_t *dbkey, uint8_t **dest)
     rc = raw_db_get(dh, dh->dbIsSet, dbkey, sizeof(*dbkey),
 	buf, &value_len, !dh->cfg.readonly ? DB_RMW : 0);
 
-    dbats_log(LOG_FINE, "load_isset t=%u, sid=%u, frag_id=%u: "
+    dbats_log(LOG_FINE, "load_isset t=%u, bid=%u, frag_id=%u: "
 	"raw_db_get(is_set) = %d",
-	ntohl(dbkey->time), ntohl(dbkey->sid), ntohl(dbkey->frag_id), rc);
+	ntohl(dbkey->time), ntohl(dbkey->bid), ntohl(dbkey->frag_id), rc);
 
     if (rc == DB_NOTFOUND) {
-	if (ntohl(dbkey->time) == dh->tslice[ntohl(dbkey->sid)]->time) {
+	if (ntohl(dbkey->time) == dh->tslice[ntohl(dbkey->bid)]->time) {
 	    memset(buf, 0, vec_size(ENTRIES_PER_FRAG));
 	    *dest = buf;
 	    buf = NULL;
@@ -1063,21 +1062,21 @@ static int load_isset(dbats_handler *dh, fragkey_t *dbkey, uint8_t **dest)
     *dest = buf;
     buf = NULL;
 
-    if (ntohl(dbkey->sid) == 0 && dh->active_last_data < ntohl(dbkey->time))
+    if (ntohl(dbkey->bid) == 0 && dh->active_last_data < ntohl(dbkey->time))
 	dh->active_last_data = ntohl(dbkey->time);
 
     return 0; // ok
 }
 
-static int load_frag(dbats_handler *dh, uint32_t t, int sid,
+static int load_frag(dbats_handler *dh, uint32_t t, int bid,
     uint32_t frag_id)
 {
     // load fragment
-    fragkey_t dbkey = { htonl(sid), htonl(t), htonl(frag_id) };
+    fragkey_t dbkey = { htonl(bid), htonl(t), htonl(frag_id) };
     int rc;
 
-    assert(!dh->tslice[sid]->is_set[frag_id]);
-    rc = load_isset(dh, &dbkey, &dh->tslice[sid]->is_set[frag_id]);
+    assert(!dh->tslice[bid]->is_set[frag_id]);
+    rc = load_isset(dh, &dbkey, &dh->tslice[bid]->is_set[frag_id]);
     if (rc == DB_NOTFOUND) return 0; // no match
     if (rc != 0) return rc; // error
 
@@ -1091,8 +1090,8 @@ static int load_frag(dbats_handler *dh, uint32_t t, int sid,
     size_t value_len = dh->db_get_buf_len;
     rc = raw_db_get(dh, dh->dbData, &dbkey, sizeof(dbkey),
 	dh->db_get_buf, &value_len, !dh->cfg.readonly ? DB_RMW : 0);
-    dbats_log(LOG_FINE, "load_frag t=%u, sid=%u, frag_id=%u: "
-	"raw_db_get(frag) = %d", t, sid, frag_id, rc);
+    dbats_log(LOG_FINE, "load_frag t=%u, bid=%u, frag_id=%u: "
+	"raw_db_get(frag) = %d", t, bid, frag_id, rc);
     if (rc != 0) {
 	if (rc == DB_NOTFOUND) return 0; // no match
 	return rc; // error
@@ -1105,7 +1104,7 @@ static int load_frag(dbats_handler *dh, uint32_t t, int sid,
     if (!ptr) {
 	rc = errno;
 	dbats_log(LOG_ERROR, "Can't allocate %zu bytes for frag "
-	    "t=%u, sid=%u, frag_id=%u", len, t, sid, frag_id);
+	    "t=%u, bid=%u, frag_id=%u", len, t, bid, frag_id);
 	return rc; // error
     }
 
@@ -1118,21 +1117,21 @@ static int load_frag(dbats_handler *dh, uint32_t t, int sid,
 	}
 	len = qlz_decompress((void*)(dh->db_get_buf+1), ptr, dh->state_decompress);
 	// assert(len == fragsize(dh));
-	dbats_log(LOG_VERYFINE, "decompressed frag t=%u, sid=%u, frag_id=%u: "
+	dbats_log(LOG_VERYFINE, "decompressed frag t=%u, bid=%u, frag_id=%u: "
 	    "%u -> %u (%.1f%%)",
-	    t, sid, frag_id, value_len, len, len*100.0/value_len);
+	    t, bid, frag_id, value_len, len, len*100.0/value_len);
 
     } else {
 	// copy fragment
 	// XXX TODO: don't memcpy; get directly into ptr
 	memcpy(ptr, dh->db_get_buf, len);
-	dbats_log(LOG_VERYFINE, "copied frag t=%u, sid=%u, frag_id=%u",
-	    t, sid, frag_id);
+	dbats_log(LOG_VERYFINE, "copied frag t=%u, bid=%u, frag_id=%u",
+	    t, bid, frag_id);
     }
 
-    dh->tslice[sid]->frag[frag_id] = ptr;
+    dh->tslice[bid]->frag[frag_id] = ptr;
 
-    dbats_tslice *tslice = dh->tslice[sid];
+    dbats_tslice *tslice = dh->tslice[bid];
     if (tslice->num_frags <= frag_id)
 	tslice->num_frags = frag_id + 1;
 
@@ -1145,7 +1144,7 @@ static int instantiate_isset_frags(dbats_handler *dh, int fid)
     if (dh->cfg.readonly)
 	return 0; // dh->is_set is never needed in readonly mode
 
-    int tn = (dh->active_end - dh->active_start) / dh->series[0].period + 1;
+    int tn = (dh->active_end - dh->active_start) / dh->bundle[0].period + 1;
 
     if (!dh->is_set) {
 	dh->is_set = ecalloc(tn, sizeof(uint8_t**), "dh->is_set");
@@ -1153,7 +1152,7 @@ static int instantiate_isset_frags(dbats_handler *dh, int fid)
     }
 
     uint32_t t = dh->active_start;
-    for (int ti = 0; ti < tn; ti++, t += dh->series[0].period) {
+    for (int ti = 0; ti < tn; ti++, t += dh->bundle[0].period) {
 	fragkey_t dbkey = { htonl(0), htonl(t), 0 };
 	if (!dh->is_set[ti]) {
 	    dh->is_set[ti] = ecalloc(MAX_NUM_FRAGS, sizeof(uint8_t*),
@@ -1209,12 +1208,12 @@ int dbats_select_time(dbats_handler *dh, uint32_t time_value, uint32_t flags)
 
     {
 	size_t value_len;
-	value_len = sizeof(dh->cfg.num_series);
-	rc = raw_db_get(dh, dh->dbMeta, "num_series", sizeof("num_series")-1,
-	    &dh->cfg.num_series, &value_len, 0);
+	value_len = sizeof(dh->cfg.num_bundles);
+	rc = raw_db_get(dh, dh->dbMeta, "num_bundles", sizeof("num_bundles")-1,
+	    &dh->cfg.num_bundles, &value_len, 0);
 	if (rc != 0) return rc;
-	for (int sid = 0; sid < dh->cfg.num_series; sid++) {
-	    if (read_series_info(dh, sid, 0) != 0)
+	for (int bid = 0; bid < dh->cfg.num_bundles; bid++) {
+	    if (read_bundle_info(dh, bid, 0) != 0)
 		return rc;
 	}
     }
@@ -1250,38 +1249,38 @@ int dbats_select_time(dbats_handler *dh, uint32_t time_value, uint32_t flags)
 	dbats_log(LOG_FINE, "select_time %u: got %s = %u", time_value, keybuf, dh->min_keep_time);
     }
 
-    for (int sid = 0; sid < dh->cfg.num_series; sid++) {
-	dbats_tslice *tslice = dh->tslice[sid];
+    for (int bid = 0; bid < dh->cfg.num_bundles; bid++) {
+	dbats_tslice *tslice = dh->tslice[bid];
 	uint32_t t = time_value;
 
-	dbats_normalize_time(dh, sid, &t);
+	dbats_normalize_time(dh, bid, &t);
 
 	if (!dh->cfg.readonly) {
 	    if (t < dh->min_keep_time) {
 		dbats_log(LOG_ERROR, "select_time %u: illegal attempt to set "
-		    "value in series %d at time %u before series limit %u",
-		    time_value, sid, t, dh->min_keep_time);
+		    "value in bundle %d at time %u before series limit %u",
+		    time_value, bid, t, dh->min_keep_time);
 		return EINVAL;
 	    }
 	}
 
 	if (dh->cfg.exclusive) {
 	    if (tslice->time == t) {
-		dbats_log(LOG_FINE, "select_time %u, sid=%d: already loaded",
-		    t, sid);
+		dbats_log(LOG_FINE, "select_time %u, bid=%d: already loaded",
+		    t, bid);
 		continue;
 	    }
 	    // free obsolete fragments
-	    clear_tslice(dh, sid);
+	    clear_tslice(dh, bid);
 	}
 
 	tslice->time = t;
-	if (sid == 0)
+	if (bid == 0)
 	    dh->active_last_data = t;
 
 	if (!min_time || t < min_time)
 	    min_time = t;
-	t += dh->series[sid].period - dh->series[0].period;
+	t += dh->bundle[bid].period - dh->bundle[0].period;
 	if (t > max_time)
 	    max_time = t;
     }
@@ -1295,20 +1294,20 @@ int dbats_select_time(dbats_handler *dh, uint32_t time_value, uint32_t flags)
     if ((rc = dbats_num_keys(dh, &num_keys)) != 0)
 	return rc;
 
-    for (int sid = 0; sid < dh->cfg.num_series; sid++) {
-	dbats_tslice *tslice = dh->tslice[sid];
+    for (int bid = 0; bid < dh->cfg.num_bundles; bid++) {
+	dbats_tslice *tslice = dh->tslice[bid];
 	uint32_t t = tslice->time;
 	int loaded = 0;
 
 	tslice->num_frags = div_ceil(num_keys, ENTRIES_PER_FRAG);
 	for (uint32_t frag_id = 0; frag_id < tslice->num_frags; frag_id++) {
-	    if ((rc = load_frag(dh, t, sid, frag_id)) != 0)
+	    if ((rc = load_frag(dh, t, bid, frag_id)) != 0)
 		return rc;
 	    if (tslice->frag[frag_id])
 		loaded++;
 	}
-	dbats_log(LOG_FINE, "select_time %u: sid=%d, loaded %u/%u fragments",
-	    time_value, sid, loaded, tslice->num_frags);
+	dbats_log(LOG_FINE, "select_time %u: bid=%d, loaded %u/%u fragments",
+	    time_value, bid, loaded, tslice->num_frags);
     }
 
     for (int frag_id = 0; frag_id < dh->tslice[0]->num_frags; frag_id++) {
@@ -1391,18 +1390,18 @@ int dbats_get_key_name(dbats_handler *dh, uint32_t key_id, char *namebuf)
 
 /*************************************************************************/
 
-static int instantiate_frag_func(dbats_handler *dh, int sid, uint32_t frag_id)
+static int instantiate_frag_func(dbats_handler *dh, int bid, uint32_t frag_id)
 {
     int rc;
-    dbats_tslice *tslice = dh->tslice[sid];
+    dbats_tslice *tslice = dh->tslice[bid];
 
     if (!dh->preload || dh->cfg.readonly) {
 	// Try to load the fragment.
-	rc = load_frag(dh, tslice->time, sid, frag_id);
+	rc = load_frag(dh, tslice->time, bid, frag_id);
 	if (rc != 0) // error
 	    return rc;
 	if (tslice->frag[frag_id]) { // found it
-	    if (sid == 0)
+	    if (bid == 0)
 		rc = instantiate_isset_frags(dh, frag_id);
 	    return rc;
 	}
@@ -1411,8 +1410,8 @@ static int instantiate_frag_func(dbats_handler *dh, int sid, uint32_t frag_id)
     }
 
     // Allocate a new fragment.
-    dbats_log(LOG_VERYFINE, "grow tslice for time %u, sid %d, frag_id %u",
-	tslice->time, sid, frag_id);
+    dbats_log(LOG_VERYFINE, "grow tslice for time %u, bid %d, frag_id %u",
+	tslice->time, bid, frag_id);
 
     size_t len = fragsize(dh);
     if (!(tslice->frag[frag_id] = ecalloc(1, len, "tslice->frag[frag_id]"))) {
@@ -1421,7 +1420,7 @@ static int instantiate_frag_func(dbats_handler *dh, int sid, uint32_t frag_id)
 
     if (tslice->num_frags <= frag_id)
 	tslice->num_frags = frag_id + 1;
-    if (sid == 0) {
+    if (bid == 0) {
 	rc = instantiate_isset_frags(dh, frag_id);
 	if (rc != 0) return rc;
     }
@@ -1433,11 +1432,11 @@ static int instantiate_frag_func(dbats_handler *dh, int sid, uint32_t frag_id)
 }
 
 // inline version handles the common case without a function call
-static inline int instantiate_frag(dbats_handler *dh, int sid, uint32_t frag_id)
+static inline int instantiate_frag(dbats_handler *dh, int bid, uint32_t frag_id)
 {
-    return dh->tslice[sid]->frag[frag_id] ?
+    return dh->tslice[bid]->frag[frag_id] ?
 	0 : // We already have the fragment.
-	instantiate_frag_func(dh, sid, frag_id);
+	instantiate_frag_func(dh, bid, frag_id);
 }
 
 /*************************************************************************/
@@ -1482,18 +1481,18 @@ retry:
     }
     dbats_value *oldvaluep = valueptr(dh, 0, frag_id, offset);
 
-    // For each sid, aggregate *valuep into tslice[sid].
-    for (int sid = 1; sid < dh->cfg.num_series; sid++) {
+    // For each bid, aggregate *valuep into tslice[bid].
+    for (int bid = 1; bid < dh->cfg.num_bundles; bid++) {
 
-	if (dh->series[sid].keep > 0) {
-	    // Skip if the time is outside of series' keep limit
-	    uint32_t keep_time = (dh->series[sid].keep-1) * dh->series[sid].period;
+	if (dh->bundle[bid].keep > 0) {
+	    // Skip if the time is outside of bundle's keep limit
+	    uint32_t keep_time = (dh->bundle[bid].keep-1) * dh->bundle[bid].period;
 	    if (keep_time < dh->end_time &&
-		dh->tslice[sid]->time < dh->end_time - keep_time)
+		dh->tslice[bid]->time < dh->end_time - keep_time)
 		    continue;
 	}
 
-	if ((rc = instantiate_frag(dh, sid, frag_id)) != 0) {
+	if ((rc = instantiate_frag(dh, bid, frag_id)) != 0) {
 	    if (!dh->serialize) {
 		abort_transaction(dh); // set txn
 		if (rc == DB_LOCK_DEADLOCK) goto retry;
@@ -1503,33 +1502,33 @@ retry:
 
 	uint8_t changed = 0;
 	uint8_t failed = 0;
-	dbats_value *aggval = valueptr(dh, sid, frag_id, offset);
-	uint32_t aggstart = dh->tslice[sid]->time;
+	dbats_value *aggval = valueptr(dh, bid, frag_id, offset);
+	uint32_t aggstart = dh->tslice[bid]->time;
 	uint32_t aggend = min(dh->active_last_data,
-	    aggstart + dh->series[sid].period - dh->series[0].period);
+	    aggstart + dh->bundle[bid].period - dh->bundle[0].period);
 
 	// Count the number of steps contributing to the aggregate.
 	int n = 0;
 	{
-	    int ti = (aggstart - dh->active_start) / dh->series[0].period;
+	    int ti = (aggstart - dh->active_start) / dh->bundle[0].period;
 	    uint32_t t = aggstart;
 	    while (t <= aggend) {
 		if (t == dh->tslice[0]->time ||
 		    vec_test(dh->is_set[ti][frag_id], offset))
 			n++;
 		ti++;
-		t += dh->series[0].period;
+		t += dh->bundle[0].period;
 	    }
 	}
 
 	dbats_log(LOG_FINEST, "agg %d: aggval=%" PRIval " n=%d",
-	    sid, aggval[0], n); // XXX
+	    bid, aggval[0], n); // XXX
 
 	for (int i = 0; i < dh->cfg.values_per_entry; i++) {
 	    if (was_set && valuep[i] == oldvaluep[i]) {
 		continue; // value did not change; no need to change agg value
 	    }
-	    switch (dh->series[sid].func) {
+	    switch (dh->bundle[bid].func) {
 	    case DBATS_AGG_MIN:
 		if (n == 1 || valuep[i] <= aggval[i]) {
 		    aggval[i] = valuep[i];
@@ -1571,7 +1570,7 @@ retry:
 		} else {
 		    // find time of last sample for this key within agg period
 		    uint32_t t = aggend;
-		    int ti = (t - dh->active_start) / dh->series[0].period;
+		    int ti = (t - dh->active_start) / dh->bundle[0].period;
 		    while (t >= aggstart) {
 			if (t == dh->tslice[0]->time) {
 			    // the new value is the last
@@ -1582,7 +1581,7 @@ retry:
 			if (vec_test(dh->is_set[ti][frag_id], offset))
 			    // an existing value is later than the new value
 			    break;
-			t -= dh->series[0].period;
+			t -= dh->bundle[0].period;
 			ti--;
 		    }
 		}
@@ -1605,20 +1604,20 @@ retry:
 	    int level = failed ? LOG_ERROR : LOG_VERYFINE;
 	    if (level <= dbats_log_level) { 
 		char aggbuf[64];
-		if (dh->series[sid].func == DBATS_AGG_AVG)
+		if (dh->bundle[bid].func == DBATS_AGG_AVG)
 		    sprintf(aggbuf, "%f", ((double*)aggval)[0]);
 		else
 		    sprintf(aggbuf, "%" PRIval, aggval[0]);
-		dbats_log(level, "%s set value sid=%d frag_id=%u "
+		dbats_log(level, "%s set value bid=%d frag_id=%u "
 		    "offset=%" PRIu32 " value_len=%u aggval=%s",
 		    failed ? "Failed to" : "Successfully",
-		    sid, frag_id, offset, dh->cfg.entry_size, aggbuf);
+		    bid, frag_id, offset, dh->cfg.entry_size, aggbuf);
 	    }
 	}
 	if (changed) {
 	    // XXX if (n >= xff * steps)
-	    vec_set(dh->tslice[sid]->is_set[frag_id], offset);
-	    dh->tslice[sid]->frag_changed[frag_id] = 1;
+	    vec_set(dh->tslice[bid]->is_set[frag_id], offset);
+	    dh->tslice[bid]->frag_changed[frag_id] = 1;
 	} else if (failed) {
 	    if (!dh->serialize)
 		abort_transaction(dh); // set txn
@@ -1626,13 +1625,13 @@ retry:
 	}
     }
 
-    // Set value at sid 0 (after aggregations because aggregations need
+    // Set value at bid 0 (after aggregations because aggregations need
     // both old and new values)
     memcpy(oldvaluep, valuep, dh->cfg.entry_size);
     vec_set(dh->tslice[0]->is_set[frag_id], offset);
     dh->tslice[0]->frag_changed[frag_id] = 1;
     dbats_log(LOG_VERYFINE, "Succesfully set value "
-	"sid=%d frag_id=%u offset=%" PRIu32 " value_len=%u value=%" PRIval,
+	"bid=%d frag_id=%u offset=%" PRIu32 " value_len=%u value=%" PRIval,
 	0, frag_id, offset, dh->cfg.entry_size, valuep[0]);
 
     if (!dh->serialize)
@@ -1654,10 +1653,10 @@ int dbats_set_by_key(dbats_handler *dh, const char *key,
 /*************************************************************************/
 
 int dbats_get(dbats_handler *dh, uint32_t key_id,
-    const dbats_value **valuepp, int sid)
+    const dbats_value **valuepp, int bid)
 {
     int rc;
-    dbats_tslice *tslice = dh->tslice[sid];
+    dbats_tslice *tslice = dh->tslice[bid];
 
     if (!dh->is_open) {
 	*valuepp = NULL;
@@ -1676,19 +1675,19 @@ retry:
     if (!dh->serialize)
 	begin_transaction(dh, "get txn");
 
-    if ((rc = instantiate_frag(dh, sid, frag_id)) == 0) {
+    if ((rc = instantiate_frag(dh, bid, frag_id)) == 0) {
 	if (!vec_test(tslice->is_set[frag_id], offset)) {
 	    char keyname[DBATS_KEYLEN] = "";
 	    dbats_get_key_name(dh, key_id, keyname);
 	    dbats_log(LOG_WARNING, "Value unset (v): %u %d %s",
-		tslice->time, sid, keyname);
+		tslice->time, bid, keyname);
 	    *valuepp = NULL;
 	    if (!dh->serialize)
 		commit_transaction(dh); // get txn
 	    return DB_NOTFOUND;
 	}
-	if (dh->series[sid].func == DBATS_AGG_AVG) {
-	    double *dval = (double*)valueptr(dh, sid, frag_id, offset);
+	if (dh->bundle[bid].func == DBATS_AGG_AVG) {
+	    double *dval = (double*)valueptr(dh, bid, frag_id, offset);
 	    static dbats_value *avg_buf = NULL;
 	    if (!avg_buf) {
 		avg_buf = emalloc(dh->cfg.entry_size * dh->cfg.values_per_entry,
@@ -1703,7 +1702,7 @@ retry:
 		avg_buf[i] = dval[i] + 0.5;
 	    *valuepp = avg_buf;
 	} else {
-	    *valuepp = valueptr(dh, sid, frag_id, offset);
+	    *valuepp = valueptr(dh, bid, frag_id, offset);
 	}
 	dbats_log(LOG_VERYFINE, "Succesfully read value off=%" PRIu32 " len=%u",
 	    offset, dh->cfg.entry_size);
@@ -1715,7 +1714,7 @@ retry:
 	char keyname[DBATS_KEYLEN] = "";
 	dbats_get_key_name(dh, key_id, keyname);
 	dbats_log(LOG_WARNING, "Value unset (f): %u %d %s",
-	    tslice->time, sid, keyname);
+	    tslice->time, bid, keyname);
 	*valuepp = NULL;
 	if (!dh->serialize)
 	    commit_transaction(dh); // get txn
@@ -1731,18 +1730,18 @@ retry:
 }
 
 int dbats_get_double(dbats_handler *dh, uint32_t key_id,
-    const double **valuepp, int sid)
+    const double **valuepp, int bid)
 {
     int rc;
-    dbats_tslice *tslice = dh->tslice[sid];
+    dbats_tslice *tslice = dh->tslice[bid];
 
     if (!dh->is_open) {
 	*valuepp = NULL;
 	return -1;
     }
 
-    if (dh->series[sid].func != DBATS_AGG_AVG) {
-	dbats_log(LOG_ERROR, "Aggregation %d is not a double", sid);
+    if (dh->bundle[bid].func != DBATS_AGG_AVG) {
+	dbats_log(LOG_ERROR, "Aggregation %d is not a double", bid);
 	*valuepp = NULL;
 	return -1;
     }
@@ -1754,18 +1753,18 @@ retry:
     if (!dh->serialize)
 	begin_transaction(dh, "get txn");
 
-    if ((rc = instantiate_frag(dh, sid, frag_id)) == 0) {
+    if ((rc = instantiate_frag(dh, bid, frag_id)) == 0) {
 	if (!vec_test(tslice->is_set[frag_id], offset)) {
 	    char keyname[DBATS_KEYLEN] = "";
 	    dbats_get_key_name(dh, key_id, keyname);
 	    dbats_log(LOG_WARNING, "Value unset (v): %u %d %s",
-		tslice->time, sid, keyname);
+		tslice->time, bid, keyname);
 	    *valuepp = NULL;
 	    if (!dh->serialize)
 		commit_transaction(dh); // get txn
 	    return DB_NOTFOUND;
 	}
-	*valuepp = (double*)valueptr(dh, sid, frag_id, offset);
+	*valuepp = (double*)valueptr(dh, bid, frag_id, offset);
 	dbats_log(LOG_VERYFINE, "Succesfully read value off=%" PRIu32 " len=%u",
 	    offset, dh->cfg.entry_size);
 	if (!dh->serialize)
@@ -1776,7 +1775,7 @@ retry:
 	char keyname[DBATS_KEYLEN] = "";
 	dbats_get_key_name(dh, key_id, keyname);
 	dbats_log(LOG_WARNING, "Value unset (f): %u %d %s",
-	    tslice->time, sid, keyname);
+	    tslice->time, bid, keyname);
 	*valuepp = NULL;
 	if (!dh->serialize)
 	    commit_transaction(dh); // get txn
@@ -1792,7 +1791,7 @@ retry:
 }
 
 int dbats_get_by_key(dbats_handler *dh, const char *key,
-    const dbats_value **valuepp, int sid)
+    const dbats_value **valuepp, int bid)
 {
     int rc;
     uint32_t key_id;
@@ -1800,7 +1799,7 @@ int dbats_get_by_key(dbats_handler *dh, const char *key,
     if ((rc = dbats_get_key_id(dh, key, &key_id, 0)) != 0) {
 	return rc;
     }
-    return dbats_get(dh, key_id, valuepp, sid);
+    return dbats_get(dh, key_id, valuepp, bid);
 }
 
 /*************************************************************************/
@@ -1900,8 +1899,8 @@ int dbats_walk_keyid_end(dbats_handler *dh)
 const dbats_config *dbats_get_config(dbats_handler *dh)
     { return &dh->cfg; }
 
-const dbats_series_info *dbats_get_series_info(dbats_handler *dh, int sid)
-    { return &dh->series[sid]; }
+const dbats_bundle_info *dbats_get_bundle_info(dbats_handler *dh, int bid)
+    { return &dh->bundle[bid]; }
 
 /*************************************************************************/
 

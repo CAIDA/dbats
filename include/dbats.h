@@ -17,6 +17,18 @@
 /** @file dbats.h
  *  DBATS API header file.
  *
+ *  DBATS is a database for storing millions of similar time series and
+ *  aggregating them by time.
+ *  A DBATS time series is a sequence of data entries measured at regular time
+ *  intervals.
+ *  A set of similar time series with the same period and entry size is a
+ *  "bundle".  Each time series in a bundle is identified by a user-defined
+ *  string key and an automatically assigned integer key id.
+ *  The primary bundle stores the original raw data.
+ *  Additional "aggregate" bundles can be defined that merge sub-sequences
+ *  of data points for a key in the primary bundle into single data points
+ *  for the same key in the aggregate bundle.
+ *
  *  Typical usage:
  *  - Open a database with dbats_open().
  *  - If this is a new database, define aggregate time series with
@@ -43,7 +55,7 @@
 
 /* ************************************************** */
 
-#define DBATS_DB_VERSION     3   ///< Version of db format written by this API
+#define DBATS_DB_VERSION     4   ///< Version of db format written by this API
 
 #define DBATS_KEYLEN         128 ///< max length of key name
 
@@ -52,7 +64,7 @@
 #define DBATS_CREATE         0x01 ///< create object if it doesn't exist
 #define DBATS_PRELOAD        0x04 ///< load fragments when tslice is selected
 #define DBATS_READONLY       0x08 ///< don't allow writing
-#define DBATS_UNCOMPRESSED   0x10 ///< don't compress written timeseries data
+#define DBATS_UNCOMPRESSED   0x10 ///< don't compress written time series data
 #define DBATS_EXCLUSIVE      0x20 ///< obtain exclusive lock on whole db
 #define DBATS_NO_TXN         0x40 ///< don't use transactions (for debugging only)
 #define DBATS_UPDATABLE      0x80 ///< allow updates to existing values
@@ -60,7 +72,7 @@
 
 /** @name Aggregation functions */
 ///@{
-#define DBATS_AGG_NONE   0 ///< primary time series, not an aggregate
+#define DBATS_AGG_NONE   0 ///< primary bundle, not an aggregate
 #define DBATS_AGG_MIN    1 ///< minimum
 #define DBATS_AGG_MAX    2 ///< maximum
 #define DBATS_AGG_AVG    3 ///< average. Values can be fetched as dbats_value or double.
@@ -71,13 +83,13 @@
 /// Labels for aggregation functions
 extern const char *dbats_agg_func_label[];
 
-/// Time series parameters (read only).
+/// Time series bundle parameters (read only).
 typedef struct {
     uint32_t func;           ///< aggregation function
     uint32_t steps;          ///< # of data points contributing to one agg value
     uint32_t period;         ///< time covered by one value (seconds)
     uint32_t keep;           ///< number of data points to keep (0 means keep all)
-} dbats_series_info;
+} dbats_bundle_info;
 
 /** Configuration parameters (read only).
  *  Fields marked "(C)" are fixed when the database is created;
@@ -90,7 +102,7 @@ typedef struct {
     uint8_t exclusive;         ///< Obtain exclusive lock on whole db (O)
     uint8_t no_txn;            ///< Don't use transactions (O)
     uint8_t updatable;         ///< Allow updates to existing values (O)
-    uint16_t num_series;       ///< Number of time series (C)
+    uint16_t num_bundles;      ///< Number of time series bundles (C)
     uint16_t values_per_entry; ///< Number of dbats_values in an entry (C)
     uint16_t entry_size;       ///< Size of an entry in bytes (C)
     uint32_t period;           ///< Primary sample period in seconds (C)
@@ -125,7 +137,7 @@ typedef struct dbats_handler dbats_handler; ///< Opaque handle for a DBATS db
  *    -	DBATS_CREATE - create the database if it doesn't already exist
  *    -	DBATS_READONLY - do not allow writing to the database (improves
  *      performance).
- *    -	DBATS_UNCOMPRESSED - do not compress written timeseries data
+ *    -	DBATS_UNCOMPRESSED - do not compress written time series data
  *    -	DBATS_EXCLUSIVE - do not allow any other process to access the database
  *    -	DBATS_NO_TXN - do not use transactions (unsafe)
  *    -	DBATS_UPDATABLE - allow updates to existing values
@@ -163,49 +175,50 @@ extern void dbats_close(dbats_handler *handler);
  */
 extern int dbats_aggregate(dbats_handler *handler, int func, int steps);
 
-/** Get the earliest timestamp in a series.
+/** Get the earliest timestamp in a time series bundle.
  *  @param[in] handler A dbats_handler created by dbats_open().
- *  @param[in] sid time series id (0 for the primary series).
+ *  @param[in] bid bundle id (0 for the primary bundle).
  *  @param[out] start A pointer to a uint32_t that will be filled in with
- *    the time of the earliest entry in the series.
- *  @return 0 for success, DB_NOTFOUND if the series is empty,
+ *    the time of the earliest entry in the bundle.
+ *  @return 0 for success, DB_NOTFOUND if the bundle is empty,
  *    or other nonzero value for error.
  */
-extern int dbats_get_start_time(dbats_handler *handler, int sid, uint32_t *start);
+extern int dbats_get_start_time(dbats_handler *handler, int bid, uint32_t *start);
 
-/** Get the latest timestamp in a series.
+/** Get the latest timestamp in a time series bundle.
  *  @param[in] handler A dbats_handler created by dbats_open().
- *  @param[in] sid time series id (0 for the primary series).
+ *  @param[in] bid bundle id (0 for the primary bundle).
  *  @param[out] end A pointer to a uint32_t that will be filled in with
- *    the time of the latest entry in the series.
- *  @return 0 for success, DB_NOTFOUND if the series is empty,
+ *    the time of the latest entry in the bundle.
+ *  @return 0 for success, DB_NOTFOUND if the bundle is empty,
  *    or other nonzero value for error.
  */
-extern int dbats_get_end_time(dbats_handler *handler, int sid, uint32_t *end);
+extern int dbats_get_end_time(dbats_handler *handler, int bid, uint32_t *end);
 
-/** Congfiure the number of data points to keep in a time series.
+/** Congfiure the number of data points to keep for each time series of a
+ *  bundle.
  *  When a transaction started by dbats_select_time() is committed, any data
  *  points that are <code>keep</code> periods or more older than the latest
  *  point ever set (for any key) will be deleted.
  *  Once a point is deleted for being outside the limit, it can not be set
  *  again, even if the limit is changed.
- *  The limit for the primary data series (sid 0) can not be smaller than the
+ *  The limit for the primary data bundle (bid 0) can not be smaller than the
  *  number of steps in the smallest aggregate.
  *  @param[in] handler A dbats_handler created by dbats_open().
- *  @param[in] sid time series id (0 for the primary series).
- *  @param[in] keep The number of data points to keep in the time series, or
- *    0 to keep all points.
+ *  @param[in] bid bundle id (0 for the primary bundle).
+ *  @param[in] keep The number of data points to keep in each time series of
+ *    the bundle, or 0 to keep all points.
  *  @return
  *    - 0 for success;
- *    - EINVAL if sid does not refer to a valid series or if the limit is too
+ *    - EINVAL if bid does not refer to a valid bundle or if the limit is too
  *      small;
  *    - other nonzero value for other errors.
  */
-extern int dbats_series_limit(dbats_handler *handler, int sid, int keep);
+extern int dbats_series_limit(dbats_handler *handler, int bid, int keep);
 
-/** Round a time value down to a multiple of a time series' period.
+/** Round a time value down to a multiple of a bundle's period.
  *  @param[in] handler A dbats_handler created by dbats_open().
- *  @param[in] sid time series id (0 for the primary series).
+ *  @param[in] bid bundle id (0 for the primary bundle).
  *  @param[in,out] t a unix time value (seconds since 1970-01-01 00:00:00
  *    UTC, without leap seconds).  Value will be rounded down to the nearest
  *    multiple of the data period, counting from 00:00 on the first Sunday of
@@ -213,7 +226,7 @@ extern int dbats_series_limit(dbats_handler *handler, int sid, int keep);
  *  @return the rounded time value (*t)
  */
 extern uint32_t dbats_normalize_time(const dbats_handler *handler,
-    int sid, uint32_t *t);
+    int bid, uint32_t *t);
 
 /** Select a time period to operate on in subsequent calls to dbats_get() and
  *  dbats_set().
@@ -325,34 +338,34 @@ extern int dbats_set_by_key (dbats_handler *handler, const char *key,
     const dbats_value *valuep, int flags);
 
 /** Read an entry (array of dbats_value) from the database for the specified
- *  key and the time selected by dbats_select_time().
+ *  bundle id and key and the time selected by dbats_select_time().
  *  @param[in] handler A dbats_handler created by dbats_open().
  *  @param[in] key_id the id of the key.
  *  @param[out] valuepp the address of a dbats_value*; after the call,
  *    *valuepp will point to an array of values_per_entry dbats_values
  *    read from the database.
- *  @param[in] sid time series id (0 for the primary series).
+ *  @param[in] bid bundle id (0 for the primary bundle).
  *  @return 0 for success, nonzero for error.
  */
 extern int dbats_get(dbats_handler *handler, uint32_t key_id,
-    const dbats_value **valuepp, int sid);
+    const dbats_value **valuepp, int bid);
 
-/** Read an array of double values from the database for the specified key and
- *  the time selected by dbats_select_time().
+/** Read an array of double values from the database for the specified bundle
+ *  id and key and the time selected by dbats_select_time().
  *  This function can be applied only to DBATS_AGG_AVG values.
  *  @param[in] handler A dbats_handler created by dbats_open().
  *  @param[in] key_id the id of the key.
  *  @param[out] valuepp the address of a double*; after the call,
  *    *valuepp will point to an array of values_per_entry double values
  *    read from the database.
- *  @param[in] sid time series id
+ *  @param[in] bid bundle id
  *  @return 0 for success, nonzero for error.
  */
 extern int dbats_get_double(dbats_handler *handler, uint32_t key_id,
-    const double **valuepp, int sid);
+    const double **valuepp, int bid);
 
-/** Read an array of dbats_values from the database for the specified key and the
- *  time selected by dbats_select_time().
+/** Read an array of dbats_values from the database for the specified bundle
+ *  id and key and the time selected by dbats_select_time().
  *  Equivalent to dbats_get_key_id() followed by dbats_get().
  *  Note that dbats_get() is significantly faster if you already
  *  know the key_id.
@@ -361,11 +374,11 @@ extern int dbats_get_double(dbats_handler *handler, uint32_t key_id,
  *  @param[out] valuepp the address of a dbats_value*; after the call,
  *    *valuepp will point to an array of values_per_entry dbats_values
  *    read from the database.
- *  @param[in] sid time series id (0 for the primary series).
+ *  @param[in] bid bundle id (0 for the primary bundle).
  *  @return 0 for success, nonzero for error.
  */
 extern int dbats_get_by_key(dbats_handler *handler, const char *key,
-    const dbats_value **valuepp, int sid);
+    const dbats_value **valuepp, int bid);
 
 /** Get the number of keys in the database.
  *  @param[in] handler A dbats_handler created by dbats_open().
@@ -436,11 +449,11 @@ extern const dbats_config *dbats_get_config(dbats_handler *handler);
 
 /** Get time series parameters from a DBATS database.
  *  @param[in] handler A dbats_handler created by dbats_open().
- *  @param[in] sid The id of the time series (0 for the primary series).
- *  @return pointer to a dbats_series_info describing the series specified
- *    by sid.
+ *  @param[in] bid The id of the time series bundle (0 for the primary bundle).
+ *  @return pointer to a dbats_bundle_info describing the bundle specified
+ *    by bid.
  */
-extern const dbats_series_info *dbats_get_series_info(dbats_handler *handler,
-    int sid);
+extern const dbats_bundle_info *dbats_get_bundle_info(dbats_handler *handler,
+    int bid);
 
 extern void dbats_stat_print(const dbats_handler *handler);
