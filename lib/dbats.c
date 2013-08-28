@@ -1031,7 +1031,8 @@ uint32_t dbats_normalize_time(const dbats_handler *dh, int bid, uint32_t *t)
 
 /*************************************************************************/
 
-static int load_isset(dbats_handler *dh, fragkey_t *dbkey, uint8_t **dest)
+static int load_isset(dbats_handler *dh, fragkey_t *dbkey, uint8_t **dest,
+    uint32_t flags)
 {
     static uint8_t *buf = NULL; // can recycle memory across calls
     int rc;
@@ -1040,7 +1041,7 @@ static int load_isset(dbats_handler *dh, fragkey_t *dbkey, uint8_t **dest)
 	return errno ? errno : ENOMEM; // error
 
     rc = raw_db_get(dh, dh->dbIsSet, dbkey, sizeof(*dbkey),
-	buf, vec_size(ENTRIES_PER_FRAG), NULL, !dh->cfg.readonly ? DB_RMW : 0);
+	buf, vec_size(ENTRIES_PER_FRAG), NULL, flags);
 
     dbats_log(LOG_FINE, "load_isset t=%u, bid=%u, frag_id=%u: "
 	"raw_db_get(is_set) = %d",
@@ -1076,9 +1077,10 @@ static int load_frag(dbats_handler *dh, uint32_t t, int bid,
     // load fragment
     fragkey_t dbkey = { htonl(bid), htonl(t), htonl(frag_id) };
     int rc;
+    uint32_t flags = dh->cfg.readonly ? 0 : DB_RMW;
 
     assert(!dh->tslice[bid]->is_set[frag_id]);
-    rc = load_isset(dh, &dbkey, &dh->tslice[bid]->is_set[frag_id]);
+    rc = load_isset(dh, &dbkey, &dh->tslice[bid]->is_set[frag_id], flags);
     if (rc == DB_NOTFOUND) return 0; // no match
     if (rc != 0) return rc; // error
 
@@ -1091,7 +1093,7 @@ static int load_frag(dbats_handler *dh, uint32_t t, int bid,
 
     size_t value_len;
     rc = raw_db_get(dh, dh->dbData, &dbkey, sizeof(dbkey), dh->db_get_buf,
-	dh->db_get_buf_len, &value_len, !dh->cfg.readonly ? DB_RMW : 0);
+	dh->db_get_buf_len, &value_len, flags);
     dbats_log(LOG_FINE, "load_frag t=%u, bid=%u, frag_id=%u: "
 	"raw_db_get(frag) = %d", t, bid, frag_id, rc);
     if (rc != 0) {
@@ -1155,7 +1157,7 @@ static int instantiate_isset_frags(dbats_handler *dh, int fid)
 
     uint32_t t = dh->active_start;
     for (int ti = 0; ti < tn; ti++, t += dh->bundle[0].period) {
-	fragkey_t dbkey = { htonl(0), htonl(t), 0 };
+	fragkey_t dbkey = { 0, htonl(t), 0 };
 	if (!dh->is_set[ti]) {
 	    dh->is_set[ti] = ecalloc(MAX_NUM_FRAGS, sizeof(uint8_t*),
 		"dh->is_set[ti]");
@@ -1168,10 +1170,12 @@ static int instantiate_isset_frags(dbats_handler *dh, int fid)
 	} else if (!dh->is_set[ti][fid]) {
 	    dbkey.frag_id = htonl(fid);
 	    assert(!dh->is_set[ti][fid]);
-	    int rc = load_isset(dh, &dbkey, &dh->is_set[ti][fid]);
+	    int is_current = (t == dh->tslice[0]->time);
+	    int rc = load_isset(dh, &dbkey, &dh->is_set[ti][fid],
+		is_current ? DB_RMW : 0);
 	    if (rc != 0 && rc != DB_NOTFOUND)
 		return rc; // error
-	    if (t == dh->tslice[0]->time) {
+	    if (is_current) {
 		assert(!dh->tslice[0]->is_set[fid]);
 		dh->tslice[0]->is_set[fid] = dh->is_set[ti][fid]; // share
 	    }
@@ -1228,7 +1232,7 @@ int dbats_select_time(dbats_handler *dh, uint32_t time_value, uint32_t flags)
 	// Locking min_time for writing forces writers to be serialized (one at
 	// a time).  Even if we did not need to lock min_time, it would still
 	// be desirable to serialize writers, since simultaneous unserialized
-	// writers would end up deadlocking with each other anyway.
+	// writers frequently end up deadlocking with each other anyway.
 	int timeout = 10;
 	const char *keybuf = "min_keep_time";
 	while (1) {
