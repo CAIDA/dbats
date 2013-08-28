@@ -268,8 +268,8 @@ static int raw_db_open(dbats_handler *dh, DB **dbp, const char *name,
     return 0;
 }
 
-static void log_error(dbats_handler *dh, DB *db, const char *type,
-    const void *key, uint32_t key_len, int rc)
+static void log_error(const char *fname, int line, dbats_handler *dh, DB *db,
+    const char *type, const void *key, uint32_t key_len, int rc)
 {
     char keybuf[DBATS_KEYLEN] = "";
     if (db == dh->dbData || db == dh->dbIsSet) {
@@ -283,11 +283,16 @@ static void log_error(dbats_handler *dh, DB *db, const char *type,
     }
     const char *dbname;
     db->get_dbname(db, &dbname, NULL);
-    dbats_log(LOG_WARNING, "Error in raw_db_%s: %s: %s: %s",
+    dbats_log_func(LOG_WARNING, fname, line, "Error in raw_db_%s: %s: %s: %s",
 	type, dbname, keybuf, db_strerror(rc));
 }
 
-static int raw_db_set(dbats_handler *dh, DB *db,
+#define raw_db_set(dh, db, key, key_len, value, value_len) \
+    (raw_db_set)(__FILE__, __LINE__, dh, db, key, key_len, value, value_len)
+
+static int (raw_db_set)(
+    const char *fname, int line,
+    dbats_handler *dh, DB *db,
     const void *key, uint32_t key_len,
     const void *value, uint32_t value_len)
 {
@@ -312,7 +317,7 @@ static int raw_db_set(dbats_handler *dh, DB *db,
     DBT_in(dbt_data, (void*)value, value_len);
 
     if ((rc = db->put(db, current_txn(dh), &dbt_key, &dbt_data, 0)) != 0) {
-	log_error(dh, db, "set", key, key_len, rc);
+	log_error(fname, line, dh, db, "set", key, key_len, rc);
 	return rc;
     }
     return 0;
@@ -320,12 +325,17 @@ static int raw_db_set(dbats_handler *dh, DB *db,
 
 #define QLZ_OVERHEAD 400
 
+#define raw_db_get(dh, db, key, key_len, value, buflen, value_len_p, dbflags) \
+    (raw_db_get)(__FILE__, __LINE__, dh, db, key, key_len, value, buflen, value_len_p, dbflags)
+
 // Get a value from the database.
 // buflen must contain the length of the memory pointed to by value.
 // If value_len_p != NULL, then after the call, *value_len_p will contain the
 // length of data written into the memory pointed to by value.
-static int raw_db_get(dbats_handler *dh, DB* db, const void *key,
-    uint32_t key_len, void *value, size_t buflen, size_t *value_len_p,
+static int (raw_db_get)(const char *fname, int line,
+    dbats_handler *dh, DB* db,
+    const void *key, uint32_t key_len,
+    void *value, size_t buflen, size_t *value_len_p,
     uint32_t dbflags)
 {
     int rc;
@@ -343,7 +353,7 @@ static int raw_db_get(dbats_handler *dh, DB* db, const void *key,
 	return 0;
     }
     if (rc != DB_NOTFOUND)
-	log_error(dh, db, "get", key, key_len, rc);
+	log_error(fname, line, dh, db, "get", key, key_len, rc);
     if (rc == DB_BUFFER_SMALL) {
 	dbats_log(LOG_WARNING, "raw_db_get: had %" PRIu32 ", needed %" PRIu32,
 	    dbt_data.ulen, dbt_data.size);
@@ -1237,55 +1247,50 @@ int dbats_num_keys(dbats_handler *dh, uint32_t *num_keys)
 int dbats_select_time(dbats_handler *dh, uint32_t time_value, uint32_t flags)
 {
     int rc;
+    uint32_t min_time = 0;
+    uint32_t max_time = 0;
+    int timeout = 10;
 
     dbats_log(LOG_FINE, "select_time %u", time_value);
 
     if ((rc = dbats_commit(dh)) != 0)
 	return rc;
 
+    dh->preload = !!(flags & DBATS_PRELOAD);
+
+restart:
     if ((rc = begin_transaction(dh, "tslice txn")) != 0)
 	return rc;
 
-    {
-	rc = CFG_GET(dh, num_bundles_key(dh), dh->cfg.num_bundles, 0);
+    if (!dh->cfg.readonly) {
+	// DB_RMW will block other writers trying to select_time().
+	// DB_READ_COMMITTED won't hold a read lock, so won't block anyone.
+	rc = CFG_GET(dh, "min_keep_time", dh->min_keep_time,
+	    dh->serialize ? DB_RMW : DB_READ_COMMITTED);
+	if (rc == DB_LOCK_DEADLOCK && --timeout > 0) {
+	    abort_transaction(dh); // tslice txn
+	    goto restart;
+	}
 	if (rc != 0) {
 	    dbats_log(LOG_ERROR, "error getting %s: %s",
-		num_bundles_key(dh), db_strerror(rc));
-	    return rc;
+		"min_keep_time", db_strerror(rc));
+	    goto abort;
 	}
-	for (int bid = 0; bid < dh->cfg.num_bundles; bid++) {
-	    if (read_bundle_info(dh, bid, 0) != 0)
-		return rc;
-	}
+	dbats_log(LOG_FINE, "select_time %u: got %s = %u", time_value,
+	    "min_keep_time", dh->min_keep_time);
+
+	dbats_get_end_time(dh, 0, &dh->end_time);
     }
 
-    dh->preload = !!(flags & DBATS_PRELOAD);
-
-    uint32_t min_time = 0;
-    uint32_t max_time = 0;
-
-    if (!dh->cfg.readonly) {
-	dbats_get_end_time(dh, 0, &dh->end_time);
-
-	int timeout = 10;
-	const char *keybuf = "min_keep_time";
-	while (1) {
-	    // Reading min_keep_time with DB_RMW will block other processes
-	    // trying to start select_time() for writing.  Reading it with
-	    // DB_READ_COMMITTED means we won't even hold a read lock, so
-	    // won't block anybody.
-	    rc = CFG_GET(dh, keybuf, dh->min_keep_time,
-		dh->serialize ? DB_RMW : DB_READ_COMMITTED);
-	    if (rc == 0) break;
-	    if (dh->serialize || rc != DB_LOCK_DEADLOCK || --timeout <= 0) {
-		dbats_log(LOG_ERROR, "error getting %s: %s",
-		    keybuf, db_strerror(rc));
-		return rc;
-	    }
-	    dbats_log(LOG_FINE, "select_time %u: get %s: deadlock, timeout=%d",
-		time_value, keybuf, timeout);
-	}
-	dbats_log(LOG_FINE, "select_time %u: got %s = %u", time_value, keybuf, dh->min_keep_time);
+    rc = CFG_GET(dh, num_bundles_key(dh), dh->cfg.num_bundles, 0);
+    if (rc != 0) {
+	dbats_log(LOG_ERROR, "error getting %s: %s",
+	    num_bundles_key(dh), db_strerror(rc));
+	goto abort;
+    }
+    for (int bid = 0; bid < dh->cfg.num_bundles; bid++) {
+	if (read_bundle_info(dh, bid, 0) != 0)
+	    goto abort;
     }
 
     for (int bid = 0; bid < dh->cfg.num_bundles; bid++) {
@@ -1299,7 +1304,8 @@ int dbats_select_time(dbats_handler *dh, uint32_t time_value, uint32_t flags)
 		dbats_log(LOG_ERROR, "select_time %u: illegal attempt to set "
 		    "value in bundle %d at time %u before series limit %u",
 		    time_value, bid, t, dh->min_keep_time);
-		return EINVAL;
+		rc = EINVAL;
+		goto abort;
 	    }
 	}
 
@@ -1331,7 +1337,7 @@ int dbats_select_time(dbats_handler *dh, uint32_t time_value, uint32_t flags)
 
     uint32_t num_keys;
     if ((rc = dbats_num_keys(dh, &num_keys)) != 0)
-	return rc;
+	goto abort;
 
     for (int bid = 0; bid < dh->cfg.num_bundles; bid++) {
 	dbats_tslice *tslice = dh->tslice[bid];
@@ -1341,7 +1347,7 @@ int dbats_select_time(dbats_handler *dh, uint32_t time_value, uint32_t flags)
 	tslice->num_frags = div_ceil(num_keys, ENTRIES_PER_FRAG);
 	for (uint32_t frag_id = 0; frag_id < tslice->num_frags; frag_id++) {
 	    if ((rc = load_frag(dh, t, bid, frag_id)) != 0)
-		return rc;
+		goto abort;
 	    if (tslice->frag[frag_id])
 		loaded++;
 	}
@@ -1350,10 +1356,15 @@ int dbats_select_time(dbats_handler *dh, uint32_t time_value, uint32_t flags)
     }
 
     for (int frag_id = 0; frag_id < dh->tslice[0]->num_frags; frag_id++) {
-	instantiate_isset_frags(dh, frag_id);
+	rc = instantiate_isset_frags(dh, frag_id);
+	if (rc != 0) goto abort;
     }
 
     return 0;
+
+abort:
+    abort_transaction(dh); // tslice txn
+    return rc;
 }
 
 /*************************************************************************/
