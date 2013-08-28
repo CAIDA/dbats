@@ -422,7 +422,7 @@ dbats_handler *dbats_open(const char *path,
     dh->cfg.exclusive = !!(flags & DBATS_EXCLUSIVE);
     dh->cfg.no_txn = !!(flags & DBATS_NO_TXN);
     dh->cfg.values_per_entry = 1;
-    dh->serialize = 1;
+    dh->serialize = !(flags & DBATS_MULTIWRITE);
     dh->path = path;
 
     if ((rc = db_env_create(&dh->dbenv, 0)) != 0) {
@@ -719,9 +719,12 @@ int dbats_get_end_time(dbats_handler *dh, int bid, uint32_t *end)
 }
 
 // "DELETE FROM db WHERE db.bid = bid AND db.time >= start AND db.time < end"
-static int delete_frags(dbats_handler *dh, DB *db, const char *name,
-    int bid, uint32_t start, uint32_t end)
+static int delete_frags(dbats_handler *dh, DB *db, int bid,
+    uint32_t start, uint32_t end)
 {
+    const char *name;
+    db->get_dbname(db, &name, NULL);
+
     dbats_log(LOG_FINE, "delete_frags %s %d [%u,%u)", name,
 	bid, start, end);
     int rc;
@@ -776,24 +779,32 @@ static int truncate_bundle(dbats_handler *dh, int bid)
     int rc;
 
     dbats_bundle_info *bundle = &dh->bundle[bid];
-    if (bundle->keep > 0) {
-	uint32_t start, end;
-	dbats_get_start_time(dh, bid, &start);
-	dbats_get_end_time(dh, bid, &end);
-	uint32_t keep_time = (bundle->keep-1) * bundle->period;
-	uint32_t new_start = (keep_time > end) ? 0 : (end - keep_time);
-	if (bid == 0 && dh->min_keep_time < new_start) {
-	    dh->min_keep_time = new_start;
-	    rc = CFG_SET(dh, "min_keep_time", dh->min_keep_time);
-	    if (rc != 0) return rc;
-	}
-	if (start < new_start) {
-	    rc = delete_frags(dh, dh->dbData, "data", bid, 0, new_start);
-	    if (rc != 0) return rc;
-	    rc = delete_frags(dh, dh->dbIsSet, "is_set", bid, 0, new_start);
-	    if (rc != 0) return rc;
-	}
+    if (bundle->keep == 0) return 0; // keep all
+
+    uint32_t start, end;
+    dbats_get_start_time(dh, bid, &start);
+    dbats_get_end_time(dh, bid, &end);
+    uint32_t keep_period = (bundle->keep-1) * bundle->period;
+    uint32_t new_start = (keep_period > end) ? 0 : (end - keep_period);
+    if (bid == 0 && dh->min_keep_time < new_start) {
+	dh->min_keep_time = new_start;
+	rc = CFG_SET(dh, "min_keep_time", dh->min_keep_time);
+	if (rc != 0) return rc;
     }
+    if (start >= new_start) return 0; // there's nothing to truncate
+
+    rc = begin_transaction(dh, "truncate txn");
+    if (rc != 0) return rc;
+    rc = delete_frags(dh, dh->dbData, bid, 0, new_start);
+    if (rc != 0) goto abort;
+    rc = delete_frags(dh, dh->dbIsSet, bid, 0, new_start);
+    if (rc != 0) goto abort;
+    commit_transaction(dh); // truncate txn
+    return 0;
+
+abort:
+    // failing to delete frags is just an annoyance, not an error
+    abort_transaction(dh); // truncate txn
     return 0;
 }
 
@@ -863,8 +874,7 @@ static int clear_tslice(dbats_handler *dh, int bid)
     return 0;
 }
 
-// Writes tslice to db (unless db is readonly).
-// Also cleans up in-memory tslice, even if db is readonly.
+// Writes tslice to db.
 static int flush_tslice(dbats_handler *dh, int bid)
 {
     dbats_log(LOG_FINE, "Flush t=%u bid=%d", dh->tslice[bid]->time, bid);
@@ -877,9 +887,7 @@ static int flush_tslice(dbats_handler *dh, int bid)
     for (int f = 0; f < dh->tslice[bid]->num_frags; f++) {
 	if (!dh->tslice[bid]->frag[f]) continue;
 	dbkey.frag_id = htonl(f);
-	if (dh->cfg.readonly) {
-	    // do nothing
-	} else if (!dh->tslice[bid]->frag_changed[f]) {
+	if (!dh->tslice[bid]->frag_changed[f]) {
 	    dbats_log(LOG_VERYFINE, "Skipping frag %d (unchanged)", f);
 	} else {
 	    if (dh->cfg.compress) {
@@ -892,8 +900,9 @@ static int flush_tslice(dbats_handler *dh, int bid)
 		dh->tslice[bid]->frag[f]->compressed = 1;
 		size_t compress_len = qlz_compress(dh->tslice[bid]->frag[f],
 		    buf+1, frag_size, dh->state_compress);
-		dbats_log(LOG_VERYFINE, "Frag %d compression: %zu -> %zu (%.1f %%)",
-		    f, frag_size, compress_len, compress_len*100.0/frag_size);
+		dbats_log(LOG_VERYFINE, "Frag %d compression: %zu -> %zu "
+		    "(%.1f %%)", f, frag_size, compress_len,
+		    compress_len*100.0/frag_size);
 		rc = raw_db_set(dh, dh->dbData, &dbkey, sizeof(dbkey),
 		    buf, compress_len + 1);
 		if (rc != 0) return rc;
@@ -913,14 +922,8 @@ static int flush_tslice(dbats_handler *dh, int bid)
     }
     if (buf) free(buf);
 
-    if (!dh->cfg.readonly) {
-	rc = truncate_bundle(dh, bid);
-	if (rc != 0) return rc;
-    }
-
-    if (!dh->cfg.exclusive || !dh->is_open) {
-	clear_tslice(dh, bid);
-    }
+    rc = truncate_bundle(dh, bid);
+    if (rc != 0) return rc;
 
     return 0;
 }
@@ -951,20 +954,51 @@ static void free_isset(dbats_handler *dh)
 
 int dbats_commit(dbats_handler *dh)
 {
+    int rc = 0;
     if (dh->n_txn <= dh->n_internal_txn) return 0;
     dbats_log(LOG_FINE, "dbats_commit %u", dh->tslice[0]->time);
 
     free_isset(dh);
 
-    for (int bid = 0; bid < dh->cfg.num_bundles; bid++) {
-	int rc = flush_tslice(dh, bid);
+    if (!dh->serialize) {
+	// In dbats_select_time(), we read min_keep_time with DB_READ_COMMITTED;
+	// it may have changed since then.
+	rc = CFG_GET(dh, "min_keep_time", dh->min_keep_time, DB_RMW);
 	if (rc != 0) {
-	    abort_transaction(dh);
+	    dbats_log(LOG_ERROR, "error getting %s: %s", "min_keep_time",
+		db_strerror(rc));
 	    return rc;
+	}
+
+	for (int bid = 0; bid < dh->cfg.num_bundles; bid++) {
+	    int changed = 0;
+	    for (int f = 0; f < dh->tslice[bid]->num_frags; f++) {
+		if (dh->tslice[bid]->frag[f] && dh->tslice[bid]->frag_changed[f])
+		    changed++;
+	    }
+	    if (changed && dh->tslice[bid]->time < dh->min_keep_time) {
+		dbats_log(LOG_ERROR, "flush_tslice %u: illegal attempt to set "
+		    "value in bundle %d at time %u before series limit %u",
+		    dh->tslice[bid]->time, bid, dh->tslice[bid]->time,
+		    dh->min_keep_time);
+		return EINVAL;
+	    }
 	}
     }
 
-    return commit_transaction(dh);
+    for (int bid = 0; bid < dh->cfg.num_bundles; bid++) {
+	if (!dh->cfg.readonly && rc == 0) {
+	    rc = flush_tslice(dh, bid);
+	}
+	if (!dh->cfg.exclusive || !dh->is_open || rc != 0) {
+	    clear_tslice(dh, bid);
+	}
+    }
+
+    if (rc == 0)
+	return commit_transaction(dh);
+    abort_transaction(dh);
+    return rc;
 }
 
 int dbats_abort(dbats_handler *dh)
@@ -1214,7 +1248,11 @@ int dbats_select_time(dbats_handler *dh, uint32_t time_value, uint32_t flags)
 
     {
 	rc = CFG_GET(dh, num_bundles_key(dh), dh->cfg.num_bundles, 0);
-	if (rc != 0) return rc;
+	if (rc != 0) {
+	    dbats_log(LOG_ERROR, "error getting %s: %s",
+		num_bundles_key(dh), db_strerror(rc));
+	    return rc;
+	}
 	for (int bid = 0; bid < dh->cfg.num_bundles; bid++) {
 	    if (read_bundle_info(dh, bid, 0) != 0)
 		return rc;
@@ -1229,16 +1267,17 @@ int dbats_select_time(dbats_handler *dh, uint32_t time_value, uint32_t flags)
     if (!dh->cfg.readonly) {
 	dbats_get_end_time(dh, 0, &dh->end_time);
 
-	// Locking min_time for writing forces writers to be serialized (one at
-	// a time).  Even if we did not need to lock min_time, it would still
-	// be desirable to serialize writers, since simultaneous unserialized
-	// writers frequently end up deadlocking with each other anyway.
 	int timeout = 10;
 	const char *keybuf = "min_keep_time";
 	while (1) {
-	    rc = CFG_GET(dh, keybuf, dh->min_keep_time, DB_RMW);
+	    // Reading min_keep_time with DB_RMW will block other processes
+	    // trying to start select_time() for writing.  Reading it with
+	    // DB_READ_COMMITTED means we won't even hold a read lock, so
+	    // won't block anybody.
+	    rc = CFG_GET(dh, keybuf, dh->min_keep_time,
+		dh->serialize ? DB_RMW : DB_READ_COMMITTED);
 	    if (rc == 0) break;
-	    if (rc != DB_LOCK_DEADLOCK || --timeout <= 0) {
+	    if (dh->serialize || rc != DB_LOCK_DEADLOCK || --timeout <= 0) {
 		dbats_log(LOG_ERROR, "error getting %s: %s",
 		    keybuf, db_strerror(rc));
 		return rc;
@@ -1484,9 +1523,9 @@ retry:
 
 	if (dh->bundle[bid].keep > 0) {
 	    // Skip if the time is outside of bundle's keep limit
-	    uint32_t keep_time = (dh->bundle[bid].keep-1) * dh->bundle[bid].period;
-	    if (keep_time < dh->end_time &&
-		dh->tslice[bid]->time < dh->end_time - keep_time)
+	    uint32_t keep_period = (dh->bundle[bid].keep-1) * dh->bundle[bid].period;
+	    if (keep_period < dh->end_time &&
+		dh->tslice[bid]->time < dh->end_time - keep_period)
 		    continue;
 	}
 
