@@ -14,6 +14,7 @@ static void help(void) {
     fprintf(stderr, "-p       preload timeslices\n");
     fprintf(stderr, "-Z       don't compress db\n");
     fprintf(stderr, "-i       initialize db only; do not write data\n");
+    fprintf(stderr, "-m       allow multiple processes to write simultaneously (experimental)\n");
     exit(-1);
 }
 
@@ -36,7 +37,7 @@ int main(int argc, char *argv[]) {
     char key[128];
 
     int c;
-    while ((c = getopt(argc, argv, "v:xtpZi")) != -1) {
+    while ((c = getopt(argc, argv, "v:xtpZim")) != -1) {
 	switch (c) {
 	case 'v':
 	    dbats_log_level = atoi(optarg);
@@ -52,6 +53,9 @@ int main(int argc, char *argv[]) {
 	    break;
 	case 'Z':
 	    open_flags |= DBATS_UNCOMPRESSED;
+	    break;
+	case 'm':
+	    open_flags |= DBATS_MULTIWRITE;
 	    break;
 	case 'i':
 	    init_only = 1;
@@ -95,7 +99,7 @@ int main(int argc, char *argv[]) {
 
 	if (t != last_t) {
 	    if (!init_only) {
-		dbats_log(LOG_INFO, "report-in: select time %u", t);
+		dbats_log(LOG_INFO, "select time %u", t);
 		if (dbats_select_time(handler, t, select_flags) == -1)
 		    return(-1);
 	    }

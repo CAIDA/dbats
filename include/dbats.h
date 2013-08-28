@@ -61,13 +61,14 @@
 
 /** @name Flags */
 ///@{
-#define DBATS_CREATE         0x01 ///< create object if it doesn't exist
-#define DBATS_PRELOAD        0x04 ///< load fragments when tslice is selected
-#define DBATS_READONLY       0x08 ///< don't allow writing
-#define DBATS_UNCOMPRESSED   0x10 ///< don't compress written time series data
-#define DBATS_EXCLUSIVE      0x20 ///< obtain exclusive lock on whole db
-#define DBATS_NO_TXN         0x40 ///< don't use transactions (for debugging only)
-#define DBATS_UPDATABLE      0x80 ///< allow updates to existing values
+#define DBATS_CREATE       0x0001 ///< create object if it doesn't exist
+#define DBATS_PRELOAD      0x0004 ///< load fragments when tslice is selected
+#define DBATS_READONLY     0x0008 ///< don't allow writing
+#define DBATS_UNCOMPRESSED 0x0010 ///< don't compress written time series data
+#define DBATS_EXCLUSIVE    0x0020 ///< obtain exclusive lock on whole db
+#define DBATS_NO_TXN       0x0040 ///< don't use transactions (for debugging only)
+#define DBATS_UPDATABLE    0x0080 ///< allow updates to existing values
+#define DBATS_MULTIWRITE   0x0100 ///< allow multiple processes to write in parallel (experimental - do not use)
 ///@}
 
 /** @name Aggregation functions */
