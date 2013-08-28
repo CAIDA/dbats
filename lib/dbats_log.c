@@ -54,8 +54,8 @@ void dbats_log_func(int level, const char *file, int line, const char *fmt, ...)
 	time_t t = time(NULL);
 	strftime(datebuf, sizeof(datebuf), "%Y-%m-%d %H:%M:%S", localtime(&t));
 
-	fprintf(dbats_log_file, "%s %s:%d: %u: %s%s\n",
-	    datebuf, file, line, getpid(), prefix, msgbuf);
+	fprintf(dbats_log_file, "%s %u: %s:%d: %s%s\n",
+	    datebuf, getpid(), file, line, prefix, msgbuf);
 
 	fflush(dbats_log_file);
     }
