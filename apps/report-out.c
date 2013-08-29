@@ -168,9 +168,12 @@ int main(int argc, char *argv[]) {
 	    }
 	}
 
-	fprintf(out, "set style data steps\n");
+	fprintf(out, "set style data boxes\n");
+	fprintf(out, "set style fill empty\n");
 	fprintf(out, "set xrange [%" PRIu32 ":%" PRIu32 "]\n",
 	    0, end + bundle0_period - begin);
+	fprintf(out, "set yrange [0:*]\n");
+	fprintf(out, "set key bottom left\n");
 	const dbats_bundle_info *bundle1;
 	if (cfg->num_bundles > 0) {
 	    bundle1 = dbats_get_bundle_info(handler, 1);
@@ -181,19 +184,18 @@ int main(int argc, char *argv[]) {
 	const char *prefix = "plot";
 	for (int sid = 0; sid < cfg->num_bundles; sid++) {
 	    bundle = dbats_get_bundle_info(handler, sid);
-	    fprintf(out, "%s '-' using ($1-%"PRIu32"):($2) "
+	    fprintf(out, "%s '-' using ($1-%"PRIu32"+%f):($2):(%f) %s"
 		"linecolor %d title \"%"PRIu32"s %s\"",
-		prefix, begin, sid, bundle->period,
-		dbats_agg_func_label[bundle->func]);
-	    prefix = ",";
+		prefix, begin, bundle->period/2.0, bundle->period,
+		sid == 0 ? "with boxes fs solid 0.1 " : "",
+		sid, bundle->period, dbats_agg_func_label[bundle->func]);
+	    prefix = ", \\\n    ";
 	}
 	fprintf(out, "\n");
     }
 
     for (int sid = 0; sid < cfg->num_bundles; sid++) {
 	bundle = dbats_get_bundle_info(handler, sid);
-	char strval[64];
-	strval[0] = '\0';
 	uint32_t t;
 
 	uint32_t end = opt_end;
@@ -215,6 +217,8 @@ int main(int argc, char *argv[]) {
 		const double *values;
 		for (int k = 0; k < n_keys; k++) {
 		    rc = dbats_get_double(handler, keys[k].keyid, &values, sid);
+		    if (rc == DB_NOTFOUND)
+			continue;
 		    if (rc != 0) {
 			fprintf(stderr, "error in dbats_get(%s): rc=%d\n", keys[k].key, rc);
 			break;
@@ -228,8 +232,8 @@ int main(int argc, char *argv[]) {
 			fprintf(out, "%u %d\n", t, sid);
 			break;
 		    case OT_GNUPLOT:
-			sprintf(strval, "%.3f", values ? values[0] : 0);
-			fprintf(out, "%u %s\n", t, strval);
+			fprintf(out, "%u %.3f\n",
+			    t, values ? values[0] : 0);
 			break;
 		    }
 		}
@@ -237,6 +241,8 @@ int main(int argc, char *argv[]) {
 		const dbats_value *values;
 		for (int k = 0; k < n_keys; k++) {
 		    rc = dbats_get(handler, keys[k].keyid, &values, sid);
+		    if (rc == DB_NOTFOUND)
+			continue;
 		    if (rc != 0) {
 			fprintf(stderr, "error in dbats_get(%s): rc=%d\n", keys[k].key, rc);
 			break;
@@ -250,15 +256,15 @@ int main(int argc, char *argv[]) {
 			fprintf(out, "%u %d\n", t, sid);
 			break;
 		    case OT_GNUPLOT:
-			sprintf(strval, "%" PRIval, values ? values[0] : 0);
-			fprintf(out, "%u %s\n", t, strval);
+			fprintf(out, "%u %" PRIval "\n",
+			    t, values ? values[0] : 0);
 			break;
 		    }
 		}
 	    }
 	}
-	if (outtype == OT_GNUPLOT && strval[0]) {
-	    fprintf(out, "%u %s\ne\n", t, strval);
+	if (outtype == OT_GNUPLOT) {
+	    fprintf(out, "e\n");
 	}
     }
 
