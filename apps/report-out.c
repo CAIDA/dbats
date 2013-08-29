@@ -73,7 +73,7 @@ enum { OT_TEXT, OT_GNUPLOT };
 
 int main(int argc, char *argv[]) {
     dbats_handler *handler;
-    uint32_t begin = 0, end = 0;
+    uint32_t opt_begin = 0, opt_end = 0;
     uint32_t run_start, elapsed;
     char *dbats_path = NULL;
     char *keyfile_path = NULL;
@@ -96,10 +96,10 @@ int main(int argc, char *argv[]) {
 	    keyfile_path = strdup(optarg);
 	    break;
 	case 'b':
-	    begin = atol(optarg);
+	    opt_begin = atol(optarg);
 	    break;
 	case 'e':
-	    end = atol(optarg);
+	    opt_end = atol(optarg);
 	    break;
 	case 'o':
 	    if (strcmp(optarg, "text") == 0) {
@@ -125,8 +125,8 @@ int main(int argc, char *argv[]) {
 
     dbats_path = argv[0];
 
-    dbats_log(LOG_INFO, "begin=%"PRId32 " end=%"PRId32, begin, end);
-    if (end < begin)
+    dbats_log(LOG_INFO, "begin=%"PRId32 " end=%"PRId32, opt_begin, opt_end);
+    if (opt_end < opt_begin)
 	help();
 
     dbats_log(LOG_INFO, "Opening %s", dbats_path);
@@ -138,19 +138,6 @@ int main(int argc, char *argv[]) {
 
     const dbats_bundle_info *bundle = dbats_get_bundle_info(handler, 0);
     bundle0_period = bundle->period;
-    if (end == 0)
-	dbats_get_end_time(handler, 0, &end);
-    if (begin == 0) {
-	// find earliest start time of all bundles
-	dbats_get_start_time(handler, 0, &begin);
-	for (int sid = 1; sid < cfg->num_bundles; sid++) {
-	    uint32_t bundle_begin;
-	    dbats_get_start_time(handler, sid, &bundle_begin);
-	    bundle = dbats_get_bundle_info(handler, sid);
-	    if (begin > bundle_begin)
-		begin = bundle_begin;
-	}
-    }
 
     dbats_commit(handler); // commit the txn started by dbats_open
 
@@ -164,6 +151,23 @@ int main(int argc, char *argv[]) {
     run_start = time(NULL);
 
     if (outtype == OT_GNUPLOT) {
+
+	uint32_t end = opt_end;
+	uint32_t begin = opt_begin;
+	if (end == 0)
+	    dbats_get_end_time(handler, 0, &end);
+	if (begin == 0) {
+	    // find earliest start time of all bundles
+	    dbats_get_start_time(handler, 0, &begin);
+	    for (int sid = 1; sid < cfg->num_bundles; sid++) {
+		uint32_t bundle_begin;
+		dbats_get_start_time(handler, sid, &bundle_begin);
+		bundle = dbats_get_bundle_info(handler, sid);
+		if (begin > bundle_begin)
+		    begin = bundle_begin;
+	    }
+	}
+
 	fprintf(out, "set style data steps\n");
 	fprintf(out, "set xrange [%" PRIu32 ":%" PRIu32 "]\n",
 	    0, end + bundle0_period - begin);
@@ -191,6 +195,14 @@ int main(int argc, char *argv[]) {
 	char strval[64];
 	strval[0] = '\0';
 	uint32_t t;
+
+	uint32_t end = opt_end;
+	if (end == 0)
+	    dbats_get_end_time(handler, sid, &end);
+	uint32_t begin = opt_begin;
+	if (begin == 0)
+	    dbats_get_start_time(handler, sid, &begin);
+
 	for (t = begin; t <= end; t += bundle->period) {
 	    int rc;
 
