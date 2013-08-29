@@ -137,7 +137,8 @@ const char *dbats_agg_func_label[] = {
 // Construct a DBT for receiving nothing from DB.
 #define DBT_null(_var) \
     DBT _var; \
-    memset(&_var, 0, sizeof(DBT));
+    memset(&_var, 0, sizeof(DBT)); \
+    _var.flags = DB_DBT_PARTIAL
 
 static inline uint32_t min(uint32_t a, uint32_t b) { return a < b ? a : b; }
 static inline uint32_t max(uint32_t a, uint32_t b) { return a > b ? a : b; }
