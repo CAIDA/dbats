@@ -87,6 +87,7 @@ struct dbats_handler {
     void *state_decompress;
     DB_ENV *dbenv;             // DB environment
     DB *dbMeta;                // config parameters
+    DB *dbBundle;              // bundle parameters
     DB *dbKeyname;             // key name -> key id
     DB *dbKeyid;               // recno -> key name (note: keyid == recno - 1)
     DB *dbData;                // {bid, time, frag_id} -> value fragment
@@ -279,6 +280,8 @@ static void log_db_op(int level, const char *fname, int line, dbats_handler *dh,
 	fragkey_t *fragkey = (fragkey_t*)key;
 	sprintf(keybuf, "bid=%d t=%u frag=%u",
 	    ntohl(fragkey->bid), ntohl(fragkey->time), ntohl(fragkey->frag_id));
+    } else if (db == dh->dbBundle) {
+	sprintf(keybuf, "%d", *(uint8_t*)key);
     } else if (db == dh->dbMeta || db == dh->dbKeyname) {
 	sprintf(keybuf, "\"%.*s\"", key_len, (char*)key);
     } else if (db == dh->dbKeyid) {
@@ -337,7 +340,7 @@ static int (raw_db_get)(const char *fname, int line,
 {
     const char *label =
 	(dbflags & DB_RMW) ? "db_get(rw)" :
-	(dbflags & DB_READ_COMMITTED) ? "db_get()" :
+	(dbflags & DB_READ_COMMITTED) ? "db_get(t)" :
 	"db_get(r)";
     log_db_op(LOG_FINEST, fname, line, dh, db, label, key, key_len, "");
     int rc;
@@ -381,7 +384,7 @@ static int (raw_cursor_get)(const char *fname, int line,
 	    "?";
 	const char *lockstr =
 	    (flags & DB_RMW) ? "rw" :
-	    (flags & DB_READ_COMMITTED) ? "n" :
+	    (flags & DB_READ_COMMITTED) ? "t" :
 	    "r";
 	sprintf(label, "cursor_get(%s,%s)", opstr, lockstr);
 	log_db_op(LOG_FINEST, fname, line, dh, db, label, key->data, key->size, "");
@@ -416,22 +419,30 @@ static void raw_db_delete(const dbats_handler *dh, DB *db,
     sprintf(keybuf, dh->cfg.version >= 4 ? "bundle%d" : \
 	dh->cfg.version >= 3 ? "series%d" : "agg%d", bid)
 
-#define num_bundles_key(dh) \
-    (dh->cfg.version >= 4 ? "num_bundles" : \
-	dh->cfg.version >= 3 ? "num_series" : "num_aggs")
-
 static int read_bundle_info(dbats_handler *dh, int bid, uint32_t flags)
 {
-    char keybuf[32];
-    bundle_info_key(dh, keybuf, bid);
-    return CFG_GET(dh, keybuf, dh->bundle[bid], flags);
+    if (dh->cfg.version >= 5) {
+	uint8_t key = bid;
+	return raw_db_get(dh, dh->dbBundle, &key, sizeof(key), &dh->bundle[bid],
+	    sizeof(dh->bundle[bid]), NULL, flags);
+    } else {
+	char keybuf[32];
+	bundle_info_key(dh, keybuf, bid);
+	return CFG_GET(dh, keybuf, dh->bundle[bid], flags);
+    }
 }
 
 static int write_bundle_info(dbats_handler *dh, int bid)
 {
-    char keybuf[32];
-    bundle_info_key(dh, keybuf, bid);
-    return CFG_SET(dh, keybuf, dh->bundle[bid]);
+    if (dh->cfg.version >= 5) {
+	uint8_t key = bid;
+	return raw_db_set(dh, dh->dbBundle, &key, sizeof(key), &dh->bundle[bid],
+	    sizeof(dh->bundle[bid]));
+    } else {
+	char keybuf[32];
+	bundle_info_key(dh, keybuf, bid);
+	return CFG_SET(dh, keybuf, dh->bundle[bid]);
+    }
 }
 
 /*************************************************************************/
@@ -548,6 +559,7 @@ dbats_handler *dbats_open(const char *path,
 
 #define open_db(db,name,type) raw_db_open(dh, &dh->db, name, type, flags, mode)
     if (open_db(dbMeta,    "meta",    DB_BTREE) != 0) goto abort;
+    if (open_db(dbBundle,  "bundle",  DB_BTREE) != 0) goto abort;
     if (open_db(dbKeyname, "keyname", DB_BTREE) != 0) goto abort;
     if (open_db(dbKeyid,   "keyid",   DB_RECNO) != 0) goto abort;
     if (open_db(dbData,    "data",    DB_BTREE) != 0) goto abort;
@@ -575,19 +587,12 @@ dbats_handler *dbats_open(const char *path,
     initcfg(version,          "version",           DBATS_DB_VERSION);
     initcfg(period,           "period",            period);
     initcfg(values_per_entry, "values_per_entry",  values_per_entry);
-    initcfg(num_bundles,      num_bundles_key(dh), 1);
 
 #undef initcfg
 
     if (dh->cfg.version > DBATS_DB_VERSION) {
 	dbats_log(LOG_ERROR, "database version %d > library version %d",
 	    dh->cfg.version, DBATS_DB_VERSION);
-	return NULL;
-    }
-
-    if (dh->cfg.num_bundles > MAX_NUM_BUNDLES) {
-	dbats_log(LOG_ERROR, "num_bundles %d > %d", dh->cfg.num_bundles,
-	    MAX_NUM_BUNDLES);
 	return NULL;
     }
 
@@ -604,14 +609,19 @@ dbats_handler *dbats_open(const char *path,
 	dh->bundle[0].func = DBATS_AGG_NONE;
 	dh->bundle[0].steps = 1;
 	dh->bundle[0].period = dh->cfg.period;
+	dh->cfg.num_bundles = 1;
 	rc = write_bundle_info(dh, 0);
 	if (rc != 0) return NULL;
 	rc = CFG_SET(dh, "min_keep_time", dh->min_keep_time);
 	if (rc != 0) return NULL;
     } else {
-	for (int bid = 0; bid < dh->cfg.num_bundles; bid++) {
-	    if (read_bundle_info(dh, bid, 0) != 0)
+	for (int bid = 0; ; bid++) {
+	    rc = read_bundle_info(dh, bid, 0);
+	    if (rc != 0) {
+		if (rc == DB_NOTFOUND && bid > 0) break; // no more bundles
 		return NULL;
+	    }
+	    dh->cfg.num_bundles = bid + 1;
 	}
     }
 
@@ -627,9 +637,6 @@ dbats_handler *dbats_open(const char *path,
 		"qlz_state_compress");
 	    if (!dh->state_compress) return NULL;
 	}
-
-	rc = CFG_SET(dh, "bundle0", dh->bundle[0]);
-	if (rc != 0) goto abort;
     }
 
     dh->is_open = 1;
@@ -664,7 +671,7 @@ int dbats_aggregate(dbats_handler *dh, int func, int steps)
 	return ENOMEM;
     }
 
-    int bid = dh->cfg.num_bundles++;
+    int bid = dh->cfg.num_bundles;
 
     if (!(dh->tslice[bid] = ecalloc(1, sizeof(dbats_tslice), "tslice")))
 	return errno ? errno : ENOMEM;
@@ -676,9 +683,8 @@ int dbats_aggregate(dbats_handler *dh, int func, int steps)
 
     rc = write_bundle_info(dh, bid);
     if (rc != 0) return rc;
-    rc = CFG_SET(dh, num_bundles_key(dh), dh->cfg.num_bundles);
-    if (rc != 0) return rc;
 
+    dh->cfg.num_bundles++;
     return 0;
 }
 
@@ -696,13 +702,14 @@ int dbats_get_start_time(dbats_handler *dh, int bid, uint32_t *start)
     dbt_key.ulen = sizeof(dbkey);
     DBT_null(dbt_data);
     rc = raw_cursor_get(dh, dh->dbData, dbc, &dbt_key, &dbt_data, DB_SET_RANGE);
-    if (rc == DB_NOTFOUND) return rc;
+    if (rc == DB_NOTFOUND) goto close;
     if (rc != 0) {
 	dbats_log(LOG_ERROR, "dbats_get_start_time %d: get: %s", bid, db_strerror(rc));
-	return rc;
+	goto close;
     }
     *start = ntohl(dbkey.time);
 
+close:
     rc = dbc->close(dbc);
     if (rc != 0) {
 	dbats_log(LOG_ERROR, "dbats_get_start_time %d: close: %s", bid, db_strerror(rc));
@@ -721,7 +728,7 @@ int dbats_get_end_time(dbats_handler *dh, int bid, uint32_t *end)
 	dbats_log(LOG_ERROR, "dbats_get_end_time %d: cursor: %s", bid, db_strerror(rc));
 	return rc;
     }
-    fragkey_t dbkey = { htonl(bid+1), htonl(0), htonl(0) };
+    fragkey_t dbkey = { htonl(bid), htonl(UINT32_MAX), htonl(0) };
     DBT_in(dbt_key, &dbkey, sizeof(dbkey));
     dbt_key.ulen = sizeof(dbkey);
     DBT_null(dbt_data);
@@ -733,27 +740,30 @@ int dbats_get_end_time(dbats_handler *dh, int bid, uint32_t *end)
 	rc = raw_cursor_get(dh, dh->dbData, dbc, &dbt_key, &dbt_data, DB_LAST);
     } else {
 	dbats_log(LOG_ERROR, "dbats_get_end_time %d: get: %s", bid, db_strerror(rc));
-	return rc;
+	goto close;
     }
 
     if (rc == DB_NOTFOUND)
-	return rc;
+	goto close;
     if (rc != 0) {
 	dbats_log(LOG_ERROR, "dbats_get_end_time %d: prev: %s", bid, db_strerror(rc));
-	return rc;
+	goto close;
     }
-    if (ntohl(dbkey.bid) != bid)
-	return DB_NOTFOUND;
+    if (ntohl(dbkey.bid) != bid) {
+	rc = DB_NOTFOUND;
+	goto close;
+    }
 
     *end = ntohl(dbkey.time);
 
+close:
     rc = dbc->close(dbc);
     if (rc != 0) {
 	dbats_log(LOG_ERROR, "dbats_get_end_time %d: close: %s", bid, db_strerror(rc));
 	return rc;
     }
 
-    return 0;
+    return rc;
 }
 
 // "DELETE FROM db WHERE db.bid = bid AND db.time >= start AND db.time < end"
@@ -849,11 +859,6 @@ abort:
 int dbats_series_limit(dbats_handler *dh, int bid, int keep)
 {
     int rc = 0;
-
-    if (bid < 0 || bid >= dh->cfg.num_bundles) {
-	dbats_log(LOG_ERROR, "bad bid %d", bid);
-	return EINVAL;
-    }
 
     rc = begin_transaction(dh, "keep txn");
     if (rc != 0) return rc;
@@ -1233,7 +1238,7 @@ static int instantiate_isset_frags(dbats_handler *dh, int fid)
 	}
 
 	if (t == dh->tslice[0]->time && dh->tslice[0]->is_set[fid]) {
-	    assert(!dh->is_set[ti][fid]);
+	    assert(!dh->is_set[ti][fid] || dh->is_set[ti][fid] == dh->tslice[0]->is_set[fid]);
 	    dh->is_set[ti][fid] = dh->tslice[0]->is_set[fid]; // share
 	} else if (!dh->is_set[ti][fid]) {
 	    dbkey.frag_id = htonl(fid);
@@ -1300,11 +1305,13 @@ restart:
 	dbats_get_end_time(dh, 0, &dh->end_time);
     }
 
-    rc = CFG_GET(dh, num_bundles_key(dh), dh->cfg.num_bundles, 0);
-    if (rc != 0) goto abort;
-    for (int bid = 0; bid < dh->cfg.num_bundles; bid++) {
+    for (int bid = 0; ; bid++) {
 	rc = read_bundle_info(dh, bid, 0);
-	if (rc != 0) goto abort;
+	if (rc != 0) {
+	    if (rc == DB_NOTFOUND && bid > 0) break; // no more bundles
+	    goto abort;
+	}
+	dh->cfg.num_bundles = bid + 1;
     }
 
     for (int bid = 0; bid < dh->cfg.num_bundles; bid++) {
@@ -1979,6 +1986,8 @@ void dbats_stat_print(const dbats_handler *dh) {
     
     if ((rc = dh->dbMeta->stat_print(dh->dbMeta, DB_FAST_STAT)) != 0)
 	dbats_log(LOG_ERROR, "dumping Meta stats: %s", db_strerror(rc));
+    if ((rc = dh->dbBundle->stat_print(dh->dbBundle, DB_FAST_STAT)) != 0)
+	dbats_log(LOG_ERROR, "dumping Bundle stats: %s", db_strerror(rc));
     if ((rc = dh->dbKeyname->stat_print(dh->dbKeyname, DB_FAST_STAT)) != 0)
 	dbats_log(LOG_ERROR, "dumping Keyname stats: %s", db_strerror(rc));
     if ((rc = dh->dbKeyid->stat_print(dh->dbKeyid, DB_FAST_STAT)) != 0)
