@@ -184,7 +184,7 @@ int main(int argc, char *argv[]) {
 	const char *prefix = "plot";
 	for (int sid = 0; sid < cfg->num_bundles; sid++) {
 	    bundle = dbats_get_bundle_info(handler, sid);
-	    fprintf(out, "%s '-' using ($1-%"PRIu32"+%f):($2):(%f) %s"
+	    fprintf(out, "%s '-' using ($1-%"PRIu32"+%f):($2):(%d) %s"
 		"linecolor %d title \"%"PRIu32"s %s\"",
 		prefix, begin, bundle->period/2.0, bundle->period,
 		sid == 0 ? "with boxes fs solid 0.1 " : "",
@@ -208,7 +208,7 @@ int main(int argc, char *argv[]) {
 	for (t = begin; t <= end; t += bundle->period) {
 	    int rc;
 
-	    if ((rc = dbats_select_time(handler, t, 0)) == -1) {
+	    if ((rc = dbats_select_time(handler, t, 0)) != 0) {
 		dbats_log(LOG_INFO, "Unable to find time %u", t);
 		continue;
 	    }
