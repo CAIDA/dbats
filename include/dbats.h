@@ -237,6 +237,8 @@ extern uint32_t dbats_normalize_time(const dbats_handler *handler,
  *  All subsequent calls to dbats_get() and dbats_set() will take place in this
  *  transaction, up to the next call to dbats_select_time(), dbats_commit(),
  *  dbats_abort(), or dbats_close().
+ *  If this function fails for any reason, it returns nonzero and a
+ *  transaction is not begun.
  *  @param[in] handler A dbats_handler created by dbats_open().
  *  @param[in] time_value the desired time, which will be rounded down by
  *    dbats_normalize_time().
