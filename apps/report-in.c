@@ -28,6 +28,7 @@ int main(int argc, char *argv[]) {
     int open_flags = DBATS_CREATE;
     int init_only = 0;
     progname = argv[0];
+    uint32_t run_start, elapsed;
 
     dbats_log_level = LOG_INFO;
 
@@ -72,6 +73,7 @@ int main(int argc, char *argv[]) {
 	help();
     dbats_path = argv[0];
 
+    run_start = time(NULL);
     dbats_log(LOG_INFO, "report-in: open");
     handler = dbats_open(dbats_path, 1, period, open_flags);
     if (!handler) return -1;
@@ -100,7 +102,7 @@ int main(int argc, char *argv[]) {
 	if (t != last_t) {
 	    if (!init_only) {
 		dbats_log(LOG_INFO, "select time %u", t);
-		if (dbats_select_time(handler, t, select_flags) == -1)
+		if (dbats_select_time(handler, t, select_flags) != 0)
 		    return(-1);
 	    }
 	    key_id = 0;
@@ -123,6 +125,11 @@ int main(int argc, char *argv[]) {
 	key_id++;
     }
 
+    elapsed = time(NULL) - run_start;
+
+    dbats_log(LOG_INFO, "Time elapsed: %u sec", elapsed);
+    dbats_log(LOG_INFO, "Closing %s", dbats_path);
     dbats_close(handler);
+    dbats_log(LOG_INFO, "Done");
     return 0;
 }
