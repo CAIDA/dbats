@@ -83,6 +83,7 @@ struct dbats_handler {
     uint8_t is_open;
     uint8_t preload;           // load frags when tslice is selected
     uint8_t serialize;         // allow only one writer at a time
+    uint8_t changed;           // has changes that need to be written to db?
     void *state_compress;
     void *state_decompress;
     DB_ENV *dbenv;             // DB environment
@@ -503,7 +504,7 @@ dbats_handler *dbats_open(const char *path,
 	    // another process creating a dbats environment.
 	    char filename[PATH_MAX];
 	    struct stat statbuf;
-	    int timeout = 10;
+	    int tries_limit = 10;
 	    sprintf(filename, "%s/meta", path);
 	    while (stat(filename, &statbuf) != 0) {
 		if (errno != ENOENT) {
@@ -511,8 +512,9 @@ dbats_handler *dbats_open(const char *path,
 			filename, strerror(errno));
 		    return NULL;
 		}
-		if (--timeout <= 0) {
-		    dbats_log(LOG_ERROR, "Timeout waiting for %s", filename);
+		if (--tries_limit <= 0) {
+		    dbats_log(LOG_ERROR, "Retry limit exceeded waiting for %s",
+			filename);
 		    return NULL;
 		}
 		sleep(1);
@@ -541,6 +543,8 @@ dbats_handler *dbats_open(const char *path,
 	// 40000 is enough to insert at least 2000000 metric keys.
 	fprintf(file, "set_lk_max_locks 40000\n");
 	fprintf(file, "set_lk_max_objects 40000\n");
+
+	fprintf(file, "set_lk_detect DB_LOCK_YOUNGEST\n");
 
 	fclose(file);
     }
@@ -701,7 +705,7 @@ int dbats_get_start_time(dbats_handler *dh, int bid, uint32_t *start)
     DBT_in(dbt_key, &dbkey, sizeof(dbkey));
     dbt_key.ulen = sizeof(dbkey);
     DBT_null(dbt_data);
-    rc = raw_cursor_get(dh, dh->dbData, dbc, &dbt_key, &dbt_data, DB_SET_RANGE);
+    rc = raw_cursor_get(dh, dh->dbData, dbc, &dbt_key, &dbt_data, DB_SET_RANGE | DB_READ_COMMITTED);
     if (rc == DB_NOTFOUND) goto close;
     if (rc != 0) {
 	dbats_log(LOG_ERROR, "dbats_get_start_time %d: get: %s", bid, db_strerror(rc));
@@ -732,12 +736,12 @@ int dbats_get_end_time(dbats_handler *dh, int bid, uint32_t *end)
     DBT_in(dbt_key, &dbkey, sizeof(dbkey));
     dbt_key.ulen = sizeof(dbkey);
     DBT_null(dbt_data);
-    rc = raw_cursor_get(dh, dh->dbData, dbc, &dbt_key, &dbt_data, DB_SET_RANGE);
+    rc = raw_cursor_get(dh, dh->dbData, dbc, &dbt_key, &dbt_data, DB_SET_RANGE | DB_READ_COMMITTED);
 
     if (rc == 0) {
-	rc = raw_cursor_get(dh, dh->dbData, dbc, &dbt_key, &dbt_data, DB_PREV);
+	rc = raw_cursor_get(dh, dh->dbData, dbc, &dbt_key, &dbt_data, DB_PREV | DB_READ_COMMITTED);
     } else if (rc == DB_NOTFOUND) {
-	rc = raw_cursor_get(dh, dh->dbData, dbc, &dbt_key, &dbt_data, DB_LAST);
+	rc = raw_cursor_get(dh, dh->dbData, dbc, &dbt_key, &dbt_data, DB_LAST | DB_READ_COMMITTED);
     } else {
 	dbats_log(LOG_ERROR, "dbats_get_end_time %d: get: %s", bid, db_strerror(rc));
 	goto close;
@@ -1014,12 +1018,7 @@ int dbats_commit(dbats_handler *dh)
 	}
 
 	for (int bid = 0; bid < dh->cfg.num_bundles; bid++) {
-	    int changed = 0;
-	    for (int f = 0; f < dh->tslice[bid]->num_frags; f++) {
-		if (dh->tslice[bid]->frag[f] && dh->tslice[bid]->frag_changed[f])
-		    changed++;
-	    }
-	    if (changed && dh->tslice[bid]->time < dh->min_keep_time) {
+	    if (dh->changed && dh->tslice[bid]->time < dh->min_keep_time) {
 		dbats_log(LOG_ERROR, "flush_tslice %u: illegal attempt to set "
 		    "value in bundle %d at time %u before series limit %u",
 		    dh->tslice[bid]->time, bid, dh->tslice[bid]->time,
@@ -1032,13 +1031,14 @@ int dbats_commit(dbats_handler *dh)
 
 end:
     for (int bid = 0; bid < dh->cfg.num_bundles; bid++) {
-	if (!dh->cfg.readonly && rc == 0) {
+	if (dh->changed && rc == 0) {
 	    rc = flush_tslice(dh, bid);
 	}
 	if (!dh->cfg.exclusive || !dh->is_open || rc != 0) {
 	    clear_tslice(dh, bid);
 	}
     }
+    dh->changed = 0;
 
     if (rc == 0)
 	return commit_transaction(dh);
@@ -1273,12 +1273,24 @@ int dbats_num_keys(dbats_handler *dh, uint32_t *num_keys)
     return 0;
 }
 
+static void set_priority(DB_TXN *txn, uint32_t priority)
+{
+    int rc;
+
+    rc = txn->set_priority(txn, priority);
+    if (rc != 0) {
+	dbats_log(LOG_ERROR, "set_priority %u: %s", priority, db_strerror(rc));
+    } else {
+	dbats_log(LOG_FINE, "set_priority %u", priority);
+    }
+}
+
 int dbats_select_time(dbats_handler *dh, uint32_t time_value, uint32_t flags)
 {
     int rc;
     uint32_t min_time = 0;
     uint32_t max_time = 0;
-    int timeout = 10;
+    int tries_limit = 60;
 
     dbats_log(LOG_FINE, "select_time %u", time_value);
 
@@ -1296,8 +1308,11 @@ restart:
 	// DB_READ_COMMITTED won't hold a read lock, so won't block anyone.
 	rc = CFG_GET(dh, "min_keep_time", dh->min_keep_time,
 	    dh->serialize ? DB_RMW : DB_READ_COMMITTED);
-	if (rc == DB_LOCK_DEADLOCK && --timeout > 0)
-	    goto retry;
+	if (rc == DB_LOCK_DEADLOCK) {
+	    if (--tries_limit > 0) goto retry;
+	    dbats_log(LOG_ERROR, "select_time %u: too many deadlocks",
+		time_value);
+	}
 	if (rc != 0) goto abort;
 	dbats_log(LOG_FINE, "select_time %u: got %s = %u", time_value,
 	    "min_keep_time", dh->min_keep_time);
@@ -1353,6 +1368,12 @@ restart:
     dh->active_start = min_time;
     dh->active_end = max_time;
 
+    if (!dh->cfg.readonly) {
+	// Make priority depend on time, so a writer of realtime data always
+	// beats a writer of historical data.
+	set_priority(current_txn(dh), dh->tslice[0]->time / dh->bundle[0].period);
+    }
+
     if (!dh->preload)
 	return 0;
 
@@ -1368,8 +1389,11 @@ restart:
 	tslice->num_frags = div_ceil(num_keys, ENTRIES_PER_FRAG);
 	for (uint32_t frag_id = 0; frag_id < tslice->num_frags; frag_id++) {
 	    rc = load_frag(dh, t, bid, frag_id);
-	    if (rc == DB_LOCK_DEADLOCK && --timeout > 0)
-		goto retry;
+	    if (rc == DB_LOCK_DEADLOCK) {
+		if (--tries_limit > 0) goto retry;
+		dbats_log(LOG_ERROR, "select_time %u: too many deadlocks",
+		    time_value);
+	    }
 	    if (rc != 0) goto abort;
 	    if (tslice->frag[frag_id])
 		loaded++;
@@ -1380,19 +1404,22 @@ restart:
 
     for (int frag_id = 0; frag_id < dh->tslice[0]->num_frags; frag_id++) {
 	rc = instantiate_isset_frags(dh, frag_id);
-	if (rc == DB_LOCK_DEADLOCK && --timeout > 0)
-	    goto retry;
+	if (rc == DB_LOCK_DEADLOCK) {
+	    if (--tries_limit > 0) goto retry;
+	    dbats_log(LOG_ERROR, "select_time %u: too many deadlocks",
+		time_value);
+	}
 	if (rc != 0) goto abort;
     }
 
     return 0;
 
 abort:
-    abort_transaction(dh); // tslice txn
+    dbats_abort(dh); // tslice txn
     return rc;
 
 retry:
-    abort_transaction(dh); // tslice txn
+    dbats_abort(dh); // tslice txn
     goto restart;
 }
 
@@ -1706,7 +1733,15 @@ retry:
     // both old and new values)
     memcpy(oldvaluep, valuep, dh->cfg.entry_size);
     vec_set(dh->tslice[0]->is_set[frag_id], offset);
+
+    if (!dh->changed) {
+	// Once we've started writing, increase priority over other processes
+	// that haven't yet done any writing.
+	set_priority(current_txn(dh), (dh->tslice[0]->time + INT32_MAX) / dh->bundle[0].period);
+	dh->changed = 1;
+    }
     dh->tslice[0]->frag_changed[frag_id] = 1;
+
     dbats_log(LOG_VERYFINE, "Succesfully set value "
 	"bid=%d frag_id=%u offset=%" PRIu32 " value_len=%u value=%" PRIval,
 	0, frag_id, offset, dh->cfg.entry_size, valuep[0]);
