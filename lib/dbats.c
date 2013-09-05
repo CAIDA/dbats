@@ -1019,7 +1019,7 @@ int dbats_commit(dbats_handler *dh)
 
 	for (int bid = 0; bid < dh->cfg.num_bundles; bid++) {
 	    if (dh->changed && dh->tslice[bid]->time < dh->min_keep_time) {
-		dbats_log(LOG_ERROR, "flush_tslice %u: illegal attempt to set "
+		dbats_log(LOG_ERROR, "dbats_commit %u: illegal attempt to set "
 		    "value in bundle %d at time %u before series limit %u",
 		    dh->tslice[bid]->time, bid, dh->tslice[bid]->time,
 		    dh->min_keep_time);
