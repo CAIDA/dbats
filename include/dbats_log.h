@@ -29,8 +29,8 @@ extern FILE *dbats_log_file;
 
 #define dbats_log(level, ...) \
     do { \
-	if (level <= dbats_log_level) { \
-	    dbats_log_func(level, __FILE__, __LINE__, __VA_ARGS__); \
+	if ((level) <= dbats_log_level) { \
+	    dbats_log_func((level), __FILE__, __LINE__, __VA_ARGS__); \
 	} \
     } while (0)
 
