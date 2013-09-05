@@ -274,7 +274,8 @@ int main(int argc, char *argv[]) {
 
     dbats_log(LOG_INFO, "Time elapsed: %u sec", elapsed);
     dbats_log(LOG_INFO, "Closing %s", dbats_path);
-    dbats_close(handler);
+    if (dbats_close(handler) != 0)
+	return -1;
     dbats_log(LOG_INFO, "Done");
     return 0;
 }
