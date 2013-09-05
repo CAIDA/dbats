@@ -55,7 +55,7 @@
 
 /* ************************************************** */
 
-#define DBATS_DB_VERSION     4   ///< Version of db format written by this API
+#define DBATS_DB_VERSION     5   ///< Version of db format written by this API
 
 #define DBATS_KEYLEN         128 ///< max length of key name
 
@@ -211,8 +211,8 @@ extern int dbats_get_end_time(dbats_handler *handler, int bid, uint32_t *end);
  *    the bundle, or 0 to keep all points.
  *  @return
  *    - 0 for success;
- *    - EINVAL if bid does not refer to a valid bundle or if the limit is too
- *      small;
+ *    - DB_NOTFOUND if bid does not refer to a valid bundle;
+ *    - EINVAL if the limit is too small;
  *    - other nonzero value for other errors.
  */
 extern int dbats_series_limit(dbats_handler *handler, int bid, int keep);
