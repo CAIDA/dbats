@@ -101,7 +101,8 @@ struct dbats_handler {
     size_t db_get_buf_len;
     DB_TXN *txn[N_TXN];        // stack of transactions ([0] is NULL)
     int n_txn;                 // number of transactions in stack (not incl [0])
-    int n_internal_txn;        // number of internal transactions in stack
+    uint8_t action_in_prog;    // action in progress?
+    uint8_t action_cancelled;  // cancelled due to deadlock
     uint32_t active_start;     // first timestamp in active period
                                // (corresponding to is_set[0])
     uint32_t active_end;       // last timestamp in active period
@@ -318,6 +319,8 @@ static int (raw_db_set)(
     DBT_in(dbt_data, (void*)value, value_len);
 
     if ((rc = db->put(db, current_txn(dh), &dbt_key, &dbt_data, 0)) != 0) {
+	if (dh->action_in_prog && rc == DB_LOCK_DEADLOCK)
+	    dh->action_cancelled = 1;
 	log_db_op(LOG_WARNING, fname, line, dh, db, "db_set", key, key_len, db_strerror(rc));
 	return rc;
     }
@@ -360,6 +363,8 @@ static int (raw_db_get)(const char *fname, int line,
     }
     log_db_op(rc == DB_NOTFOUND ? LOG_FINE : LOG_WARNING, fname, line, dh, db,
 	label, key, key_len, db_strerror(rc));
+    if (dh->action_in_prog && rc == DB_LOCK_DEADLOCK)
+	dh->action_cancelled = 1;
     if (rc == DB_BUFFER_SMALL) {
 	dbats_log(LOG_WARNING, "db_get: had %" PRIu32 ", needed %" PRIu32,
 	    dbt_data.ulen, dbt_data.size);
@@ -390,23 +395,11 @@ static int (raw_cursor_get)(const char *fname, int line,
 	sprintf(label, "cursor_get(%s,%s)", opstr, lockstr);
 	log_db_op(LOG_FINEST, fname, line, dh, db, label, key->data, key->size, "");
     }
-    return dbc->get(dbc, key, data, flags);
+    int rc = dbc->get(dbc, key, data, flags);
+    if (dh->action_in_prog && rc == DB_LOCK_DEADLOCK)
+	dh->action_cancelled = 1;
+    return rc;
 }
-
-/*
-static void raw_db_delete(const dbats_handler *dh, DB *db,
-    const void *key, uint32_t key_len)
-{
-    if (dh->cfg.readonly) {
-	dbats_log(LOG_WARNING, "Unable to delete value (read-only mode)");
-	return EPERM;
-    }
-
-    DBT_in(dbt_key, (void*)key, key_len);
-    if (db->del(db, NULL, &dbt_key, 0) != 0)
-	dbats_log(LOG_WARNING, "Error while deleting key");
-}
-*/
 
 #define CFG_SET(dh, key, val) \
     raw_db_set(dh, dh->dbMeta, key, strlen(key), &val, sizeof(val))
@@ -488,6 +481,12 @@ dbats_handler *dbats_open(const char *path,
 	DB_VERB_FILEOPS | DB_VERB_RECOVERY | DB_VERB_REGISTER, 1);
     dh->dbenv->set_msgfile(dh->dbenv, stderr);
 
+    if ((flags & DBATS_NO_TXN) && (flags & DBATS_EXCLUSIVE)) {
+	dbats_log(LOG_ERROR,
+	    "DBATS_EXCLUSIVE and DBATS_NO_TXN are not compatible");
+	return NULL;
+    }
+
     if (flags & DBATS_CREATE) {
 	if (dh->cfg.readonly) {
 	    dbats_log(LOG_ERROR,
@@ -557,9 +556,9 @@ dbats_handler *dbats_open(const char *path,
     if (!HAVE_SET_LK_EXCLUSIVE && dh->cfg.exclusive) {
 	// emulate exclusive lock with an outer txn
 	if (begin_transaction(dh, "exclusive txn") != 0) return NULL;
-	dh->n_internal_txn++;
     }
     if (begin_transaction(dh, "open txn") != 0) goto abort;
+    dh->action_in_prog = 1;
 
 #define open_db(db,name,type) raw_db_open(dh, &dh->db, name, type, flags, mode)
     if (open_db(dbMeta,    "meta",    DB_BTREE) != 0) goto abort;
@@ -647,7 +646,7 @@ dbats_handler *dbats_open(const char *path,
     return dh;
 
 abort:
-    abort_transaction(dh);
+    dbats_abort(dh);
     return NULL;
 }
 
@@ -884,7 +883,7 @@ int dbats_series_limit(dbats_handler *dh, int bid, int keep)
     return commit_transaction(dh); // "keep txn"
 
 abort:
-    abort_transaction(dh);
+    abort_transaction(dh); // "keep txn"
     return rc;
 }
 
@@ -993,7 +992,7 @@ static void free_isset(dbats_handler *dh)
 int dbats_commit(dbats_handler *dh)
 {
     int rc = 0;
-    if (dh->n_txn <= dh->n_internal_txn) return 0;
+    if (!dh->action_in_prog) return 0;
     dbats_log(LOG_FINE, "dbats_commit %u", dh->tslice[0]->time);
 
     free_isset(dh);
@@ -1033,13 +1032,12 @@ end:
 
     if (rc == 0)
 	return commit_transaction(dh);
-    abort_transaction(dh);
     return rc;
 }
 
 int dbats_abort(dbats_handler *dh)
 {
-    if (dh->n_txn <= dh->n_internal_txn) return 0;
+    if (!dh->action_in_prog) return 0;
     dbats_log(LOG_FINE, "dbats_abort %u", dh->tslice[0]->time);
 
     free_isset(dh);
@@ -1048,22 +1046,31 @@ int dbats_abort(dbats_handler *dh)
 	clear_tslice(dh, bid);
     }
 
+    dh->action_in_prog = 0;
     return abort_transaction(dh);
 }
 
 /*************************************************************************/
 
-void dbats_close(dbats_handler *dh)
+int dbats_close(dbats_handler *dh)
 {
+    int rc;
+    int myrc = 0;
     if (!dh->is_open)
-	return;
+	return EINVAL;
     dh->is_open = 0;
 
-    dbats_commit(dh);
+    if (dh->action_cancelled) {
+	dbats_log(LOG_INFO, "aborting cancelled transaction");
+	rc = dbats_abort(dh);
+    } else if (dh->action_in_prog) {
+	rc = dbats_commit(dh);
+    }
+    if (myrc == 0 && rc != 0) myrc = rc;
 
     if (!HAVE_SET_LK_EXCLUSIVE && dh->cfg.exclusive) {
-	commit_transaction(dh); // exclusive txn
-	dh->n_internal_txn--;
+	rc = commit_transaction(dh); // exclusive txn
+	if (myrc == 0 && rc != 0) myrc = rc;
     }
 
     for (int bid = 0; bid < dh->cfg.num_bundles; bid++) {
@@ -1080,13 +1087,15 @@ void dbats_close(dbats_handler *dh)
     //dh->dbKeyid->close(dh->dbKeyid, 0);
     //dh->dbData->close(dh->dbData, 0);
     //dh->dbIsSet->close(dh->dbIsSet, 0);
-    dh->dbenv->close(dh->dbenv, 0);
+    rc = dh->dbenv->close(dh->dbenv, 0);
+    if (myrc == 0 && rc != 0) myrc = rc;
 
     if (dh->state_decompress)
 	free(dh->state_decompress);
     if (dh->state_compress)
 	free(dh->state_compress);
     free(dh);
+    return myrc;
 }
 
 /*************************************************************************/
@@ -1187,7 +1196,7 @@ static int load_frag(dbats_handler *dh, uint32_t t, int bid,
 	// assert(len == fragsize(dh));
 	dbats_log(LOG_VERYFINE, "decompressed frag t=%u, bid=%u, frag_id=%u: "
 	    "%u -> %u (%.1f%%)",
-	    t, bid, frag_id, dh->db_get_buf_len, len, len*100.0/value_len);
+	    t, bid, frag_id, value_len-1, len, 100.0*len/(value_len-1));
 
     } else {
 	// copy fragment
@@ -1293,6 +1302,7 @@ int dbats_select_time(dbats_handler *dh, uint32_t time_value, uint32_t flags)
 restart:
     if ((rc = begin_transaction(dh, "tslice txn")) != 0)
 	return rc;
+    dh->action_in_prog = 1;
 
     if (!dh->cfg.readonly) {
 	// DB_RMW will block other writers trying to select_time().
@@ -1445,6 +1455,8 @@ int dbats_get_key_id(dbats_handler *dh, const char *key,
 	rc = dh->dbKeyid->put(dh->dbKeyid, current_txn(dh), &dbt_keyrecno,
 	    &dbt_keyname, DB_APPEND);
 	if (rc != 0) {
+	    if (dh->action_in_prog && rc == DB_LOCK_DEADLOCK)
+		dh->action_cancelled = 1;
 	    dbats_log(LOG_ERROR, "Error creating keyid for %s: %s",
 		key, db_strerror(rc));
 	    return rc;
@@ -1460,6 +1472,8 @@ int dbats_get_key_id(dbats_handler *dh, const char *key,
 	rc = dh->dbKeyname->put(dh->dbKeyname, current_txn(dh), &dbt_keyname,
 	    &dbt_keyid, DB_NOOVERWRITE);
 	if (rc != 0) {
+	    if (dh->action_in_prog && rc == DB_LOCK_DEADLOCK)
+		dh->action_cancelled = 1;
 	    dbats_log(LOG_ERROR, "Error creating keyname %s -> %u: %s",
 		key, *key_id_p, db_strerror(rc));
 	    return rc;
@@ -1551,8 +1565,8 @@ int dbats_set(dbats_handler *dh, uint32_t key_id, const dbats_value *valuep)
 	return EPERM;
     }
 
-    if (dh->n_txn <= dh->n_internal_txn) {
-	dbats_log(LOG_ERROR, "dbats_set: no transaction");
+    if (!dh->tslice[0]->time || !dh->action_in_prog) {
+	dbats_log(LOG_ERROR, "dbats_set() without dbats_select_time()");
 	return -1;
     }
 
@@ -1766,8 +1780,8 @@ int dbats_get(dbats_handler *dh, uint32_t key_id,
 	return -1;
     }
 
-    if (dh->n_txn <= dh->n_internal_txn) {
-	dbats_log(LOG_ERROR, "dbats_get: no transaction");
+    if (!dh->tslice[0]->time || !dh->action_in_prog) {
+	dbats_log(LOG_ERROR, "dbats_get() without dbats_select_time()");
 	return -1;
     }
 
