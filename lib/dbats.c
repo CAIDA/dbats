@@ -559,6 +559,7 @@ dbats_handler *dbats_open(const char *path,
     }
     if (begin_transaction(dh, "open txn") != 0) goto abort;
     dh->action_in_prog = 1;
+    dh->action_cancelled = 0;
 
 #define open_db(db,name,type) raw_db_open(dh, &dh->db, name, type, flags, mode)
     if (open_db(dbMeta,    "meta",    DB_BTREE) != 0) goto abort;
@@ -993,6 +994,7 @@ int dbats_commit(dbats_handler *dh)
 {
     int rc = 0;
     if (!dh->action_in_prog) return 0;
+    if (dh->action_cancelled) return DB_LOCK_DEADLOCK;
     dbats_log(LOG_FINE, "dbats_commit %u", dh->tslice[0]->time);
 
     free_isset(dh);
@@ -1047,6 +1049,7 @@ int dbats_abort(dbats_handler *dh)
     }
 
     dh->action_in_prog = 0;
+    dh->action_cancelled = 0;
     return abort_transaction(dh);
 }
 
@@ -1303,6 +1306,7 @@ restart:
     if ((rc = begin_transaction(dh, "tslice txn")) != 0)
 	return rc;
     dh->action_in_prog = 1;
+    dh->action_cancelled = 0;
 
     if (!dh->cfg.readonly) {
 	// DB_RMW will block other writers trying to select_time().
