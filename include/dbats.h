@@ -33,12 +33,14 @@
  *  - Open a database with dbats_open().
  *  - If this is a new database, define aggregate time series with
  *    dbats_aggregate().
- *  - Optionally, dbats_commit().
+ *  - dbats_commit().
  *  - Loop:
  *    - Select a working time slice with dbats_select_time().
  *    - Write primary values for multiple keys with dbats_set(), and/or
  *    - read primary and/or aggregate values for multiple keys with dbats_get().
- *    - Optionally, dbats_commit().
+ *    - dbats_commit().
+ *    - If either of dbats_set() or dbats_commit() deadlock, repeat the loop
+ *      with the same time slice and data.
  *  - Close the database with dbats_close().
  *
  *  Functions that return an int will return one of the following types of
@@ -47,6 +49,20 @@
  *    - a (positive) E* constant defined in <errno.h> for a system error
  *    - a (negative) DB_* constant defined in <db.h> for a DB error
  *    - -1 for other error
+ *
+ *  If multiple processes are accessing the same DBATS database concurrently,
+ *  and the database was opened with DBATS_MULTIWRITE the processes may
+ *  deadlock.  When this happens, one or more operations will be cancelled so
+ *  that another may proceed.  The cancelled operations will return
+ *  DB_LOCK_DEADLOCK.  After a function in a transaction returns
+ *  DB_LOCK_DEADLOCK, no other dbats calls are allowed on that dbats_handle
+ *  until dbats_abort() is called to clean up the failed transaction.  When an
+ *  operation needs to be cancelled, one with the lowest priority is
+ *  preferred.  There are three priority categories, from lowest to highest:
+ *  read only; writable, but haven't yet called dbats_set(); writable, and
+ *  have called dbats_set().  Within the two writable categories, priority
+ *  depends on timestamp, so that inserts of "live" data have higher priority
+ *  than inserts of historic data.
 */
 
 #include <inttypes.h>
@@ -155,8 +171,9 @@ extern dbats_handler *dbats_open(const char *dbats_path,
  *  Automatically calls dbats_commit() if needed to commit any operations since
  *  the last call to dbats_open() or dbats_select_time().
  *  @param[in] handler A dbats_handler created by dbats_open().
+ *  @return 0 for success, nonzero for error.
  */
-extern void dbats_close(dbats_handler *handler);
+extern int dbats_close(dbats_handler *handler);
 
 /** Defines an aggregate.
  *  Should be called after opening a database with dbats_open() but before
@@ -180,7 +197,7 @@ extern int dbats_aggregate(dbats_handler *handler, int func, int steps);
  *  @param[in] handler A dbats_handler created by dbats_open().
  *  @param[in] bid bundle id (0 for the primary bundle).
  *  @param[out] start A pointer to a uint32_t that will be filled in with
- *    the time of the earliest entry in the bundle.
+ *    the time of the earliest entry in the bundle, or 0 if an error occurred.
  *  @return 0 for success, DB_NOTFOUND if the bundle is empty,
  *    or other nonzero value for error.
  */
@@ -190,7 +207,7 @@ extern int dbats_get_start_time(dbats_handler *handler, int bid, uint32_t *start
  *  @param[in] handler A dbats_handler created by dbats_open().
  *  @param[in] bid bundle id (0 for the primary bundle).
  *  @param[out] end A pointer to a uint32_t that will be filled in with
- *    the time of the latest entry in the bundle.
+ *    the time of the latest entry in the bundle, or 0 if an error occurred.
  *  @return 0 for success, DB_NOTFOUND if the bundle is empty,
  *    or other nonzero value for error.
  */
@@ -230,25 +247,33 @@ extern uint32_t dbats_normalize_time(const dbats_handler *handler,
     int bid, uint32_t *t);
 
 /** Select a time period to operate on in subsequent calls to dbats_get() and
- *  dbats_set().
+ *  dbats_set(), and begin a new transaction.
  *  This function automatically calls dbats_commit() if needed to commit any
  *  operations since the last call to dbats_open() or dbats_select_time().
  *  Then this function selects a time period and begins a new transaction.
  *  All subsequent calls to dbats_get() and dbats_set() will take place in this
  *  transaction, up to the next call to dbats_select_time(), dbats_commit(),
  *  dbats_abort(), or dbats_close().
- *  If this function fails for any reason, it returns nonzero and a
- *  transaction is not begun.
+ *  If this function fails for any reason, it returns nonzero without
+ *  beginning a transaction.
+ *  If multiple processes are writing to the database, this function may block
+ *  until those other processes complete their transactions, especially if the
+ *  database was not opened with DBATS_MULTIWRITE.
+ *  If a deadlock occurs within this function, it will automatically retry, up
+ *  to a limit; if this limit is reached, this function will return
+ *  DB_LOCK_DEADLOCK without beginning a transaction (so dbats_abort() is not
+ *  needed).
  *  @param[in] handler A dbats_handler created by dbats_open().
  *  @param[in] time_value the desired time, which will be rounded down by
  *    dbats_normalize_time().
  *  @param[in] flags a bitwise-OR combination of any of the following:
  *    - DBATS_PRELOAD - load data immediately instead of waiting until it's
- *      needed (rarely useful)
+ *      needed (can reduce the chances of deadlock)
  *  @return
  *    - 0 for success;
  *    - EINVAL if the database was not opened with DBATS_READONLY and the
  *      selected time is outside the keep limit set by dbats_series_limit();
+ *    - DB_LOCK_DEADLOCK if the operation was cancelled to resolve a deadlock;
  *    - other nonzero value for other errors.
  */
 extern int dbats_select_time(dbats_handler *handler,
@@ -261,7 +286,10 @@ extern int dbats_select_time(dbats_handler *handler,
  *  the database.  After calling this function, you must call
  *  dbats_select_time() again before you can call dbats_set() or dbats_get().
  *  @param[in] handler A dbats_handler created by dbats_open().
- *  @return 0 for success, nonzero for error.
+ *  @return
+ *    - 0 for success;
+ *    - DB_LOCK_DEADLOCK if the operation was cancelled to resolve a deadlock;
+ *    - other nonzero value for other errors.
  */
 extern int dbats_commit(dbats_handler *handler);
 
@@ -303,6 +331,14 @@ extern int dbats_get_key_name(dbats_handler *handler, uint32_t key_id,
  *  time selected by dbats_select_time().
  *  All aggregate values whose time ranges contain this primary data point
  *  will also be updated.
+ *  Note that data written is not guaranteed to be safely stored in the
+ *  database until dbats_commit() is called and returns successfully.
+ *  In particular, when multiple processes are writing to the database and
+ *  the database was opened with DBATS_MULTIWRITE, the probability of losing
+ *  data due to deadlock in dbats_set() or dbats_commit() is high, so you are
+ *  advised to hold on to a copy of your original data until dbats_commit()
+ *  succeeds, so that you can repeat dbats_select_time() and dbats_set() if
+ *  needed.
  *  @param[in] handler A dbats_handler created by dbats_open().
  *  @param[in] key_id the id of the key.
  *  @param[in] valuep a pointer to an array of values_per_entry dbats_value
@@ -312,6 +348,7 @@ extern int dbats_get_key_name(dbats_handler *handler, uint32_t key_id,
  *    - EPERM if the handler is not open or was opened with DBATS_READONLY;
  *    - EEXIST if a value already exists for the given time and key and handler
  *      was not opened with DBATS_UPDATABLE;
+ *    - DB_LOCK_DEADLOCK if the operation was cancelled to resolve a deadlock;
  *    - other nonzero value for other errors.
  */
 extern int dbats_set(dbats_handler *handler, uint32_t key_id,
@@ -335,6 +372,7 @@ extern int dbats_set(dbats_handler *handler, uint32_t key_id,
  *    - DB_NOTFOUND if the key does not exist and DBATS_CREATE flag was not set;
  *    - EEXIST if a value already exists for the given time and key, and
  *      handler was not opened with DBATS_UPDATABLE;
+ *    - DB_LOCK_DEADLOCK if the operation was cancelled to resolve a deadlock;
  *    - other nonzero value for other errors.
  */
 extern int dbats_set_by_key (dbats_handler *handler, const char *key,
@@ -348,7 +386,11 @@ extern int dbats_set_by_key (dbats_handler *handler, const char *key,
  *    *valuepp will point to an array of values_per_entry dbats_values
  *    read from the database.
  *  @param[in] bid bundle id (0 for the primary bundle).
- *  @return 0 for success, nonzero for error.
+ *  @return
+ *    - 0 for success;
+ *    - DB_NOTFOUND if the key does not exist;
+ *    - DB_LOCK_DEADLOCK if the operation was cancelled to resolve a deadlock;
+ *    - other nonzero value for other errors.
  */
 extern int dbats_get(dbats_handler *handler, uint32_t key_id,
     const dbats_value **valuepp, int bid);
@@ -362,7 +404,11 @@ extern int dbats_get(dbats_handler *handler, uint32_t key_id,
  *    *valuepp will point to an array of values_per_entry double values
  *    read from the database.
  *  @param[in] bid bundle id
- *  @return 0 for success, nonzero for error.
+ *  @return
+ *    - 0 for success;
+ *    - DB_NOTFOUND if the key does not exist;
+ *    - DB_LOCK_DEADLOCK if the operation was cancelled to resolve a deadlock;
+ *    - other nonzero value for other errors.
  */
 extern int dbats_get_double(dbats_handler *handler, uint32_t key_id,
     const double **valuepp, int bid);
@@ -378,7 +424,11 @@ extern int dbats_get_double(dbats_handler *handler, uint32_t key_id,
  *    *valuepp will point to an array of values_per_entry dbats_values
  *    read from the database.
  *  @param[in] bid bundle id (0 for the primary bundle).
- *  @return 0 for success, nonzero for error.
+ *  @return
+ *    - 0 for success;
+ *    - DB_NOTFOUND if the key does not exist;
+ *    - DB_LOCK_DEADLOCK if the operation was cancelled to resolve a deadlock;
+ *    - other nonzero value for other errors.
  */
 extern int dbats_get_by_key(dbats_handler *handler, const char *key,
     const dbats_value **valuepp, int bid);
