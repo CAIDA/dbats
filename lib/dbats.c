@@ -696,6 +696,8 @@ int dbats_get_start_time(dbats_handler *dh, int bid, uint32_t *start)
 {
     int rc;
     DBC *dbc;
+
+    *start = 0;
     rc = dh->dbData->cursor(dh->dbData, current_txn(dh), &dbc, 0);
     if (rc != 0) {
 	dbats_log(LOG_ERROR, "dbats_get_start_time %d: cursor: %s", bid, db_strerror(rc));
@@ -706,27 +708,24 @@ int dbats_get_start_time(dbats_handler *dh, int bid, uint32_t *start)
     dbt_key.ulen = sizeof(dbkey);
     DBT_null(dbt_data);
     rc = raw_cursor_get(dh, dh->dbData, dbc, &dbt_key, &dbt_data, DB_SET_RANGE | DB_READ_COMMITTED);
-    if (rc == DB_NOTFOUND) goto close;
-    if (rc != 0) {
+    if (rc == DB_NOTFOUND) {
+	// do nothing
+    } else if (rc != 0) {
 	dbats_log(LOG_ERROR, "dbats_get_start_time %d: get: %s", bid, db_strerror(rc));
-	goto close;
-    }
-    *start = ntohl(dbkey.time);
-
-close:
-    rc = dbc->close(dbc);
-    if (rc != 0) {
-	dbats_log(LOG_ERROR, "dbats_get_start_time %d: close: %s", bid, db_strerror(rc));
-	return rc;
+    } else { // success
+	*start = ntohl(dbkey.time);
     }
 
-    return 0;
+    dbc->close(dbc);
+    return rc;
 }
 
 int dbats_get_end_time(dbats_handler *dh, int bid, uint32_t *end)
 {
     int rc;
     DBC *dbc;
+
+    *end = 0;
     rc = dh->dbData->cursor(dh->dbData, current_txn(dh), &dbc, 0);
     if (rc != 0) {
 	dbats_log(LOG_ERROR, "dbats_get_end_time %d: cursor: %s", bid, db_strerror(rc));
@@ -744,29 +743,21 @@ int dbats_get_end_time(dbats_handler *dh, int bid, uint32_t *end)
 	rc = raw_cursor_get(dh, dh->dbData, dbc, &dbt_key, &dbt_data, DB_LAST | DB_READ_COMMITTED);
     } else {
 	dbats_log(LOG_ERROR, "dbats_get_end_time %d: get: %s", bid, db_strerror(rc));
-	goto close;
-    }
-
-    if (rc == DB_NOTFOUND)
-	goto close;
-    if (rc != 0) {
-	dbats_log(LOG_ERROR, "dbats_get_end_time %d: prev: %s", bid, db_strerror(rc));
-	goto close;
-    }
-    if (ntohl(dbkey.bid) != bid) {
-	rc = DB_NOTFOUND;
-	goto close;
-    }
-
-    *end = ntohl(dbkey.time);
-
-close:
-    rc = dbc->close(dbc);
-    if (rc != 0) {
-	dbats_log(LOG_ERROR, "dbats_get_end_time %d: close: %s", bid, db_strerror(rc));
+	dbc->close(dbc);
 	return rc;
     }
 
+    if (rc == DB_NOTFOUND) {
+	// do nothing
+    } else if (rc != 0) {
+	dbats_log(LOG_ERROR, "dbats_get_end_time %d: prev: %s", bid, db_strerror(rc));
+    } else if (ntohl(dbkey.bid) != bid) {
+	rc = DB_NOTFOUND;
+    } else { // success
+	*end = ntohl(dbkey.time);
+    }
+
+    dbc->close(dbc);
     return rc;
 }
 
