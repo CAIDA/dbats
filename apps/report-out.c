@@ -150,12 +150,17 @@ int main(int argc, char *argv[]) {
     out = stdout;
     run_start = time(NULL);
 
-    if (outtype == OT_GNUPLOT) {
+    uint32_t end = opt_end;
+    if (end == 0) {
+	dbats_get_end_time(handler, 0, &end);
+	if (end == 0) {
+	    dbats_log(LOG_INFO, "No data");
+	    exit(0);
+	}
+    }
 
-	uint32_t end = opt_end;
+    if (outtype == OT_GNUPLOT) {
 	uint32_t begin = opt_begin;
-	if (end == 0)
-	    dbats_get_end_time(handler, 0, &end);
 	if (begin == 0) {
 	    // find earliest start time of all bundles
 	    dbats_get_start_time(handler, 0, &begin);
@@ -198,9 +203,6 @@ int main(int argc, char *argv[]) {
 	bundle = dbats_get_bundle_info(handler, sid);
 	uint32_t t;
 
-	uint32_t end = opt_end;
-	if (end == 0)
-	    dbats_get_end_time(handler, sid, &end);
 	uint32_t begin = opt_begin;
 	if (begin == 0)
 	    dbats_get_start_time(handler, sid, &begin);
