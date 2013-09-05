@@ -1,6 +1,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <db.h> // for DB_LOCK_DEADLOCK
 #include "dbats.h"
 
 static char *progname = 0;
@@ -18,7 +19,47 @@ static void help(void) {
     exit(-1);
 }
 
+struct entry {
+    uint32_t key_id;
+    dbats_value value;
+};
 char *keys[10000000];
+struct entry data[10000000];
+
+static void write_data(dbats_handler *handler, int select_flags, uint32_t t,
+    struct entry *dat, int n_data)
+{
+    int rc;
+retry:
+    dbats_log(LOG_INFO, "select time %u", t);
+    rc = dbats_select_time(handler, t, select_flags);
+    if (rc != 0) {
+	dbats_log(LOG_ERROR, "error in dbats_select_time()");
+	exit(-1);
+    }
+    for (int i = 0; i < n_data; i++) {
+	rc = dbats_set(handler, dat[i].key_id, &dat[i].value);
+	if (rc != 0) {
+	    dbats_abort(handler);
+	    if (rc == DB_LOCK_DEADLOCK) {
+		dbats_log(LOG_WARNING, "deadlock in dbats_set()");
+		goto retry;
+	    }
+	    dbats_log(LOG_ERROR, "error in dbats_set()");
+	    exit(-1);
+	}
+    }
+    rc = dbats_commit(handler);
+    if (rc != 0) {
+	dbats_abort(handler);
+	if (rc == DB_LOCK_DEADLOCK) {
+	    dbats_log(LOG_WARNING, "deadlock in dbats_commit()");
+	    goto retry;
+	}
+	dbats_log(LOG_ERROR, "error in dbats_commit()");
+	exit(-1);
+    }
+}
 
 int main(int argc, char *argv[]) {
     char *dbats_path;
@@ -34,6 +75,7 @@ int main(int argc, char *argv[]) {
 
     uint32_t last_t = 0;
     uint32_t t;
+    int n_data = 0;
     dbats_value value;
     char key[128];
 
@@ -100,10 +142,9 @@ int main(int argc, char *argv[]) {
 	if (n != 3) break;
 
 	if (t != last_t) {
-	    if (!init_only) {
-		dbats_log(LOG_INFO, "select time %u", t);
-		if (dbats_select_time(handler, t, select_flags) != 0)
-		    return(-1);
+	    if (n_data > 0) {
+		write_data(handler, select_flags, last_t, data, n_data);
+		n_data = 0;
 	    }
 	    key_id = 0;
 	}
@@ -119,10 +160,16 @@ int main(int argc, char *argv[]) {
 	}
 
 	if (!init_only) {
-	    if (dbats_set(handler, key_id, &value) != 0)
-		return -1;
+	    data[n_data].key_id = key_id;
+	    data[n_data].value = value;
+	    n_data++;
 	}
 	key_id++;
+    }
+
+    if (n_data > 0) {
+	write_data(handler, select_flags, last_t, data, n_data);
+	n_data = 0;
     }
 
     elapsed = time(NULL) - run_start;
