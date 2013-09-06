@@ -1030,10 +1030,16 @@ end:
 	    clear_tslice(dh, bid);
 	}
     }
-    dh->changed = 0;
 
     if (rc == 0)
-	return commit_transaction(dh);
+	rc = commit_transaction(dh);
+
+    if (rc == 0) {
+	dh->changed = 0;
+	dh->action_in_prog = 0;
+	dh->action_cancelled = 0;
+    }
+
     return rc;
 }
 
@@ -1048,6 +1054,7 @@ int dbats_abort(dbats_handler *dh)
 	clear_tslice(dh, bid);
     }
 
+    dh->changed = 0;
     dh->action_in_prog = 0;
     dh->action_cancelled = 0;
     return abort_transaction(dh);
@@ -1057,7 +1064,7 @@ int dbats_abort(dbats_handler *dh)
 
 int dbats_close(dbats_handler *dh)
 {
-    int rc;
+    int rc = 0;
     int myrc = 0;
     if (!dh->is_open)
 	return EINVAL;
