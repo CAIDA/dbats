@@ -327,7 +327,8 @@ extern int dbats_abort(dbats_handler *handler);
 
 /** Get the id of a new or existing key.
  *  The key must already exist unless the DBATS_CREATE flag is given.
- *  When creating multiple keys, it is faster to do so inside a transaction.
+ *  When getting or creating multiple keys, it is faster to do it with
+ *  dbats_bulk_get_key_id().
  *  @param[in] handler A dbats_handler created by dbats_open().
  *  @param[in] key the name of the key.
  *  @param[out] key_id_p a pointer to a uint32_t where the id for key will be
@@ -339,6 +340,21 @@ extern int dbats_abort(dbats_handler *handler);
  */
 extern int dbats_get_key_id(dbats_handler *handler, const char *key,
     uint32_t *key_id_p, uint32_t flags);
+
+/** Get the ids of a large number of new or existing keys.
+ *  The keys must already exist unless the DBATS_CREATE flag is given.
+ *  @param[in] handler A dbats_handler created by dbats_open().
+ *  @param[in] n_keys the number of keys
+ *  @param[in] keys an array of key names
+ *  @param[out] key_ids an array of uint32_t where the ids for
+ *    keys will be written.
+ *  @param[in] flags a bitwise-OR combination of any of the following:
+ *    - DBATS_CREATE - create any key that does not already exist.
+ *  @return 0 for success, DB_NOTFOUND if any key does not exist and
+ *    DBATS_CREATE flag was not set, or other nonzero value for error.
+ */
+extern int dbats_bulk_get_key_id(dbats_handler *handler, uint32_t n_keys,
+    const char * const *keys, uint32_t *key_ids, uint32_t flags);
 
 /** Get the name of an existing key.
  *  @param[in] handler A dbats_handler created by dbats_open().

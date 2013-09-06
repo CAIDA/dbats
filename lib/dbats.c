@@ -1437,62 +1437,75 @@ retry:
 
 /*************************************************************************/
 
-int dbats_get_key_id(dbats_handler *dh, const char *key,
-    uint32_t *key_id_p, uint32_t flags)
+int dbats_bulk_get_key_id(dbats_handler *dh, uint32_t n_keys,
+    const char * const *keys, uint32_t *key_ids, uint32_t flags)
 {
     int rc;
 
-    rc = raw_db_get(dh, dh->dbKeyname, key, strlen(key), key_id_p,
-	sizeof(*key_id_p), NULL, DB_READ_COMMITTED);
-    if (rc == 0) {
-	// found it
-	dbats_log(LOG_FINEST, "Found key #%u: %s", *key_id_p, key);
-	return 0;
+    begin_transaction(dh, "key txn");
 
-    } else if (rc != DB_NOTFOUND) {
-	// error
-	return rc;
+    for (int i = 0; i < n_keys; i++) {
+	rc = raw_db_get(dh, dh->dbKeyname, keys[i], strlen(keys[i]),
+	    &key_ids[i], sizeof(key_ids[i]), NULL, 0);
+	if (rc == 0) {
+	    // found it
+	    dbats_log(LOG_FINEST, "Found key #%u: %s", key_ids[i], keys[i]);
 
-    } else if (!(flags & DBATS_CREATE)) {
-	// didn't find, and can't create
-	dbats_log(LOG_FINE, "Key not found: %s", key);
-	return rc;
+	} else if (rc != DB_NOTFOUND) {
+	    // error
+	    goto abort;
 
-    } else {
-	// create
-	db_recno_t recno;
-	DBT_in(dbt_keyname, (void*)key, strlen(key));
-	DBT_out(dbt_keyrecno, &recno, sizeof(recno)); // put() will fill recno
-	rc = dh->dbKeyid->put(dh->dbKeyid, current_txn(dh), &dbt_keyrecno,
-	    &dbt_keyname, DB_APPEND);
-	if (rc != 0) {
-	    if (dh->action_in_prog && rc == DB_LOCK_DEADLOCK)
-		dh->action_cancelled = 1;
-	    dbats_log(LOG_ERROR, "Error creating keyid for %s: %s",
-		key, db_strerror(rc));
-	    return rc;
+	} else if (!(flags & DBATS_CREATE)) {
+	    // didn't find, and can't create
+	    dbats_log(LOG_FINE, "Key not found: %s", keys[i]);
+	    goto abort;
+
+	} else {
+	    // create
+	    db_recno_t recno;
+	    DBT_in(dbt_keyname, (void*)keys[i], strlen(keys[i]));
+	    DBT_out(dbt_keyrecno, &recno, sizeof(recno)); // put() will fill recno
+	    rc = dh->dbKeyid->put(dh->dbKeyid, current_txn(dh), &dbt_keyrecno,
+		&dbt_keyname, DB_APPEND);
+	    if (rc != 0) {
+		if (dh->action_in_prog && rc == DB_LOCK_DEADLOCK)
+		    dh->action_cancelled = 1;
+		dbats_log(LOG_ERROR, "Error creating keyid for %s: %s",
+		    keys[i], db_strerror(rc));
+		goto abort;
+	    }
+	    key_ids[i] = recno - 1;
+	    if (key_ids[i] >= MAX_NUM_FRAGS * ENTRIES_PER_FRAG) {
+		dbats_log(LOG_ERROR, "Out of space for key %s", keys[i]);
+		rc = ENOMEM;
+		goto abort;
+	    }
+
+	    DBT_in(dbt_keyid, &key_ids[i], sizeof(key_ids[i]));
+	    rc = dh->dbKeyname->put(dh->dbKeyname, current_txn(dh),
+		&dbt_keyname, &dbt_keyid, DB_NOOVERWRITE);
+	    if (rc != 0) {
+		if (dh->action_in_prog && rc == DB_LOCK_DEADLOCK)
+		    dh->action_cancelled = 1;
+		dbats_log(LOG_ERROR, "Error creating keyname %s -> %u: %s",
+		    keys[i], key_ids[i], db_strerror(rc));
+		goto abort;
+	    }
+	    dbats_log(LOG_FINEST, "Assigned key #%u: %s", key_ids[i], keys[i]);
 	}
-	*key_id_p = recno - 1;
-	if (*key_id_p >= MAX_NUM_FRAGS * ENTRIES_PER_FRAG) {
-	    dbats_log(LOG_ERROR, "Out of space for key %s", key);
-	    rc = dh->dbKeyid->del(dh->dbKeyid, current_txn(dh), &dbt_keyrecno, 0);
-	    return ENOMEM;
-	}
-
-	DBT_in(dbt_keyid, key_id_p, sizeof(*key_id_p));
-	rc = dh->dbKeyname->put(dh->dbKeyname, current_txn(dh), &dbt_keyname,
-	    &dbt_keyid, DB_NOOVERWRITE);
-	if (rc != 0) {
-	    if (dh->action_in_prog && rc == DB_LOCK_DEADLOCK)
-		dh->action_cancelled = 1;
-	    dbats_log(LOG_ERROR, "Error creating keyname %s -> %u: %s",
-		key, *key_id_p, db_strerror(rc));
-	    return rc;
-	}
-	dbats_log(LOG_FINEST, "Assigned key #%u: %s", *key_id_p, key);
-
-	return 0;
     }
+
+    rc = commit_transaction(dh); // key txn
+    if (rc == 0) return 0;
+abort:
+    abort_transaction(dh); // key txn
+    return rc;
+}
+
+int dbats_get_key_id(dbats_handler *dh, const char *key,
+    uint32_t *key_id_p, uint32_t flags)
+{
+    return dbats_bulk_get_key_id(dh, 1, &key, key_id_p, flags);
 }
 
 int dbats_get_key_name(dbats_handler *dh, uint32_t key_id, char *namebuf)
