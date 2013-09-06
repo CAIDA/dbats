@@ -1359,12 +1359,13 @@ restart:
 
 	if (dh->cfg.exclusive) {
 	    if (tslice->time == t) {
+		// keep relevant fragments
 		dbats_log(LOG_FINE, "select_time %u, bid=%d: already loaded",
 		    t, bid);
-		continue;
+	    } else {
+		// free obsolete fragments
+		clear_tslice(dh, bid);
 	    }
-	    // free obsolete fragments
-	    clear_tslice(dh, bid);
 	}
 
 	tslice->time = t;
