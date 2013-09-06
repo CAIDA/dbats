@@ -257,8 +257,6 @@ static int raw_db_open(dbats_handler *dh, DB **dbp, const char *name,
     }
 
     uint32_t dbflags = 0;
-    if (!dh->cfg.exclusive)
-	dbflags |= DB_THREAD;
     if (flags & DBATS_CREATE)
 	dbflags |= DB_CREATE;
     if (flags & DBATS_READONLY)
@@ -454,7 +452,7 @@ dbats_handler *dbats_open(const char *path,
     int rc;
     int mode = 00666;
     uint32_t dbflags = DB_INIT_MPOOL | DB_INIT_LOCK | DB_INIT_LOG |
-	DB_INIT_TXN | DB_THREAD | DB_REGISTER | DB_RECOVER | DB_CREATE;
+	DB_INIT_TXN | DB_REGISTER | DB_RECOVER | DB_CREATE;
     int is_new = 0;
 
     dbats_handler *dh = ecalloc(1, sizeof(dbats_handler), "dh");
