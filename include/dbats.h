@@ -254,6 +254,23 @@ extern int dbats_get_end_time(dbats_handler *handler, int bid, uint32_t *end);
  */
 extern int dbats_series_limit(dbats_handler *handler, int bid, int keep);
 
+/** Find a bundle covering a time range.
+ *  Find the bundle that best covers the time range starting at
+ *  <code>start</code>.
+ *  Only the primary bundle (0) and bundles with aggregation function
+ *  <code>func</code> are considered.
+ *  A bundle that starts at or before <code>start</code>
+ *  is better than one that doesn't; if two bundles both start after
+ *  <code>start</code>, the one that starts earlier is better.
+ *  In the event of a tie, the bundle with higher resolution (shorter period)
+ *  is better.
+ *  @param[in] handler A dbats_handler created by dbats_open().
+ *  @param[in] func aggregation function
+ *  @param[in] start beginning of the time range
+ *  @return the bundle id of the best bundle
+ */
+extern int dbats_best_bundle(dbats_handler *handler, uint32_t func, uint32_t start);
+
 /** Round a time value down to a multiple of a bundle's period.
  *  @param[in] handler A dbats_handler created by dbats_open().
  *  @param[in] bid bundle id (0 for the primary bundle).
@@ -315,11 +332,11 @@ extern int dbats_select_time(dbats_handler *handler,
  */
 extern int dbats_commit(dbats_handler *handler);
 
-/** Abort the transaction in progress (since the last dbats_select_time()),
- *  discarding any pending writes and releasing any associated database locks
- *  and other resources.  After calling this function, you must call
- *  dbats_select_time() to begin a new transaction before you can call
- *  dbats_set() or dbats_get().
+/** Abort a transaction in progress (begun by dbats_open() or
+ *  dbats_select_time()), undoing all changes made during the transaction and
+ *  releasing any associated database locks and other resources.  After calling
+ *  this function, you must call dbats_select_time() to begin a new transaction
+ *  before you can call dbats_set() or dbats_get().
  *  @param[in] handler A dbats_handler created by dbats_open().
  *  @return 0 for success, nonzero for error.
  */
