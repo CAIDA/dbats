@@ -40,7 +40,7 @@ int main(int argc, char *argv[]) {
     char *dbats_path;
     dbats_handler *handler;
     uint32_t period = 60;
-    int open_flags = 0;
+    int open_flags = DBATS_READONLY;
     progname = argv[0];
     int rc = 0;
     const dbats_config *cfg;
