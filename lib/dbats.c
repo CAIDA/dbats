@@ -561,12 +561,6 @@ dbats_handler *dbats_open(const char *path,
 
 #define open_db(db,name,type) raw_db_open(dh, &dh->db, name, type, flags, mode)
     if (open_db(dbMeta,    "meta",    DB_BTREE) != 0) goto abort;
-    if (open_db(dbBundle,  "bundle",  DB_BTREE) != 0) goto abort;
-    if (open_db(dbKeyname, "keyname", DB_BTREE) != 0) goto abort;
-    if (open_db(dbKeyid,   "keyid",   DB_RECNO) != 0) goto abort;
-    if (open_db(dbData,    "data",    DB_BTREE) != 0) goto abort;
-    if (open_db(dbIsSet,   "is_set",  DB_BTREE) != 0) goto abort;
-#undef open_db
 
     dh->cfg.entry_size = sizeof(dbats_value); // for db_get_buf_len
 
@@ -590,13 +584,20 @@ dbats_handler *dbats_open(const char *path,
     initcfg(period,           "period",            period);
     initcfg(values_per_entry, "values_per_entry",  values_per_entry);
 
-#undef initcfg
-
     if (dh->cfg.version > DBATS_DB_VERSION) {
 	dbats_log(LOG_ERROR, "database version %d > library version %d",
 	    dh->cfg.version, DBATS_DB_VERSION);
 	return NULL;
     }
+
+    if (dh->cfg.version >= 5)
+	if (open_db(dbBundle,  "bundle",  DB_BTREE) != 0) goto abort;
+    if (open_db(dbKeyname, "keyname", DB_BTREE) != 0) goto abort;
+    if (open_db(dbKeyid,   "keyid",   DB_RECNO) != 0) goto abort;
+    if (open_db(dbData,    "data",    DB_BTREE) != 0) goto abort;
+    if (open_db(dbIsSet,   "is_set",  DB_BTREE) != 0) goto abort;
+#undef open_db
+#undef initcfg
 
     dh->bundle = emalloc(MAX_NUM_BUNDLES * sizeof(*dh->bundle), "dh->bundle");
     if (!dh->bundle) return NULL;
@@ -757,6 +758,26 @@ int dbats_get_end_time(dbats_handler *dh, int bid, uint32_t *end)
 
     dbc->close(dbc);
     return rc;
+}
+
+int dbats_best_bundle(dbats_handler *dh, uint32_t func, uint32_t start)
+{
+    int best_bid = 0;
+    uint32_t best_start;
+    dbats_get_start_time(dh, 0, &best_start);
+    uint32_t best_bounded_start = max(best_start, start);
+
+    for (int bid = 1; bid < dh->cfg.num_bundles; bid++) {
+	if (dh->bundle[bid].func != func) continue;
+	uint32_t this_start;
+	dbats_get_start_time(dh, bid, &this_start);
+	uint32_t this_bounded_start = max(this_start, start);
+	if (this_bounded_start < best_bounded_start) {
+	    best_bid = bid;
+	    best_bounded_start = this_bounded_start;
+	}
+    }
+    return best_bid;
 }
 
 // "DELETE FROM db WHERE db.bid = bid AND db.time >= start AND db.time < end"
@@ -1281,11 +1302,9 @@ int dbats_num_keys(dbats_handler *dh, uint32_t *num_keys)
     return 0;
 }
 
-static void set_priority(DB_TXN *txn, uint32_t priority)
+static void set_priority(dbats_handler *dh, uint32_t priority)
 {
-    int rc;
-
-    rc = txn->set_priority(txn, priority);
+    int rc = current_txn(dh)->set_priority(current_txn(dh), priority);
     if (rc != 0) {
 	dbats_log(LOG_ERROR, "set_priority %u: %s", priority, db_strerror(rc));
     } else {
@@ -1382,7 +1401,7 @@ restart:
     if (!dh->cfg.readonly) {
 	// Make priority depend on time, so a writer of realtime data always
 	// beats a writer of historical data.
-	set_priority(current_txn(dh), dh->tslice[0]->time / dh->bundle[0].period);
+	set_priority(dh, dh->tslice[0]->time / dh->bundle[0].period);
     }
 
     if (!dh->preload)
@@ -1765,7 +1784,7 @@ retry:
     if (!dh->changed) {
 	// Once we've started writing, increase priority over other processes
 	// that haven't yet done any writing.
-	set_priority(current_txn(dh), (dh->tslice[0]->time + INT32_MAX) / dh->bundle[0].period);
+	set_priority(dh, (dh->tslice[0]->time + INT32_MAX) / dh->bundle[0].period);
 	dh->changed = 1;
     }
     dh->tslice[0]->frag_changed[frag_id] = 1;
@@ -2049,8 +2068,9 @@ void dbats_stat_print(const dbats_handler *dh) {
     
     if ((rc = dh->dbMeta->stat_print(dh->dbMeta, DB_FAST_STAT)) != 0)
 	dbats_log(LOG_ERROR, "dumping Meta stats: %s", db_strerror(rc));
-    if ((rc = dh->dbBundle->stat_print(dh->dbBundle, DB_FAST_STAT)) != 0)
-	dbats_log(LOG_ERROR, "dumping Bundle stats: %s", db_strerror(rc));
+    if (dh->dbBundle)
+	if ((rc = dh->dbBundle->stat_print(dh->dbBundle, DB_FAST_STAT)) != 0)
+	    dbats_log(LOG_ERROR, "dumping Bundle stats: %s", db_strerror(rc));
     if ((rc = dh->dbKeyname->stat_print(dh->dbKeyname, DB_FAST_STAT)) != 0)
 	dbats_log(LOG_ERROR, "dumping Keyname stats: %s", db_strerror(rc));
     if ((rc = dh->dbKeyid->stat_print(dh->dbKeyid, DB_FAST_STAT)) != 0)
