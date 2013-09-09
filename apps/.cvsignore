@@ -1,0 +1,5 @@
+*.o
+report-in
+report-out
+dbats_info
+dbats_series_limit
