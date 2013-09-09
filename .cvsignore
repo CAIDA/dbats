@@ -1,8 +1,11 @@
 *.tsdb
 *.dbats
 *.out
+*.err
+*.stat
+*.stats
+*.gprof
 *.metrics
 *.keys
 .*.sw?
-report-in
-report-out
+html
