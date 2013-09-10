@@ -1,5 +1,3 @@
-.PHONY: FORCE
-
 all: lib html/index.html apps 
 
 clean: FORCE
@@ -17,3 +15,4 @@ html/index.html: include/dbats.h
 	rm -rf html
 	doxygen
 
+FORCE:
