@@ -13,12 +13,9 @@ static void help(void) {
     fprintf(stderr, "options:\n");
     fprintf(stderr, "-v{N}        verbosity level\n");
     fprintf(stderr, "-x           obtain exclusive lock on db\n");
-    fprintf(stderr, "-k{path}     load list of keys from {path}\n");
-    fprintf(stderr, "             (default: use all keys in db)\n");
-    fprintf(stderr, "-b{begin}    begin time\n");
-    fprintf(stderr, "             (default: first time in db)\n");
-    fprintf(stderr, "-e{end}      end time\n");
-    fprintf(stderr, "             (default: last time in db)\n");
+    fprintf(stderr, "-k{path}     load list of keys from {path} (default: use all keys in db)\n");
+    fprintf(stderr, "-b{begin}    begin time (default: first time in db)\n");
+    fprintf(stderr, "-e{end}      end time (default: last time in db)\n");
     fprintf(stderr, "-o text      output text (default)\n");
     fprintf(stderr, "-o gnuplot   output gnuplot script\n");
     exit(-1);
