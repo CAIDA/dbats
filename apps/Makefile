@@ -17,6 +17,8 @@ all: $(TARGETS)
 clean:
 	/bin/rm -f $(TARGETS) *.o *~
 
+DBATS_LIB = ../lib/libdbats.a
+
 report-in.o: report-in.c ../include/dbats.h ../include/dbats_log.h Makefile
 
 report-out.o: report-out.c ../include/dbats.h ../include/dbats_log.h Makefile
