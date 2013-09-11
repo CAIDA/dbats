@@ -1,14 +1,19 @@
 all: lib html/index.html apps 
 
+.PHONY: FORCE lib apps
+
 clean: FORCE
+	@#echo Making clean
 	cd lib; $(MAKE) clean
 	cd apps; $(MAKE) clean
 	rm -rf html
 
 lib: FORCE
+	@#echo Making lib
 	cd lib; $(MAKE)
 
 apps: FORCE
+	@#echo Making apps
 	cd apps; $(MAKE)
 
 html/index.html: include/dbats.h
@@ -16,3 +21,5 @@ html/index.html: include/dbats.h
 	doxygen
 
 FORCE:
+	@#echo Making FORCE
+

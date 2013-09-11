@@ -1,0 +1,23 @@
+CC           = @CC@
+#PROF         = --coverage
+#PROF         = -pg
+CPPFLAGS     = @CPPFLAGS@ -I../include
+CFLAGS       = @CFLAGS@ $(PROF) $(CPPFLAGS) # -fPIC
+LDFLAGS      = @LDFLAGS@ $(PROF)
+
+DBATS_LIB   = libdbats.a
+
+TARGETS     = $(DBATS_LIB)
+
+all: $(TARGETS)
+
+dbats.o: dbats.c ../include/dbats.h ../include/dbats_log.h Makefile
+
+dbats_log.o: dbats_log.c ../include/dbats_log.h Makefile
+
+$(DBATS_LIB): dbats.o dbats_log.o quicklz.o
+	ar rs $@ $?
+	ranlib $@
+
+clean:
+	/bin/rm -f $(TARGETS) *.o *~
