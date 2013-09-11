@@ -81,7 +81,7 @@ int main(int argc, char *argv[]) {
     dbats_commit(handler);
 
     cfg = dbats_get_config(handler);
-    printf("version: %d\n", cfg->version);
+    printf("dbats database version: %d\n", cfg->version);
     printf("values_per_entry: %d\n", cfg->values_per_entry);
     printf("entry_size: %d bytes\n", cfg->entry_size);
     uint32_t num_keys;
