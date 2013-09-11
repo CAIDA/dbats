@@ -20,13 +20,12 @@
 
 #include "dbats.h"
 #include "quicklz.h"
+#include "config.h"
 
 // Limits
 #define ENTRIES_PER_FRAG    10000 // number of entries in a fragment
 #define MAX_NUM_FRAGS       16384 // max number of fragments in a tslice
 #define MAX_NUM_BUNDLES        16 // max number of time series bundles
-
-#define HAVE_SET_LK_EXCLUSIVE 0
 
 #define TXN_PER_OP 0 // must be 0, because rolling back a dbats_set doesn't reset the in-memory fragments
 
@@ -194,7 +193,7 @@ static inline int begin_transaction(dbats_handler *dh, const char *name)
 	exit(-1);
     }
     DB_TXN **childp = &current_txn(dh);
-    rc = dh->dbenv->txn_begin(dh->dbenv, parent, childp, DB_TXN_BULK);
+    rc = dh->dbenv->txn_begin(dh->dbenv, parent, childp, 0);
     if (rc != 0) {
 	dbats_log(LOG_ERROR, "begin txn: %s: %s", name, db_strerror(rc));
 	dh->n_txn--;
@@ -247,7 +246,7 @@ static int raw_db_open(dbats_handler *dh, DB **dbp, const char *name,
     }
 
     if (dh->cfg.exclusive) {
-#if HAVE_SET_LK_EXCLUSIVE
+#if HAVE_DB_SET_LK_EXCLUSIVE
 	if ((rc = (*dbp)->set_lk_exclusive(*dbp, 1)) != 0) {
 	    dbats_log(LOG_ERROR, "Error obtaining exclusive lock on %s/%s: %s",
 		dh->path, name, db_strerror(rc));
@@ -337,7 +336,7 @@ static int (raw_db_set)(
 static int (raw_db_get)(const char *fname, int line,
     dbats_handler *dh, DB* db,
     const void *key, uint32_t key_len,
-    void *value, size_t buflen, size_t *value_len_p,
+    void *value, size_t buflen, uint32_t *value_len_p,
     uint32_t dbflags)
 {
     const char *label =
@@ -376,6 +375,10 @@ static int (raw_db_get)(const char *fname, int line,
 static int (raw_cursor_get)(const char *fname, int line,
     dbats_handler *dh, DB *db, DBC *dbc, DBT *key, DBT *data, int flags)
 {
+#if (DB_VERSION_MAJOR < 5)
+    // version 4 didn't support DB_READ_COMMITTED in cursor get
+    flags = flags & ~DB_READ_COMMITTED;
+#endif
     if (dbats_log_level >= LOG_FINEST) {
 	char label[32];
 	int op = flags & DB_OPFLAGS_MASK;
@@ -447,7 +450,7 @@ dbats_handler *dbats_open(const char *path,
     uint32_t period,
     uint32_t flags)
 {
-    dbats_log(LOG_CONFIG, "%s", db_full_version(NULL, NULL, NULL, NULL, NULL));
+    dbats_log(LOG_CONFIG, "%s", DB_VERSION_STRING);
 
     int rc;
     int mode = 00666;
@@ -534,8 +537,6 @@ dbats_handler *dbats_open(const char *path,
 	    return NULL;
 	}
 
-	fprintf(file, "log_set_config DB_LOG_AUTO_REMOVE on\n");
-
 	// XXX These should be based on max expected number of metric keys?
 	// 40000 is enough to insert at least 2000000 metric keys.
 	fprintf(file, "set_lk_max_locks 40000\n");
@@ -551,7 +552,15 @@ dbats_handler *dbats_open(const char *path,
 	return NULL;
     }
 
-    if (!HAVE_SET_LK_EXCLUSIVE && dh->cfg.exclusive) {
+#if defined(DB_LOG_AUTO_REMOVE)
+    dh->dbenv->log_set_config(dh->dbenv, DB_LOG_AUTO_REMOVE, 1);
+#elif defined(DB_LOG_AUTOREMOVE)
+    dh->dbenv->set_flags(dh->dbenv, DB_LOG_AUTOREMOVE, 1);
+#else
+# error "no DB_LOG_AUTO_REMOVE option"
+#endif
+
+    if (!HAVE_DB_SET_LK_EXCLUSIVE && dh->cfg.exclusive) {
 	// emulate exclusive lock with an outer txn
 	if (begin_transaction(dh, "exclusive txn") != 0) return NULL;
     }
@@ -1097,7 +1106,7 @@ int dbats_close(dbats_handler *dh)
     }
     if (myrc == 0 && rc != 0) myrc = rc;
 
-    if (!HAVE_SET_LK_EXCLUSIVE && dh->cfg.exclusive) {
+    if (!HAVE_DB_SET_LK_EXCLUSIVE && dh->cfg.exclusive) {
 	rc = commit_transaction(dh); // exclusive txn
 	if (myrc == 0 && rc != 0) myrc = rc;
     }
@@ -1111,11 +1120,15 @@ int dbats_close(dbats_handler *dh)
     if (dh->bundle) free(dh->bundle);
     if (dh->tslice) free(dh->tslice);
 
-    //dh->dbMeta->close(dh->dbMeta, 0);
-    //dh->dbKeyname->close(dh->dbKeyname, 0);
-    //dh->dbKeyid->close(dh->dbKeyid, 0);
-    //dh->dbData->close(dh->dbData, 0);
-    //dh->dbIsSet->close(dh->dbIsSet, 0);
+    // BDB v4 requires explicit close of each db
+    dh->dbMeta->close(dh->dbMeta, 0);
+    if (dh->dbBundle)
+	dh->dbBundle->close(dh->dbBundle, 0);
+    dh->dbKeyname->close(dh->dbKeyname, 0);
+    dh->dbKeyid->close(dh->dbKeyid, 0);
+    dh->dbData->close(dh->dbData, 0);
+    dh->dbIsSet->close(dh->dbIsSet, 0);
+
     rc = dh->dbenv->close(dh->dbenv, 0);
     if (myrc == 0 && rc != 0) myrc = rc;
 
@@ -1195,7 +1208,7 @@ static int load_frag(dbats_handler *dh, uint32_t t, int bid,
 	if (!dh->db_get_buf) return errno ? errno : ENOMEM;
     }
 
-    size_t value_len;
+    uint32_t value_len;
     rc = raw_db_get(dh, dh->dbData, &dbkey, sizeof(dbkey), dh->db_get_buf,
 	dh->db_get_buf_len, &value_len, flags);
     if (rc != 0) {
@@ -1204,12 +1217,12 @@ static int load_frag(dbats_handler *dh, uint32_t t, int bid,
     }
 
     int compressed = ((dbats_frag*)dh->db_get_buf)->compressed;
-    size_t len = !compressed ? fragsize(dh) :
+    uint32_t len = !compressed ? fragsize(dh) :
 	qlz_size_decompressed((void*)(dh->db_get_buf+1));
     void *ptr = malloc(len);
     if (!ptr) {
 	rc = errno;
-	dbats_log(LOG_ERROR, "Can't allocate %zu bytes for frag "
+	dbats_log(LOG_ERROR, "Can't allocate %u bytes for frag "
 	    "t=%u, bid=%u, frag_id=%u", len, t, bid, frag_id);
 	return rc; // error
     }
@@ -1304,12 +1317,19 @@ int dbats_num_keys(dbats_handler *dh, uint32_t *num_keys)
 
 static void set_priority(dbats_handler *dh, uint32_t priority)
 {
+#if HAVE_DB_SET_PRIORITY
     int rc = current_txn(dh)->set_priority(current_txn(dh), priority);
     if (rc != 0) {
 	dbats_log(LOG_ERROR, "set_priority %u: %s", priority, db_strerror(rc));
     } else {
 	dbats_log(LOG_FINE, "set_priority %u", priority);
     }
+#else
+    static int warned = 0;
+    if (!warned)
+	dbats_log(LOG_WARNING, "can't set_priority with this version of BDB");
+    warned = 1;
+#endif
 }
 
 int dbats_select_time(dbats_handler *dh, uint32_t time_value, uint32_t flags)
