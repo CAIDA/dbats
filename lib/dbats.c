@@ -450,7 +450,7 @@ dbats_handler *dbats_open(const char *path,
     uint32_t period,
     uint32_t flags)
 {
-    dbats_log(LOG_CONFIG, "%s", DB_VERSION_STRING);
+    dbats_log(LOG_CONFIG, "db_version: '%s'", db_version(0,0,0));
 
     int rc;
     int mode = 00666;
@@ -504,7 +504,7 @@ dbats_handler *dbats_open(const char *path,
 	    // another process creating a dbats environment.
 	    char filename[PATH_MAX];
 	    struct stat statbuf;
-	    int tries_limit = 10;
+	    int tries_limit = 30;
 	    sprintf(filename, "%s/meta", path);
 	    while (stat(filename, &statbuf) != 0) {
 		if (errno != ENOENT) {
@@ -1649,7 +1649,7 @@ retry:
     if (was_set & !dh->cfg.updatable) {
 	dbats_log(LOG_ERROR, "value is already set: t=%" PRIu32 " keyid=%d",
 	    dh->tslice[0]->time, key_id);
-	return EEXIST;
+	return DB_KEYEXIST;
     }
     dbats_value *oldvaluep = valueptr(dh, 0, frag_id, offset);
 
