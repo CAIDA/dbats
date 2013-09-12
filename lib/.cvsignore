@@ -1,3 +1,4 @@
+Makefile
 *.o
 config.h
 libdbats.a
