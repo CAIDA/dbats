@@ -84,7 +84,7 @@
 #define DBATS_EXCLUSIVE    0x0020 ///< obtain exclusive lock on whole db
 #define DBATS_NO_TXN       0x0040 ///< don't use transactions (for debugging only)
 #define DBATS_UPDATABLE    0x0080 ///< allow updates to existing values
-#define DBATS_MULTIWRITE   0x0100 ///< allow multiple processes to write in parallel (experimental - do not use)
+#define DBATS_MULTIWRITE   0x0100 ///< allow multiple processes to write in parallel
 ///@}
 
 /** @name Aggregation functions */
@@ -159,7 +159,7 @@ typedef struct dbats_handler dbats_handler; ///< Opaque handle for a DBATS db
  *    -	DBATS_NO_TXN - do not use transactions (unsafe)
  *    -	DBATS_UPDATABLE - allow updates to existing values
  *    - DBATS_MULTIWRITE - allow multiple processes to write simultaneously
- *      instead of taking turns (experimental - do not use)
+ *      instead of taking turns
  *  @return On success, returns a pointer to an opaque dbats_handler that
  *  must be passed to all subsequent calls on this database.  On failure,
  *  returns NULL.
@@ -192,8 +192,8 @@ extern int dbats_close(dbats_handler *handler);
  *  @param[in] handler A dbats_handler created by dbats_open().
  *  @param[in] func one of the following values indicating which aggregation
  *    function to apply to the data points:
- *    - DBATS_AGG_MIN - minimum value
- *    - DBATS_AGG_MAX - maximum value
+ *    - DBATS_AGG_MIN - minimum value (does not work with DBATS_UPDATABLE)
+ *    - DBATS_AGG_MAX - maximum value (does not work with DBATS_UPDATABLE)
  *    - DBATS_AGG_AVG - average of values
  *    - DBATS_AGG_LAST - last value (i.e., with greatest timestamp)
  *    - DBATS_AGG_SUM - sum of values
@@ -233,7 +233,7 @@ extern int dbats_get_end_time(dbats_handler *handler, int bid, uint32_t *end);
  *  Once a point is deleted for being outside the limit, it can not be set
  *  again, even if the limit is changed.
  *  The limit for the primary data bundle (bid 0) can not be smaller than the
- *  number of steps in the smallest aggregate.
+ *  number of steps in the largest aggregate.
  *
  *  For example, if a bundle with period 60s has a keep limit of 1440, values
  *  more than 1 day older than the last timestamp set for any key in the
@@ -319,6 +319,8 @@ extern int dbats_select_time(dbats_handler *handler,
 
 /** Commit the transaction in progress, flushing any pending writes to the
  *  database and releasing any associated database locks and other resources.
+ *  Any data points that fall outside the limit set by dbats_series_limit()
+ *  will be deleted.
  *  Calling this directly is useful if you want to check the return value,
  *  or there will be a delay before your next call to dbats_select_time() and
  *  there are other processes trying to access the database.
@@ -401,8 +403,11 @@ extern int dbats_get_key_name(dbats_handler *handler, uint32_t key_id,
  *  @return
  *    - 0 for success;
  *    - EPERM if the handler is not open or was opened with DBATS_READONLY;
- *    - EEXIST if a value already exists for the given time and key and handler
- *      was not opened with DBATS_UPDATABLE;
+ *    - DB_KEYEXIST if a value already exists for the given time and key, and
+ *      handler was not opened with DBATS_UPDATABLE;
+ *    - ENOSYS if a value already exists for the given time and key, and an
+ *      aggregate depending on the value has the function DBATS_AGG_MIN or
+ *      DBATS_AGG_MAX;
  *    - DB_LOCK_DEADLOCK if the operation was cancelled to resolve a deadlock;
  *    - other nonzero value for other errors.
  */
