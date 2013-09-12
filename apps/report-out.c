@@ -13,6 +13,7 @@ static void help(void) {
     fprintf(stderr, "options:\n");
     fprintf(stderr, "-v{N}        verbosity level\n");
     fprintf(stderr, "-x           obtain exclusive lock on db\n");
+    fprintf(stderr, "-t           don't use transactions (fast, but unsafe)\n");
     fprintf(stderr, "-k{path}     load list of keys from {path} (default: use all keys in db)\n");
     fprintf(stderr, "-b{begin}    begin time (default: first time in db)\n");
     fprintf(stderr, "-e{end}      end time (default: last time in db)\n");
@@ -81,13 +82,16 @@ int main(int argc, char *argv[]) {
     uint32_t bundle0_period;
 
     int c;
-    while ((c = getopt(argc, argv, "v:xk:b:e:o:")) != -1) {
+    while ((c = getopt(argc, argv, "v:xtk:b:e:o:")) != -1) {
 	switch (c) {
 	case 'v':
 	    dbats_log_level = atoi(optarg);
 	    break;
 	case 'x':
 	    open_flags |= DBATS_EXCLUSIVE;
+	    break;
+	case 't':
+	    open_flags |= DBATS_NO_TXN;
 	    break;
 	case 'k':
 	    keyfile_path = strdup(optarg);
