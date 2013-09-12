@@ -1317,6 +1317,7 @@ int dbats_num_keys(dbats_handler *dh, uint32_t *num_keys)
 
 static void set_priority(dbats_handler *dh, uint32_t priority)
 {
+    if (!dh->n_txn) return;
 #if HAVE_DB_SET_PRIORITY
     int rc = current_txn(dh)->set_priority(current_txn(dh), priority);
     if (rc != 0) {
