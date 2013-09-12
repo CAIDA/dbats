@@ -4,7 +4,7 @@ CC           = @CC@
 CPPFLAGS     = @CPPFLAGS@ -I../include
 CFLAGS       = @CFLAGS@ $(PROF) $(CPPFLAGS) # -fPIC
 LDFLAGS      = -L../lib @LDFLAGS@ $(PROF)
-LDLIBS      = -ldbats -ldb
+LDLIBS      = -ldbats @LIBS@
 
 TARGETS     = report-in report-out dbats_series_limit dbats_info
 

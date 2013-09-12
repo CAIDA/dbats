@@ -1,4 +1,4 @@
-AC_REVISION([$Id: configure.ac,v 1.1 2013/09/11 23:52:27 kkeys Exp $])
+AC_REVISION([$Id: configure.ac,v 1.2 2013/09/12 17:25:29 kkeys Exp $])
 
 AC_INIT(include/dbats.h)
 AC_PREREQ(2.53)
@@ -72,23 +72,32 @@ fi
 
 
 AC_CHECK_HEADERS(db.h)
-#LIBS="-ldb $LIBS"
+LIBS="-ldb $LIBS"
 
 AC_RUN_IFELSE([AC_LANG_PROGRAM(
     [#include <db.h>],
     [exit(!(DB_VERSION_MAJOR >= 4));])],
     [db_version_ok=1], [db_version_ok=0], [db_version_ok=0])
-
 if test "$db_version_ok" -ne "1"; then
     AC_MSG_ERROR([DB version 4 or higher is required.])
 fi
 
-AC_MSG_CHECKING([for DB->open()])
-AC_LINK_IFELSE([AC_LANG_PROGRAM(
-    [#include <db.h>],
-    [DB *db; db->open(db,0,0,0,0,0,0);])],
-    [AC_MSG_RESULT([yes]); AC_DEFINE(HAVE_DB_OPEN)],
-    [AC_MSG_RESULT([no])])
+AC_RUN_IFELSE([AC_LANG_PROGRAM(
+    [#include <db.h>], [
+    fprintf(stderr, "db_version: %s\n", db_version(0,0,0));
+    fprintf(stderr, "DB_VERSION_STRING: %s\n", DB_VERSION_STRING);
+    exit(!!strcmp(db_version(0,0,0), DB_VERSION_STRING));])],
+    [db_version_ok=1], [db_version_ok=0], [db_version_ok=0])
+if test "$db_version_ok" -ne "1"; then
+    AC_MSG_ERROR([DB_VERSION_STRING in <db.h> does not match db_version() in library.])
+fi
+
+#AC_MSG_CHECKING([for DB->open()])
+#AC_LINK_IFELSE([AC_LANG_PROGRAM(
+#    [#include <db.h>],
+#    [DB *db; db->open(db,0,0,0,0,0,0);])],
+#    [AC_MSG_RESULT([yes]); AC_DEFINE(HAVE_DB_OPEN)],
+#    [AC_MSG_RESULT([no])])
 
 AC_MSG_CHECKING([for DB_ENV->txn_begin()])
 AC_LINK_IFELSE([AC_LANG_PROGRAM(
