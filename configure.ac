@@ -1,4 +1,4 @@
-AC_REVISION([$Id: configure.ac,v 1.3 2013/09/12 23:19:53 kkeys Exp $])
+AC_REVISION([$Id: configure.ac,v 1.4 2013/09/13 00:17:14 kkeys Exp $])
 
 AC_INIT(include/dbats.h)
 AC_PREREQ(2.53)
@@ -70,7 +70,7 @@ db_version(0,0,0); exit(0);"
 # Simple db program to check linking with -ldb
 AC_MSG_CHECKING([for linking with db])
 AC_LINK_IFELSE([AC_LANG_PROGRAM([$PROGINC],[$PROGBODY])],
-    [AC_MSG_RESULT([yes])], [AC_MSG_RESULT([no])])
+    [AC_MSG_RESULT([yes])], [AC_MSG_ERROR([no])])
 
 # If running the same program doesn't work, try re-linking with different
 # RPATH options.
@@ -116,12 +116,12 @@ AC_RUN_IFELSE([AC_LANG_PROGRAM([
 if test "$ok" -ne "1"; then
     AC_MSG_ERROR([error])
 fi
-source ./conftest.out
+. ./conftest.out
 AC_MSG_RESULT([$dbmajor.$dbminor.$dbpatch])
 if test "$dbmajor" -lt 4; then
     AC_MSG_ERROR([DB version 4 or higher is required.])
 fi
-if test "$dbmajor" -lt 5 || test "$dbmajor" -eq 5 && test "$dbminor" -lt 3; then
+if test "$dbmajor" -lt 5 || { test "$dbmajor" -eq 5 && test "$dbminor" -lt 3; } then
     AC_MSG_WARN([DB version 5.3 or higher is recommended.])
 fi
 
