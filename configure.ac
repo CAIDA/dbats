@@ -1,7 +1,9 @@
-AC_REVISION([$Id: configure.ac,v 1.4 2013/09/13 00:17:14 kkeys Exp $])
+AC_REVISION([$Id: configure.ac,v 1.5 2013/09/13 21:16:02 kkeys Exp $])
 
 AC_INIT(include/dbats.h)
 AC_PREREQ(2.53)
+
+m4_include([m4/ax_pthread.m4]) dnl
 
 AC_ARG_WITH(incdirs,
     [  --with-incdirs=DIRS     search for include files in DIRS])
@@ -67,10 +69,23 @@ PROGINC="
 PROGBODY="
 db_version(0,0,0); exit(0);"
 
+
 # Simple db program to check linking with -ldb
-AC_MSG_CHECKING([for linking with db])
+AC_MSG_CHECKING([for linking with db (without pthreads)])
 AC_LINK_IFELSE([AC_LANG_PROGRAM([$PROGINC],[$PROGBODY])],
-    [AC_MSG_RESULT([yes])], [AC_MSG_ERROR([no])])
+    [AC_MSG_RESULT([yes])],
+    [
+	AC_MSG_RESULT([no])
+	# try again with pthreads
+	AX_PTHREAD()
+	AC_MSG_CHECKING([for linking with db (with pthreads)])
+	LIBS="$PTHREAD_LIBS $LIBS"
+	CFLAGS="$CFLAGS $PTHREAD_CFLAGS"
+	CC="$PTHREAD_CC"
+	AC_LINK_IFELSE([AC_LANG_PROGRAM([$PROGINC],[$PROGBODY])],
+	    [AC_MSG_RESULT([yes])],
+	    [AC_MSG_RESULT([no]); AC_MSG_ERROR([unable to link with db])])
+    ])
 
 # If running the same program doesn't work, try re-linking with different
 # RPATH options.
