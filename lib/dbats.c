@@ -83,6 +83,7 @@ struct dbats_handler {
     uint8_t preload;           // load frags when tslice is selected
     uint8_t serialize;         // allow only one writer at a time
     uint8_t changed;           // has changes that need to be written to db?
+    uint8_t emulate_exclusive; // emulating set_lk_exclusive()?
     void *state_compress;
     void *state_decompress;
     DB_ENV *dbenv;             // DB environment
@@ -561,8 +562,9 @@ dbats_handler *dbats_open(const char *path,
 #endif
 
     if (!HAVE_DB_SET_LK_EXCLUSIVE && dh->cfg.exclusive) {
-	// emulate exclusive lock with an outer txn
+	// emulate exclusive lock with an outer txn and a write lock
 	if (begin_transaction(dh, "exclusive txn") != 0) return NULL;
+	dh->emulate_exclusive = 1;
     }
     if (begin_transaction(dh, "open txn") != 0) goto abort;
     dh->action_in_prog = 1;
@@ -580,7 +582,7 @@ dbats_handler *dbats_open(const char *path,
 	    if (CFG_SET(dh, key, dh->cfg.field) != 0) \
 		goto abort; \
 	} else { \
-	    int writelock = !dh->cfg.readonly || dh->cfg.exclusive; \
+	    int writelock = !dh->cfg.readonly || dh->emulate_exclusive; \
 	    if (CFG_GET(dh, key, dh->cfg.field, writelock ? DB_RMW : 0) != 0) {\
 		dbats_log(LOG_ERROR, "%s: missing config: %s", path, key); \
 		goto abort; \
@@ -1106,7 +1108,7 @@ int dbats_close(dbats_handler *dh)
     }
     if (myrc == 0 && rc != 0) myrc = rc;
 
-    if (!HAVE_DB_SET_LK_EXCLUSIVE && dh->cfg.exclusive) {
+    if (dh->emulate_exclusive) {
 	rc = commit_transaction(dh); // exclusive txn
 	if (myrc == 0 && rc != 0) myrc = rc;
     }
@@ -1480,8 +1482,10 @@ int dbats_bulk_get_key_id(dbats_handler *dh, uint32_t n_keys,
     const char * const *keys, uint32_t *key_ids, uint32_t flags)
 {
     int rc;
+    int my_txn = dh->cfg.exclusive && dh->n_txn == 0;
 
-    begin_transaction(dh, "key txn");
+    if (my_txn)
+	begin_transaction(dh, "key txn");
 
     for (int i = 0; i < n_keys; i++) {
 	rc = raw_db_get(dh, dh->dbKeyname, keys[i], strlen(keys[i]),
@@ -1534,10 +1538,12 @@ int dbats_bulk_get_key_id(dbats_handler *dh, uint32_t n_keys,
 	}
     }
 
-    rc = commit_transaction(dh); // key txn
+    if (my_txn)
+	rc = commit_transaction(dh); // key txn
     if (rc == 0) return 0;
 abort:
-    abort_transaction(dh); // key txn
+    if (my_txn)
+	abort_transaction(dh); // key txn
     return rc;
 }
 
