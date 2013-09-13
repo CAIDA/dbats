@@ -24,13 +24,13 @@ dbats_series_limit.o: dbats_series_limit.c ../include/dbats.h ../include/dbats_l
 dbats_info.o: dbats_info.c ../include/dbats.h ../include/dbats_log.h Makefile
 
 report-in: report-in.o $(DBATS_LIB) Makefile
-	$(CC) $(LDFLAGS) report-in.o $(LDLIBS) -o $@
+	$(CC) $(CFLAGS) $(LDFLAGS) report-in.o $(LDLIBS) -o $@
 
 report-out: report-out.o $(DBATS_LIB) Makefile
-	$(CC) $(LDFLAGS) report-out.o $(LDLIBS) -o $@
+	$(CC) $(CFLAGS) $(LDFLAGS) report-out.o $(LDLIBS) -o $@
 
 dbats_series_limit: dbats_series_limit.o $(DBATS_LIB) Makefile
-	$(CC) $(LDFLAGS) dbats_series_limit.o $(LDLIBS) -o $@
+	$(CC) $(CFLAGS) $(LDFLAGS) dbats_series_limit.o $(LDLIBS) -o $@
 
 dbats_info: dbats_info.o $(DBATS_LIB) Makefile
-	$(CC) $(LDFLAGS) dbats_info.o $(LDLIBS) -o $@
+	$(CC) $(CFLAGS) $(LDFLAGS) dbats_info.o $(LDLIBS) -o $@
