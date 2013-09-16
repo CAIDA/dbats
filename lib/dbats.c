@@ -544,6 +544,7 @@ dbats_handler *dbats_open(const char *path,
 	fprintf(file, "set_lk_max_objects 40000\n");
 
 	fprintf(file, "set_lk_detect DB_LOCK_YOUNGEST\n");
+	fprintf(file, "set_lg_bsize 1048576\n"); // default is ~32K
 
 	fclose(file);
     }
