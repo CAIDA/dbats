@@ -12,6 +12,7 @@ static void help(void) {
     fprintf(stderr, "-v{N}    verbosity level\n");
     fprintf(stderr, "-x       obtain exclusive lock on db\n");
     fprintf(stderr, "-t       don't use transactions (fast, but unsafe)\n");
+    fprintf(stderr, "-u       allow updates to existing data\n");
     fprintf(stderr, "-p       preload timeslices\n");
     fprintf(stderr, "-Z       don't compress db\n");
     fprintf(stderr, "-i       initialize db only; do not write data\n");
@@ -81,7 +82,7 @@ int main(int argc, char *argv[]) {
     char key[128];
 
     int c;
-    while ((c = getopt(argc, argv, "v:xtpZim")) != -1) {
+    while ((c = getopt(argc, argv, "v:xtupZim")) != -1) {
 	switch (c) {
 	case 'v':
 	    dbats_log_level = atoi(optarg);
@@ -91,6 +92,9 @@ int main(int argc, char *argv[]) {
 	    break;
 	case 't':
 	    open_flags |= DBATS_NO_TXN;
+	    break;
+	case 'u':
+	    open_flags |= DBATS_UPDATABLE;
 	    break;
 	case 'p':
 	    select_flags |= DBATS_PRELOAD;
