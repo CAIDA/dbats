@@ -74,6 +74,42 @@ typedef struct {
     uint32_t frag_id;
 } fragkey_t;
 
+
+#define KTKEY_NODENAME_MAXLEN 255
+#define KTKEY_PARENT(key) ((key).u.level_parent & KTKEY_PARENT_MASK) 
+#define KTKEY_MAX_LEVEL 0xFF
+#define KTKEY_MAX_PARENT 0x00FFFFFF
+
+// keytree key layout:
+// 1 bytes: position
+// 3 bytes: parent_id
+// n bytes: nodename
+typedef struct {
+    union {
+	uint8_t level; // overlaps first 8 bits of level_parent
+	uint32_t level_parent; // 8b level, 24b parent_id, in network byte order
+    } u;
+    char nodename[KTKEY_NODENAME_MAXLEN];
+} keytree_key;
+#define KTKEY_SIZE(nodenamelen) (sizeof(uint32_t) + nodenamelen)
+
+#ifdef WORDS_BIGENDIAN
+#define chtonl(x) (x)
+#else
+#define chtonl(x) (((x&0xFF)<<24) | ((x&0xFF00)<<8) | ((x&0xFF0000)>>8) | ((x&0xFF000000)>>24))
+#endif
+const uint32_t KTKEY_PARENT_MASK = chtonl(0x00FFFFFF);
+const uint32_t KTKEY_ID_MASK     = chtonl(0x7FFFFFFF);
+const uint32_t KTID_IS_NODE      = chtonl(0x80000000);
+
+// keytree data layout:
+// 1 bit: is_nodeid (0=keyid, 1=nodeid)
+// 31 bits: id
+typedef struct {
+    uint32_t id;
+} keytree_data;
+
+
 #define N_TXN 16
 
 struct dbats_handler {
@@ -89,12 +125,14 @@ struct dbats_handler {
     DB_ENV *dbenv;             // DB environment
     DB *dbMeta;                // config parameters
     DB *dbBundle;              // bundle parameters
-    DB *dbKeyname;             // key name -> key id
+    DB *dbKeytree;             // {level, parent, nodename} -> node id or key id
     DB *dbKeyid;               // recno -> key name (note: keyid == recno - 1)
     DB *dbData;                // {bid, time, frag_id} -> value fragment
     DB *dbIsSet;               // {bid, time, frag_id} -> is_set fragment
+    DB *dbSequence;            // BDB sequences
     DBC *keyname_cursor;       // for iterating over key names
     DBC *keyid_cursor;         // for iterating over key ids
+    DB_SEQUENCE *ktseq;        // sequence for keytree node ids
     dbats_tslice **tslice;     // a tslice for each time series bundle
     dbats_bundle_info *bundle; // parameters for each time series bundle
     uint8_t *db_get_buf;       // buffer for data fragment
@@ -236,7 +274,7 @@ static int abort_transaction(dbats_handler *dh)
 }
 
 static int raw_db_open(dbats_handler *dh, DB **dbp, const char *name,
-    DBTYPE dbtype, uint32_t flags, int mode)
+    DBTYPE dbtype, uint32_t flags, int mode, int use_txn)
 {
     int rc;
 
@@ -262,7 +300,8 @@ static int raw_db_open(dbats_handler *dh, DB **dbp, const char *name,
     if (flags & DBATS_READONLY)
 	dbflags |= DB_RDONLY;
 
-    rc = (*dbp)->open(*dbp, current_txn(dh), name, NULL, dbtype, dbflags, mode);
+    rc = (*dbp)->open(*dbp, use_txn ? current_txn(dh) : NULL, name, NULL,
+	dbtype, dbflags, mode);
     if (rc != 0) {
 	dbats_log(LOG_ERROR, "Error opening DB %s/%s (mode=%o): %s",
 	    dh->path, name, mode, db_strerror(rc));
@@ -282,7 +321,12 @@ static void log_db_op(int level, const char *fname, int line, dbats_handler *dh,
 	    ntohl(fragkey->bid), ntohl(fragkey->time), ntohl(fragkey->frag_id));
     } else if (db == dh->dbBundle) {
 	sprintf(keybuf, "%d", *(uint8_t*)key);
-    } else if (db == dh->dbMeta || db == dh->dbKeyname) {
+    } else if (db == dh->dbKeytree) {
+	keytree_key* ktkey = (keytree_key*)key;
+	sprintf(keybuf, "level=%d parent=%d name=\"%.*s\"",
+	    ktkey->u.level, ntohl(KTKEY_PARENT(*ktkey)),
+	    key_len - sizeof(*ktkey), ktkey->nodename);
+    } else if (db == dh->dbMeta) {
 	sprintf(keybuf, "\"%.*s\"", key_len, (char*)key);
     } else if (db == dh->dbKeyid) {
 	sprintf(keybuf, "#%u", *(db_recno_t*)key);
@@ -293,14 +337,15 @@ static void log_db_op(int level, const char *fname, int line, dbats_handler *dh,
 	label, dbname, keybuf, msg);
 }
 
-#define raw_db_set(dh, db, key, key_len, value, value_len) \
-    (raw_db_set)(__FILE__, __LINE__, dh, db, key, key_len, value, value_len)
+#define raw_db_set(dh, db, key, key_len, value, value_len, dbflags) \
+    (raw_db_set)(__FILE__, __LINE__, dh, db, key, key_len, value, value_len, dbflags)
 
 static int (raw_db_set)(
     const char *fname, int line,
     dbats_handler *dh, DB *db,
     const void *key, uint32_t key_len,
-    const void *value, uint32_t value_len)
+    const void *value, uint32_t value_len,
+    uint32_t dbflags)
 {
     log_db_op(LOG_FINEST, fname, line, dh, db, "db_set", key, key_len, "");
     int rc;
@@ -316,7 +361,7 @@ static int (raw_db_set)(
     DBT_in(dbt_key, (void*)key, key_len);
     DBT_in(dbt_data, (void*)value, value_len);
 
-    if ((rc = db->put(db, current_txn(dh), &dbt_key, &dbt_data, 0)) != 0) {
+    if ((rc = db->put(db, current_txn(dh), &dbt_key, &dbt_data, dbflags)) != 0) {
 	if (dh->action_in_prog && rc == DB_LOCK_DEADLOCK)
 	    dh->action_cancelled = 1;
 	log_db_op(LOG_WARNING, fname, line, dh, db, "db_set", key, key_len, db_strerror(rc));
@@ -404,7 +449,7 @@ static int (raw_cursor_get)(const char *fname, int line,
 }
 
 #define CFG_SET(dh, key, val) \
-    raw_db_set(dh, dh->dbMeta, key, strlen(key), &val, sizeof(val))
+    raw_db_set(dh, dh->dbMeta, key, strlen(key), &val, sizeof(val), 0)
 
 #define CFG_GET(dh, key, val, flags) \
     raw_db_get(dh, dh->dbMeta, key, strlen(key), &val, sizeof(val), NULL, flags)
@@ -412,33 +457,20 @@ static int (raw_cursor_get)(const char *fname, int line,
 /*************************************************************************/
 
 #define bundle_info_key(dh, keybuf, bid) \
-    sprintf(keybuf, dh->cfg.version >= 4 ? "bundle%d" : \
-	dh->cfg.version >= 3 ? "series%d" : "agg%d", bid)
+    sprintf(keybuf, "bundle%d", bid)
 
 static int read_bundle_info(dbats_handler *dh, int bid, uint32_t flags)
 {
-    if (dh->cfg.version >= 5) {
-	uint8_t key = bid;
-	return raw_db_get(dh, dh->dbBundle, &key, sizeof(key), &dh->bundle[bid],
-	    sizeof(dh->bundle[bid]), NULL, flags);
-    } else {
-	char keybuf[32];
-	bundle_info_key(dh, keybuf, bid);
-	return CFG_GET(dh, keybuf, dh->bundle[bid], flags);
-    }
+    uint8_t key = bid;
+    return raw_db_get(dh, dh->dbBundle, &key, sizeof(key), &dh->bundle[bid],
+	sizeof(dh->bundle[bid]), NULL, flags);
 }
 
 static int write_bundle_info(dbats_handler *dh, int bid)
 {
-    if (dh->cfg.version >= 5) {
-	uint8_t key = bid;
-	return raw_db_set(dh, dh->dbBundle, &key, sizeof(key), &dh->bundle[bid],
-	    sizeof(dh->bundle[bid]));
-    } else {
-	char keybuf[32];
-	bundle_info_key(dh, keybuf, bid);
-	return CFG_SET(dh, keybuf, dh->bundle[bid]);
-    }
+    uint8_t key = bid;
+    return raw_db_set(dh, dh->dbBundle, &key, sizeof(key), &dh->bundle[bid],
+	sizeof(dh->bundle[bid]), 0);
 }
 
 /*************************************************************************/
@@ -571,8 +603,8 @@ dbats_handler *dbats_open(const char *path,
     dh->action_in_prog = 1;
     dh->action_cancelled = 0;
 
-#define open_db(db,name,type) raw_db_open(dh, &dh->db, name, type, flags, mode)
-    if (open_db(dbMeta,    "meta",    DB_BTREE) != 0) goto abort;
+#define open_db(db,name,type,use_txn) raw_db_open(dh, &dh->db, name, type, flags, mode, use_txn)
+    if (open_db(dbMeta,    "meta",    DB_BTREE, 1) != 0) goto abort;
 
     dh->cfg.entry_size = sizeof(dbats_value); // for db_get_buf_len
 
@@ -601,13 +633,17 @@ dbats_handler *dbats_open(const char *path,
 	    dh->cfg.version, DBATS_DB_VERSION);
 	return NULL;
     }
+    if (dh->cfg.version < 6) {
+	dbats_log(LOG_ERROR, "obsolete database version %d", dh->cfg.version);
+	return NULL;
+    }
 
-    if (dh->cfg.version >= 5)
-	if (open_db(dbBundle,  "bundle",  DB_BTREE) != 0) goto abort;
-    if (open_db(dbKeyname, "keyname", DB_BTREE) != 0) goto abort;
-    if (open_db(dbKeyid,   "keyid",   DB_RECNO) != 0) goto abort;
-    if (open_db(dbData,    "data",    DB_BTREE) != 0) goto abort;
-    if (open_db(dbIsSet,   "is_set",  DB_BTREE) != 0) goto abort;
+    if (open_db(dbBundle,  "bundle",  DB_BTREE, 1) != 0) goto abort;
+    if (open_db(dbKeytree, "keytree", DB_BTREE, 1) != 0) goto abort;
+    if (open_db(dbKeyid,   "keyid",   DB_RECNO, 1) != 0) goto abort;
+    if (open_db(dbData,    "data",    DB_BTREE, 1) != 0) goto abort;
+    if (open_db(dbIsSet,   "is_set",  DB_BTREE, 1) != 0) goto abort;
+    if (open_db(dbSequence,"sequence",DB_BTREE, 0) != 0) goto abort;
 #undef open_db
 #undef initcfg
 
@@ -973,19 +1009,19 @@ static int flush_tslice(dbats_handler *dh, int bid)
 		    "(%.1f %%)", f, frag_size, compress_len,
 		    compress_len*100.0/frag_size);
 		rc = raw_db_set(dh, dh->dbData, &dbkey, sizeof(dbkey),
-		    buf, compress_len + 1);
+		    buf, compress_len + 1, 0);
 		if (rc != 0) return rc;
 	    } else {
 		dh->tslice[bid]->frag[f]->compressed = 0;
 		dbats_log(LOG_VERYFINE, "Frag %d write: %zu", f, frag_size);
 		rc = raw_db_set(dh, dh->dbData, &dbkey, sizeof(dbkey),
-		    dh->tslice[bid]->frag[f], frag_size);
+		    dh->tslice[bid]->frag[f], frag_size, 0);
 		if (rc != 0) return rc;
 	    }
 	    dh->tslice[bid]->frag_changed[f] = 0;
 
 	    rc = raw_db_set(dh, dh->dbIsSet, &dbkey, sizeof(dbkey),
-		dh->tslice[bid]->is_set[f], vec_size(ENTRIES_PER_FRAG));
+		dh->tslice[bid]->is_set[f], vec_size(ENTRIES_PER_FRAG), 0);
 	    if (rc != 0) return rc;
 	}
     }
@@ -1123,14 +1159,21 @@ int dbats_close(dbats_handler *dh)
     if (dh->bundle) free(dh->bundle);
     if (dh->tslice) free(dh->tslice);
 
+    if (dh->ktseq) {
+	rc = dh->ktseq->close(dh->ktseq, 0);
+	if (rc != 0)
+	    dbats_log(LOG_ERROR, "ktseq->close: %s", db_strerror(rc));
+	dh->ktseq = NULL;
+    }
+
     // BDB v4 requires explicit close of each db
     dh->dbMeta->close(dh->dbMeta, 0);
-    if (dh->dbBundle)
-	dh->dbBundle->close(dh->dbBundle, 0);
-    dh->dbKeyname->close(dh->dbKeyname, 0);
+    dh->dbBundle->close(dh->dbBundle, 0);
+    dh->dbKeytree->close(dh->dbKeytree, 0);
     dh->dbKeyid->close(dh->dbKeyid, 0);
     dh->dbData->close(dh->dbData, 0);
     dh->dbIsSet->close(dh->dbIsSet, 0);
+    dh->dbSequence->close(dh->dbSequence, 0);
 
     rc = dh->dbenv->close(dh->dbenv, 0);
     if (myrc == 0 && rc != 0) myrc = rc;
@@ -1479,69 +1522,161 @@ retry:
 
 /*************************************************************************/
 
+// cache of previous key lookup
+typedef struct {
+    uint32_t id;
+    keytree_key key;
+} kt_node_t;
+static kt_node_t nodes[KTKEY_MAX_LEVEL];
+static int prev_levels = 0;
+
 int dbats_bulk_get_key_id(dbats_handler *dh, uint32_t n_keys,
     const char * const *keys, uint32_t *key_ids, uint32_t flags)
 {
     int rc;
     int my_txn = dh->cfg.exclusive && dh->n_txn == 0;
+    const char *msg = NULL;
 
     if (my_txn)
 	begin_transaction(dh, "key txn");
 
+    uint32_t ktkey_size;
+
     for (int i = 0; i < n_keys; i++) {
-	rc = raw_db_get(dh, dh->dbKeyname, keys[i], strlen(keys[i]),
-	    &key_ids[i], sizeof(key_ids[i]), NULL, 0);
-	if (rc == 0) {
-	    // found it
-	    dbats_log(LOG_FINEST, "Found key #%u: %s", key_ids[i], keys[i]);
 
-	} else if (rc != DB_NOTFOUND) {
-	    // error
-	    goto abort;
-
-	} else if (!(flags & DBATS_CREATE)) {
-	    // didn't find, and can't create
-	    dbats_log(LOG_FINE, "Key not found: %s", keys[i]);
-	    goto abort;
-
-	} else {
-	    // create
-	    db_recno_t recno;
-	    DBT_in(dbt_keyname, (void*)keys[i], strlen(keys[i]));
-	    DBT_out(dbt_keyrecno, &recno, sizeof(recno)); // put() will fill recno
-	    rc = dh->dbKeyid->put(dh->dbKeyid, current_txn(dh), &dbt_keyrecno,
-		&dbt_keyname, DB_APPEND);
-	    if (rc != 0) {
-		if (dh->action_in_prog && rc == DB_LOCK_DEADLOCK)
-		    dh->action_cancelled = 1;
-		dbats_log(LOG_ERROR, "Error creating keyid for %s: %s",
-		    keys[i], db_strerror(rc));
-		goto abort;
+	int level = 1;
+	const char *start = keys[i];
+	const char *end = start;
+	while (1) {
+	    size_t namelen = strcspn(start, ".");
+	    if (namelen > KTKEY_NODENAME_MAXLEN) {
+		rc = EINVAL;
+		dbats_log(LOG_ERROR, "Node name too long at level %d (%.*s) in key %s",
+		    level, namelen, start, keys[i]);
 	    }
-	    key_ids[i] = recno - 1;
-	    if (key_ids[i] >= MAX_NUM_FRAGS * ENTRIES_PER_FRAG) {
-		dbats_log(LOG_ERROR, "Out of space for key %s", keys[i]);
-		rc = ENOMEM;
+	    end = start + namelen;
+	    if (level <= prev_levels &&
+		strncmp(nodes[level].key.nodename, start, namelen+1) == 0)
+	    {
+		dbats_log(LOG_FINEST, "Found cached node %u at level %d: %.*s",
+		    ntohl(nodes[level].id), level, end - keys[i] + 1, keys[i]);
+		goto nextlevel; // reuse information from prefix of previous key
+	    }
+	    prev_levels = level - 1;
+
+	    keytree_key *ktkey = &nodes[level].key;
+	    ktkey->u.level_parent = (level == 1) ? chtonl(0) : nodes[level-1].id;
+	    ktkey->u.level = level; // overlaps u.level_parent
+	    memcpy(ktkey->nodename, start, namelen+1);
+	    ktkey_size = KTKEY_SIZE(namelen);
+
+	    rc = raw_db_get(dh, dh->dbKeytree, ktkey, ktkey_size,
+		&nodes[level].id, sizeof(nodes[level].id), NULL, 0);
+	    if (rc == 0) {
+		// found it
+		dbats_log(LOG_FINEST, "Found node %u at level %d: %.*s",
+		    ntohl(nodes[level].id), level, end - keys[i] + 1, keys[i]);
+		if (nodes[level].id & KTID_IS_NODE) {
+		    // keytree node
+		    if (*end == '\0') { // expecting a leaf?
+			dbats_log(LOG_ERROR, "Found node at level %d (%.*s) in key %s",
+			    level, namelen, start, keys[i]);
+			return EISDIR; // XXX
+		    }
+		} else {
+		    // keytree leaf (metric key)
+		    if (*end == '.') { // expecting a node?
+			dbats_log(LOG_ERROR, "Found leaf at level %d (%.*s) in key %s",
+			    level, namelen, start, keys[i]);
+			return ENOTDIR; // XXX
+		    }
+		    key_ids[i] = ntohl(nodes[level].id & KTKEY_ID_MASK);
+		    dbats_log(LOG_FINEST, "Found key #%u: %s", key_ids[i], keys[i]);
+		}
+
+	    } else if (rc != DB_NOTFOUND) {
+		// error
 		goto abort;
+
+	    } else if (!(flags & DBATS_CREATE)) {
+		// didn't find, and creation not requested
+		dbats_log(LOG_FINE, "Key not found: %s", keys[i]);
+		goto abort;
+
+	    } else if (dh->cfg.readonly) {
+		// creation requested but not allowed
+		rc = EPERM;
+		dbats_log(LOG_ERROR, "Unable to create key %s; %s", keys[i], db_strerror(rc));
+		goto abort;
+
+	    } else if (*end == '.') {
+		// create node
+		if (!dh->ktseq) {
+		    rc = db_sequence_create(&dh->ktseq, dh->dbSequence, 0);
+		    if (rc != 0) { msg = "db_sequence_create"; goto logabort; }
+		    rc = dh->ktseq->initial_value(dh->ktseq, 1);
+		    if (rc != 0) { msg = "seq->initial_value"; goto logabort; }
+		    rc = dh->ktseq->set_range(dh->ktseq, 1, KTKEY_MAX_PARENT);
+		    if (rc != 0) { msg = "seq->set_range"; goto logabort; }
+		    DBT_in(dbt_seq, (void*)"keytree_seq", strlen("keytree_seq"));
+		    rc = dh->ktseq->open(dh->ktseq, NULL, &dbt_seq, DB_CREATE);
+		    if (rc != 0) { msg = "seq->open"; goto logabort; }
+		    rc = dh->ktseq->set_cachesize(dh->ktseq, 32);
+		    if (rc != 0) { msg = "seq->set_cachesize"; goto logabort; }
+		}
+		db_seq_t seqnum;
+		rc = dh->ktseq->get(dh->ktseq, NULL, 1, &seqnum, DB_AUTO_COMMIT | DB_TXN_NOSYNC);
+		if (rc != 0) {
+		    dbats_log(LOG_ERROR, "ktseq->get: %s", db_strerror(rc));
+		    goto abort;
+		}
+		nodes[level].id = htonl(seqnum) | KTID_IS_NODE;
+		rc = raw_db_set(dh, dh->dbKeytree, ktkey, ktkey_size, &nodes[level].id, sizeof(nodes[level].id), 0);
+		if (rc != 0) goto abort;
+
+	    } else {
+		// create leaf (metric key)
+		db_recno_t recno;
+		DBT_out(dbt_keyrecno, &recno, sizeof(recno)); // put() will fill recno
+		DBT_in(dbt_keyname, (void*)keys[i], strlen(keys[i]));
+		rc = dh->dbKeyid->put(dh->dbKeyid, current_txn(dh), &dbt_keyrecno,
+		    &dbt_keyname, DB_APPEND);
+		if (rc != 0) {
+		    if (dh->action_in_prog && rc == DB_LOCK_DEADLOCK)
+			dh->action_cancelled = 1;
+		    dbats_log(LOG_ERROR, "Error creating keyid for %s: %s",
+			keys[i], db_strerror(rc));
+		    goto abort;
+		}
+		key_ids[i] = recno - 1;
+		if (key_ids[i] >= MAX_NUM_FRAGS * ENTRIES_PER_FRAG) {
+		    dbats_log(LOG_ERROR, "Out of space for key %s", keys[i]);
+		    rc = ENOMEM;
+		    goto abort;
+		}
+
+		nodes[level].id = htonl(key_ids[i]);
+		rc = raw_db_set(dh, dh->dbKeytree, ktkey, ktkey_size,
+		    &nodes[level].id, sizeof(nodes[level].id), DB_NOOVERWRITE);
+		if (rc != 0) goto abort;
+
+		dbats_log(LOG_FINEST, "Assigned key #%u: %s", key_ids[i], keys[i]);
 	    }
 
-	    DBT_in(dbt_keyid, &key_ids[i], sizeof(key_ids[i]));
-	    rc = dh->dbKeyname->put(dh->dbKeyname, current_txn(dh),
-		&dbt_keyname, &dbt_keyid, DB_NOOVERWRITE);
-	    if (rc != 0) {
-		if (dh->action_in_prog && rc == DB_LOCK_DEADLOCK)
-		    dh->action_cancelled = 1;
-		dbats_log(LOG_ERROR, "Error creating keyname %s -> %u: %s",
-		    keys[i], key_ids[i], db_strerror(rc));
-		goto abort;
-	    }
-	    dbats_log(LOG_FINEST, "Assigned key #%u: %s", key_ids[i], keys[i]);
+	nextlevel:
+	    if (!*end) break;
+	    start = end + 1;
+	    level++;
 	}
+	prev_levels = level - 1;
     }
 
     if (my_txn)
 	rc = commit_transaction(dh); // key txn
     if (rc == 0) return 0;
+
+logabort:
+    dbats_log(LOG_ERROR, "%s: %s", msg, db_strerror(rc));
 abort:
     if (my_txn)
 	abort_transaction(dh); // key txn
@@ -1991,6 +2126,7 @@ int dbats_get_by_key(dbats_handler *dh, const char *key,
 
 /*************************************************************************/
 
+#if 0
 int dbats_walk_keyname_start(dbats_handler *dh)
 {
     int rc;
@@ -2034,6 +2170,7 @@ int dbats_walk_keyname_end(dbats_handler *dh)
     }
     return 0;
 }
+#endif
 
 /*************************************************************************/
 
@@ -2096,16 +2233,17 @@ void dbats_stat_print(const dbats_handler *dh) {
     
     if ((rc = dh->dbMeta->stat_print(dh->dbMeta, DB_FAST_STAT)) != 0)
 	dbats_log(LOG_ERROR, "dumping Meta stats: %s", db_strerror(rc));
-    if (dh->dbBundle)
-	if ((rc = dh->dbBundle->stat_print(dh->dbBundle, DB_FAST_STAT)) != 0)
-	    dbats_log(LOG_ERROR, "dumping Bundle stats: %s", db_strerror(rc));
-    if ((rc = dh->dbKeyname->stat_print(dh->dbKeyname, DB_FAST_STAT)) != 0)
-	dbats_log(LOG_ERROR, "dumping Keyname stats: %s", db_strerror(rc));
+    if ((rc = dh->dbBundle->stat_print(dh->dbBundle, DB_FAST_STAT)) != 0)
+	dbats_log(LOG_ERROR, "dumping Bundle stats: %s", db_strerror(rc));
+    if ((rc = dh->dbKeytree->stat_print(dh->dbKeytree, DB_FAST_STAT)) != 0)
+	dbats_log(LOG_ERROR, "dumping Keytree stats: %s", db_strerror(rc));
     if ((rc = dh->dbKeyid->stat_print(dh->dbKeyid, DB_FAST_STAT)) != 0)
 	dbats_log(LOG_ERROR, "dumping Keyid stats: %s", db_strerror(rc));
     if ((rc = dh->dbData->stat_print(dh->dbData, DB_FAST_STAT)) != 0)
 	dbats_log(LOG_ERROR, "dumping Data stats: %s", db_strerror(rc));
     if ((rc = dh->dbIsSet->stat_print(dh->dbIsSet, DB_FAST_STAT)) != 0)
 	dbats_log(LOG_ERROR, "dumping IsSet stats: %s", db_strerror(rc));
+    if ((rc = dh->dbSequence->stat_print(dh->dbSequence, DB_FAST_STAT)) != 0)
+	dbats_log(LOG_ERROR, "dumping Sequence stats: %s", db_strerror(rc));
 }
 
