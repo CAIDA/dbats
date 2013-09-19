@@ -1,4 +1,4 @@
-AC_REVISION([$Id: configure.ac,v 1.5 2013/09/13 21:16:02 kkeys Exp $])
+AC_REVISION([$Id: configure.ac,v 1.6 2013/09/19 18:26:56 kkeys Exp $])
 
 AC_INIT(include/dbats.h)
 AC_PREREQ(2.53)
@@ -61,6 +61,8 @@ fi
 
 AC_CHECK_HEADERS(db.h)
 LIBS="-ldb $LIBS"
+
+AC_C_BIGENDIAN()
 
 
 PROGINC="
