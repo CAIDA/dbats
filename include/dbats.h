@@ -71,7 +71,7 @@
 
 /* ************************************************** */
 
-#define DBATS_DB_VERSION     5   ///< Version of db format written by this API
+#define DBATS_DB_VERSION     6   ///< Version of db format written by this API
 
 #define DBATS_KEYLEN         128 ///< max length of key name
 
@@ -82,7 +82,7 @@
 #define DBATS_READONLY     0x0008 ///< don't allow writing
 #define DBATS_UNCOMPRESSED 0x0010 ///< don't compress written time series data
 #define DBATS_EXCLUSIVE    0x0020 ///< obtain exclusive lock on whole db
-#define DBATS_NO_TXN       0x0040 ///< don't use transactions (for debugging only)
+#define DBATS_NO_TXN       0x0040 ///< don't use transactions (fast but unsafe)
 #define DBATS_UPDATABLE    0x0080 ///< allow updates to existing values
 #define DBATS_MULTIWRITE   0x0100 ///< allow multiple processes to write in parallel
 ///@}
@@ -156,7 +156,7 @@ typedef struct dbats_handler dbats_handler; ///< Opaque handle for a DBATS db
  *      performance).
  *    -	DBATS_UNCOMPRESSED - do not compress written time series data
  *    -	DBATS_EXCLUSIVE - do not allow any other process to access the database
- *    -	DBATS_NO_TXN - do not use transactions (unsafe)
+ *    -	DBATS_NO_TXN - do not use transactions (fast but unsafe)
  *    -	DBATS_UPDATABLE - allow updates to existing values
  *    - DBATS_MULTIWRITE - allow multiple processes to write simultaneously
  *      instead of taking turns
@@ -501,6 +501,7 @@ extern int dbats_get_by_key(dbats_handler *handler, const char *key,
  */
 extern int dbats_num_keys(dbats_handler *handler, uint32_t *num_keys);
 
+#if 0
 /** Prepare to iterate over the list of keys ordered by name.
  *  You must call dbats_walk_keyname_end() before calling dbats_commit(),
  *  dbats_select_time(), or dbats_close().
@@ -526,6 +527,7 @@ extern int dbats_walk_keyname_next(dbats_handler *handler, uint32_t *key_id_p,
  *  @return 0 for success, nonzero for error.
  */
 extern int dbats_walk_keyname_end(dbats_handler *handler);
+#endif
 
 /** Prepare to iterate over the list of keys ordered by id (which is the same
  *  order the keys were defined).
