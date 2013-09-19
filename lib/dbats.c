@@ -109,6 +109,12 @@ typedef struct {
     uint32_t id;
 } keytree_data;
 
+// cache of previous key lookup
+typedef struct {
+    uint32_t id;
+    keytree_key key;
+} kt_node_t;
+
 
 #define N_TXN 16
 
@@ -133,6 +139,8 @@ struct dbats_handler {
     DBC *keyname_cursor;       // for iterating over key names
     DBC *keyid_cursor;         // for iterating over key ids
     DB_SEQUENCE *ktseq;        // sequence for keytree node ids
+    kt_node_t *ktcache;        // keytree node cache
+    int kt_levels;             // # of levels in ktcache
     dbats_tslice **tslice;     // a tslice for each time series bundle
     dbats_bundle_info *bundle; // parameters for each time series bundle
     uint8_t *db_get_buf;       // buffer for data fragment
@@ -1158,6 +1166,7 @@ int dbats_close(dbats_handler *dh)
     if (dh->db_get_buf) free(dh->db_get_buf);
     if (dh->bundle) free(dh->bundle);
     if (dh->tslice) free(dh->tslice);
+    if (dh->ktcache) free(dh->ktcache);
 
     if (dh->ktseq) {
 	rc = dh->ktseq->close(dh->ktseq, 0);
@@ -1522,14 +1531,6 @@ retry:
 
 /*************************************************************************/
 
-// cache of previous key lookup
-typedef struct {
-    uint32_t id;
-    keytree_key key;
-} kt_node_t;
-static kt_node_t nodes[KTKEY_MAX_LEVEL];
-static int prev_levels = 0;
-
 int dbats_bulk_get_key_id(dbats_handler *dh, uint32_t n_keys,
     const char * const *keys, uint32_t *key_ids, uint32_t flags)
 {
@@ -1541,6 +1542,12 @@ int dbats_bulk_get_key_id(dbats_handler *dh, uint32_t n_keys,
 	begin_transaction(dh, "key txn");
 
     uint32_t ktkey_size;
+
+    if (!dh->ktcache) {
+	dh->ktcache = emalloc(sizeof(kt_node_t) * KTKEY_MAX_LEVEL,
+	    "keytree cache");
+	dh->kt_levels = 0;
+    }
 
     for (int i = 0; i < n_keys; i++) {
 
@@ -1555,43 +1562,49 @@ int dbats_bulk_get_key_id(dbats_handler *dh, uint32_t n_keys,
 		    level, namelen, start, keys[i]);
 	    }
 	    end = start + namelen;
-	    if (level <= prev_levels &&
-		strncmp(nodes[level].key.nodename, start, namelen+1) == 0)
+	    if (level <= dh->kt_levels &&
+		strncmp(dh->ktcache[level].key.nodename, start, namelen+1) == 0)
 	    {
 		dbats_log(LOG_FINEST, "Found cached node %u at level %d: %.*s",
-		    ntohl(nodes[level].id), level, end - keys[i] + 1, keys[i]);
+		    ntohl(dh->ktcache[level].id), level,
+		    end - keys[i] + 1, keys[i]);
 		goto nextlevel; // reuse information from prefix of previous key
 	    }
-	    prev_levels = level - 1;
+	    dh->kt_levels = level - 1;
 
-	    keytree_key *ktkey = &nodes[level].key;
-	    ktkey->u.level_parent = (level == 1) ? chtonl(0) : nodes[level-1].id;
+	    keytree_key *ktkey = &dh->ktcache[level].key;
+	    ktkey->u.level_parent =
+		(level == 1) ? chtonl(0) : dh->ktcache[level-1].id;
 	    ktkey->u.level = level; // overlaps u.level_parent
 	    memcpy(ktkey->nodename, start, namelen+1);
 	    ktkey_size = KTKEY_SIZE(namelen);
 
 	    rc = raw_db_get(dh, dh->dbKeytree, ktkey, ktkey_size,
-		&nodes[level].id, sizeof(nodes[level].id), NULL, 0);
+		&dh->ktcache[level].id, sizeof(dh->ktcache[level].id), NULL, 0);
 	    if (rc == 0) {
 		// found it
 		dbats_log(LOG_FINEST, "Found node %u at level %d: %.*s",
-		    ntohl(nodes[level].id), level, end - keys[i] + 1, keys[i]);
-		if (nodes[level].id & KTID_IS_NODE) {
+		    ntohl(dh->ktcache[level].id), level,
+		    end - keys[i] + 1, keys[i]);
+		if (dh->ktcache[level].id & KTID_IS_NODE) {
 		    // keytree node
 		    if (*end == '\0') { // expecting a leaf?
-			dbats_log(LOG_ERROR, "Found node at level %d (%.*s) in key %s",
+			dbats_log(LOG_ERROR,
+			    "Found node at level %d (%.*s) in key %s",
 			    level, namelen, start, keys[i]);
 			return EISDIR; // XXX
 		    }
 		} else {
 		    // keytree leaf (metric key)
 		    if (*end == '.') { // expecting a node?
-			dbats_log(LOG_ERROR, "Found leaf at level %d (%.*s) in key %s",
+			dbats_log(LOG_ERROR,
+			    "Found leaf at level %d (%.*s) in key %s",
 			    level, namelen, start, keys[i]);
 			return ENOTDIR; // XXX
 		    }
-		    key_ids[i] = ntohl(nodes[level].id & KTKEY_ID_MASK);
-		    dbats_log(LOG_FINEST, "Found key #%u: %s", key_ids[i], keys[i]);
+		    key_ids[i] = ntohl(dh->ktcache[level].id & KTKEY_ID_MASK);
+		    dbats_log(LOG_FINEST, "Found key #%u: %s", key_ids[i],
+			keys[i]);
 		}
 
 	    } else if (rc != DB_NOTFOUND) {
@@ -1606,7 +1619,8 @@ int dbats_bulk_get_key_id(dbats_handler *dh, uint32_t n_keys,
 	    } else if (dh->cfg.readonly) {
 		// creation requested but not allowed
 		rc = EPERM;
-		dbats_log(LOG_ERROR, "Unable to create key %s; %s", keys[i], db_strerror(rc));
+		dbats_log(LOG_ERROR, "Unable to create key %s; %s",
+		    keys[i], db_strerror(rc));
 		goto abort;
 
 	    } else if (*end == '.') {
@@ -1625,22 +1639,24 @@ int dbats_bulk_get_key_id(dbats_handler *dh, uint32_t n_keys,
 		    if (rc != 0) { msg = "seq->set_cachesize"; goto logabort; }
 		}
 		db_seq_t seqnum;
-		rc = dh->ktseq->get(dh->ktseq, NULL, 1, &seqnum, DB_AUTO_COMMIT | DB_TXN_NOSYNC);
+		rc = dh->ktseq->get(dh->ktseq, NULL, 1, &seqnum,
+		    DB_AUTO_COMMIT | DB_TXN_NOSYNC);
 		if (rc != 0) {
 		    dbats_log(LOG_ERROR, "ktseq->get: %s", db_strerror(rc));
 		    goto abort;
 		}
-		nodes[level].id = htonl(seqnum) | KTID_IS_NODE;
-		rc = raw_db_set(dh, dh->dbKeytree, ktkey, ktkey_size, &nodes[level].id, sizeof(nodes[level].id), 0);
+		dh->ktcache[level].id = htonl(seqnum) | KTID_IS_NODE;
+		rc = raw_db_set(dh, dh->dbKeytree, ktkey, ktkey_size,
+		    &dh->ktcache[level].id, sizeof(dh->ktcache[level].id), 0);
 		if (rc != 0) goto abort;
 
 	    } else {
 		// create leaf (metric key)
 		db_recno_t recno;
-		DBT_out(dbt_keyrecno, &recno, sizeof(recno)); // put() will fill recno
+		DBT_out(dbt_keyrecno, &recno, sizeof(recno)); // put() will fill
 		DBT_in(dbt_keyname, (void*)keys[i], strlen(keys[i]));
-		rc = dh->dbKeyid->put(dh->dbKeyid, current_txn(dh), &dbt_keyrecno,
-		    &dbt_keyname, DB_APPEND);
+		rc = dh->dbKeyid->put(dh->dbKeyid, current_txn(dh),
+		    &dbt_keyrecno, &dbt_keyname, DB_APPEND);
 		if (rc != 0) {
 		    if (dh->action_in_prog && rc == DB_LOCK_DEADLOCK)
 			dh->action_cancelled = 1;
@@ -1655,12 +1671,14 @@ int dbats_bulk_get_key_id(dbats_handler *dh, uint32_t n_keys,
 		    goto abort;
 		}
 
-		nodes[level].id = htonl(key_ids[i]);
+		dh->ktcache[level].id = htonl(key_ids[i]);
 		rc = raw_db_set(dh, dh->dbKeytree, ktkey, ktkey_size,
-		    &nodes[level].id, sizeof(nodes[level].id), DB_NOOVERWRITE);
+		    &dh->ktcache[level].id, sizeof(dh->ktcache[level].id),
+		    DB_NOOVERWRITE);
 		if (rc != 0) goto abort;
 
-		dbats_log(LOG_FINEST, "Assigned key #%u: %s", key_ids[i], keys[i]);
+		dbats_log(LOG_FINEST, "Assigned key #%u: %s",
+		    key_ids[i], keys[i]);
 	    }
 
 	nextlevel:
@@ -1668,7 +1686,7 @@ int dbats_bulk_get_key_id(dbats_handler *dh, uint32_t n_keys,
 	    start = end + 1;
 	    level++;
 	}
-	prev_levels = level - 1;
+	dh->kt_levels = level - 1;
     }
 
     if (my_txn)
