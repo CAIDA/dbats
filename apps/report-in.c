@@ -28,7 +28,7 @@ char *keys[10000000];
 uint32_t keyids[10000000];
 struct entry data[10000000];
 
-static void write_data(dbats_handler *handler, int select_flags, uint32_t t,
+static int write_data(dbats_handler *handler, int select_flags, uint32_t t,
     struct entry *dat, int n_data)
 {
     int rc;
@@ -37,7 +37,7 @@ retry:
     rc = dbats_select_time(handler, t, select_flags);
     if (rc != 0) {
 	dbats_log(LOG_ERROR, "error in dbats_select_time()");
-	exit(-1);
+	return -1;
     }
     for (int i = 0; i < n_data; i++) {
 	rc = dbats_set(handler, dat[i].key_id, &dat[i].value);
@@ -48,7 +48,7 @@ retry:
 		goto retry;
 	    }
 	    dbats_log(LOG_ERROR, "error in dbats_set()");
-	    exit(-1);
+	    return -1;
 	}
     }
     rc = dbats_commit(handler);
@@ -59,7 +59,7 @@ retry:
 	    goto retry;
 	}
 	dbats_log(LOG_ERROR, "error in dbats_commit()");
-	exit(-1);
+	return -1;
     }
 }
 
@@ -72,6 +72,7 @@ int main(int argc, char *argv[]) {
     int init_only = 0;
     progname = argv[0];
     uint32_t run_start, elapsed;
+    int rc = 0;
 
     dbats_log_level = LOG_INFO;
 
@@ -154,7 +155,7 @@ int main(int argc, char *argv[]) {
 	}
 
 	if (n_keys > 0) {
-	    dbats_bulk_get_key_id(handler, n_keys, (const char * const *)keys, keyids, DBATS_CREATE);
+	    rc = dbats_bulk_get_key_id(handler, n_keys, (const char * const *)keys, keyids, DBATS_CREATE);
 	}
 
     } else {
@@ -166,8 +167,9 @@ int main(int argc, char *argv[]) {
 
 	    if (t != last_t) {
 		if (n_data > 0) {
-		    write_data(handler, select_flags, last_t, data, n_data);
+		    rc = write_data(handler, select_flags, last_t, data, n_data);
 		    n_data = 0;
+		    if (rc != 0) break;
 		}
 		key_id = 0;
 	    }
@@ -189,7 +191,7 @@ int main(int argc, char *argv[]) {
 	}
 
 	if (n_data > 0) {
-	    write_data(handler, select_flags, last_t, data, n_data);
+	    rc = write_data(handler, select_flags, last_t, data, n_data);
 	    n_data = 0;
 	}
     }
@@ -201,5 +203,5 @@ int main(int argc, char *argv[]) {
     if (dbats_close(handler) != 0)
 	return -1;
     dbats_log(LOG_INFO, "Done");
-    return 0;
+    return rc;
 }
