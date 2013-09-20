@@ -100,19 +100,13 @@ typedef struct {
 #endif
 const uint32_t KTKEY_PARENT_MASK = chtonl(0x00FFFFFF);
 const uint32_t KTKEY_ID_MASK     = chtonl(0x7FFFFFFF);
-const uint32_t KTID_IS_NODE      = chtonl(0x80000000);
-
-// keytree data layout:
-// 1 bit: is_nodeid (0=keyid, 1=nodeid)
-// 31 bits: id
-typedef struct {
-    uint32_t id;
-} keytree_data;
+const uint32_t KTID_IS_NODE      = chtonl(DBATS_KEY_IS_PREFIX);
 
 // cache of previous key lookup
 typedef struct {
-    uint32_t id;
+    uint32_t id; // 1 bit flag (0=keyid, 1=nodeid); 31 bits id.  Big endian.
     keytree_key key;
+    const char *start;
 } kt_node_t;
 
 
@@ -141,6 +135,8 @@ struct dbats_handler {
     DB_SEQUENCE *ktseq;        // sequence for keytree node ids
     kt_node_t *ktcache;        // keytree node cache
     int kt_levels;             // # of levels in ktcache
+    const char *keyglob;       // keyglob state: pattern
+    int keyglob_lvl;           // keyglob state: current level
     dbats_tslice **tslice;     // a tslice for each time series bundle
     dbats_bundle_info *bundle; // parameters for each time series bundle
     uint8_t *db_get_buf;       // buffer for data fragment
@@ -237,7 +233,7 @@ static inline int begin_transaction(dbats_handler *dh, const char *name)
     dh->n_txn++;
     if (dh->n_txn > N_TXN) {
 	dbats_log(LOG_ERROR, "begin txn: %s: too many txns", name);
-	exit(-1);
+	return ENOMEM;
     }
     DB_TXN **childp = &current_txn(dh);
     rc = dh->dbenv->txn_begin(dh->dbenv, parent, childp, 0);
@@ -1531,173 +1527,209 @@ retry:
 
 /*************************************************************************/
 
-int dbats_bulk_get_key_id(dbats_handler *dh, uint32_t n_keys,
-    const char * const *keys, uint32_t *key_ids, uint32_t flags)
+static int glob_keyname_next(dbats_handler *dh, uint32_t *key_id_p, char *keynamebuf,
+    uint32_t flags)
 {
     int rc;
-    int my_txn = dh->cfg.exclusive && dh->n_txn == 0;
+    size_t namelen;
     const char *msg = NULL;
 
-    if (my_txn)
-	begin_transaction(dh, "key txn");
-
-    uint32_t ktkey_size;
-
-    if (!dh->ktcache) {
-	dh->ktcache = emalloc(sizeof(kt_node_t) * KTKEY_MAX_LEVEL,
-	    "keytree cache");
-	dh->kt_levels = 0;
-    }
-
-    for (int i = 0; i < n_keys; i++) {
-
-	int level = 1;
-	const char *start = keys[i];
-	const char *end = start;
-	while (1) {
-	    size_t namelen = strcspn(start, ".");
-	    if (namelen > KTKEY_NODENAME_MAXLEN) {
-		rc = EINVAL;
-		dbats_log(LOG_ERROR, "Node name too long at level %d (%.*s) in key %s",
-		    level, namelen, start, keys[i]);
-	    }
-	    end = start + namelen;
-	    if (level <= dh->kt_levels &&
-		strncmp(dh->ktcache[level].key.nodename, start, namelen+1) == 0)
-	    {
-		dbats_log(LOG_FINEST, "Found cached node %u at level %d: %.*s",
-		    ntohl(dh->ktcache[level].id), level,
-		    end - keys[i] + 1, keys[i]);
-		goto nextlevel; // reuse information from prefix of previous key
-	    }
-	    dh->kt_levels = level - 1;
-
-	    keytree_key *ktkey = &dh->ktcache[level].key;
-	    ktkey->u.level_parent =
-		(level == 1) ? chtonl(0) : dh->ktcache[level-1].id;
-	    ktkey->u.level = level; // overlaps u.level_parent
-	    memcpy(ktkey->nodename, start, namelen+1);
-	    ktkey_size = KTKEY_SIZE(namelen);
-
-	    rc = raw_db_get(dh, dh->dbKeytree, ktkey, ktkey_size,
-		&dh->ktcache[level].id, sizeof(dh->ktcache[level].id), NULL, 0);
-	    if (rc == 0) {
-		// found it
-		dbats_log(LOG_FINEST, "Found node %u at level %d: %.*s",
-		    ntohl(dh->ktcache[level].id), level,
-		    end - keys[i] + 1, keys[i]);
-		if (dh->ktcache[level].id & KTID_IS_NODE) {
-		    // keytree node
-		    if (*end == '\0') { // expecting a leaf?
-			dbats_log(LOG_ERROR,
-			    "Found node at level %d (%.*s) in key %s",
-			    level, namelen, start, keys[i]);
-			return EISDIR; // XXX
-		    }
-		} else {
-		    // keytree leaf (metric key)
-		    if (*end == '.') { // expecting a node?
-			dbats_log(LOG_ERROR,
-			    "Found leaf at level %d (%.*s) in key %s",
-			    level, namelen, start, keys[i]);
-			return ENOTDIR; // XXX
-		    }
-		    key_ids[i] = ntohl(dh->ktcache[level].id & KTKEY_ID_MASK);
-		    dbats_log(LOG_FINEST, "Found key #%u: %s", key_ids[i],
-			keys[i]);
-		}
-
-	    } else if (rc != DB_NOTFOUND) {
-		// error
-		goto abort;
-
-	    } else if (!(flags & DBATS_CREATE)) {
-		// didn't find, and creation not requested
-		dbats_log(LOG_FINE, "Key not found: %s", keys[i]);
-		goto abort;
-
-	    } else if (dh->cfg.readonly) {
-		// creation requested but not allowed
-		rc = EPERM;
-		dbats_log(LOG_ERROR, "Unable to create key %s; %s",
-		    keys[i], db_strerror(rc));
-		goto abort;
-
-	    } else if (*end == '.') {
-		// create node
-		if (!dh->ktseq) {
-		    rc = db_sequence_create(&dh->ktseq, dh->dbSequence, 0);
-		    if (rc != 0) { msg = "db_sequence_create"; goto logabort; }
-		    rc = dh->ktseq->initial_value(dh->ktseq, 1);
-		    if (rc != 0) { msg = "seq->initial_value"; goto logabort; }
-		    rc = dh->ktseq->set_range(dh->ktseq, 1, KTKEY_MAX_PARENT);
-		    if (rc != 0) { msg = "seq->set_range"; goto logabort; }
-		    DBT_in(dbt_seq, (void*)"keytree_seq", strlen("keytree_seq"));
-		    rc = dh->ktseq->open(dh->ktseq, NULL, &dbt_seq, DB_CREATE);
-		    if (rc != 0) { msg = "seq->open"; goto logabort; }
-		    rc = dh->ktseq->set_cachesize(dh->ktseq, 32);
-		    if (rc != 0) { msg = "seq->set_cachesize"; goto logabort; }
-		}
-		db_seq_t seqnum;
-		rc = dh->ktseq->get(dh->ktseq, NULL, 1, &seqnum,
-		    DB_AUTO_COMMIT | DB_TXN_NOSYNC);
-		if (rc != 0) {
-		    dbats_log(LOG_ERROR, "ktseq->get: %s", db_strerror(rc));
-		    goto abort;
-		}
-		dh->ktcache[level].id = htonl(seqnum) | KTID_IS_NODE;
-		rc = raw_db_set(dh, dh->dbKeytree, ktkey, ktkey_size,
-		    &dh->ktcache[level].id, sizeof(dh->ktcache[level].id), 0);
-		if (rc != 0) goto abort;
-
-	    } else {
-		// create leaf (metric key)
-		db_recno_t recno;
-		DBT_out(dbt_keyrecno, &recno, sizeof(recno)); // put() will fill
-		DBT_in(dbt_keyname, (void*)keys[i], strlen(keys[i]));
-		rc = dh->dbKeyid->put(dh->dbKeyid, current_txn(dh),
-		    &dbt_keyrecno, &dbt_keyname, DB_APPEND);
-		if (rc != 0) {
-		    if (dh->action_in_prog && rc == DB_LOCK_DEADLOCK)
-			dh->action_cancelled = 1;
-		    dbats_log(LOG_ERROR, "Error creating keyid for %s: %s",
-			keys[i], db_strerror(rc));
-		    goto abort;
-		}
-		key_ids[i] = recno - 1;
-		if (key_ids[i] >= MAX_NUM_FRAGS * ENTRIES_PER_FRAG) {
-		    dbats_log(LOG_ERROR, "Out of space for key %s", keys[i]);
-		    rc = ENOMEM;
-		    goto abort;
-		}
-
-		dh->ktcache[level].id = htonl(key_ids[i]);
-		rc = raw_db_set(dh, dh->dbKeytree, ktkey, ktkey_size,
-		    &dh->ktcache[level].id, sizeof(dh->ktcache[level].id),
-		    DB_NOOVERWRITE);
-		if (rc != 0) goto abort;
-
-		dbats_log(LOG_FINEST, "Assigned key #%u: %s",
-		    key_ids[i], keys[i]);
-	    }
-
-	nextlevel:
-	    if (!*end) break;
-	    start = end + 1;
-	    level++;
+    if (dh->keyglob_lvl == 0) {
+	// this is the first call
+	dh->keyglob_lvl = 1;
+	dh->ktcache[1].start = dh->keyglob;
+    } else if (flags & DBATS_GLOB) {
+#if 0
+	foo:
+	if (glob cursor in progress) {
+	    next cursor
+	    if (next) goto found;
 	}
-	dh->kt_levels = level - 1;
+	back out to previous level with a cursor in progress
+	if none found, return DB_NOTFOUND (the walk is done)
+	goto foo;
+#endif
     }
 
-    if (my_txn)
-	rc = commit_transaction(dh); // key txn
-    if (rc == 0) return 0;
+nextlevel:
+    namelen = strcspn(dh->ktcache[dh->keyglob_lvl].start, ".");
+    if (namelen > KTKEY_NODENAME_MAXLEN) {
+	dbats_log(LOG_ERROR,
+	    "Node name too long at level %d (%.*s) in key %s",
+	    dh->keyglob_lvl, namelen, dh->ktcache[dh->keyglob_lvl].start, dh->keyglob);
+	rc = EINVAL;
+	goto abort;
+    }
+    const char *end = dh->ktcache[dh->keyglob_lvl].start + namelen;
+    if (dh->keyglob_lvl <= dh->kt_levels &&
+	strncmp(dh->ktcache[dh->keyglob_lvl].key.nodename, dh->ktcache[dh->keyglob_lvl].start, namelen+1) == 0)
+    {
+	dbats_log(LOG_FINEST, "Found cached node %u at level %d: %.*s",
+	    ntohl(dh->ktcache[dh->keyglob_lvl].id), dh->keyglob_lvl,
+	    namelen + 1, dh->ktcache[dh->keyglob_lvl].start);
+	goto found;
+    }
+
+    dh->kt_levels = dh->keyglob_lvl - 1;
+
+    keytree_key *ktkey = &dh->ktcache[dh->keyglob_lvl].key;
+    ktkey->u.level_parent =
+	(dh->keyglob_lvl == 1) ? chtonl(0) : dh->ktcache[dh->keyglob_lvl-1].id;
+    ktkey->u.level = dh->keyglob_lvl; // overlaps u.level_parent
+    memcpy(ktkey->nodename, dh->ktcache[dh->keyglob_lvl].start, namelen+1);
+    uint32_t ktkey_size = KTKEY_SIZE(namelen);
+
+    rc = raw_db_get(dh, dh->dbKeytree, ktkey, ktkey_size,
+	&dh->ktcache[dh->keyglob_lvl].id, sizeof(dh->ktcache[dh->keyglob_lvl].id), NULL, 0);
+    if (rc == 0) {
+	// found it
+	dbats_log(LOG_FINEST, "Found node %u at level %d: %.*s",
+	    ntohl(dh->ktcache[dh->keyglob_lvl].id), dh->keyglob_lvl,
+	    namelen + 1, dh->ktcache[dh->keyglob_lvl].start);
+
+	if (*end == '.' && !(dh->ktcache[dh->keyglob_lvl].id & KTID_IS_NODE)) {
+	    // expecting node, found leaf
+	    dbats_log(LOG_ERROR, "Found leaf at level %d (%.*s) in key %s",
+		dh->keyglob_lvl, namelen, dh->ktcache[dh->keyglob_lvl].start,
+		dh->keyglob);
+	    rc = ENOTDIR;
+	    goto abort;
+	}
+
+    found:
+	if (!*end) {
+	    if (keynamebuf) {
+		int offset = 0;
+		for (int i = 1; i <= dh->keyglob_lvl; i++) {
+		    offset = sprintf(keynamebuf + offset, "%s",
+			dh->ktcache[dh->keyglob_lvl].key.nodename);
+		}
+	    }
+	    *key_id_p = ntohl(dh->ktcache[dh->keyglob_lvl].id);
+	    return 0;
+	} else {
+	    dh->keyglob_lvl++;
+	    dh->ktcache[dh->keyglob_lvl].start = end + 1;
+	    goto nextlevel;
+	}
+
+    } else if (rc != DB_NOTFOUND) {
+	// error
+	goto abort;
+
+    } else if (!(flags & DBATS_CREATE)) {
+	// didn't find, and creation not requested
+	dbats_log(LOG_FINE, "Key not found: %s", dh->keyglob);
+	goto abort;
+
+    } else if (dh->cfg.readonly) {
+	// creation requested but not allowed
+	rc = EPERM;
+	dbats_log(LOG_ERROR, "Unable to create key %s; %s",
+	    dh->keyglob, db_strerror(rc));
+	goto abort;
+
+    } else if (*end == '.') {
+	// create node
+	if (!dh->ktseq) {
+	    rc = db_sequence_create(&dh->ktseq, dh->dbSequence, 0);
+	    if (rc != 0) { msg = "db_sequence_create"; goto logabort; }
+	    rc = dh->ktseq->initial_value(dh->ktseq, 1);
+	    if (rc != 0) { msg = "seq->initial_value"; goto logabort; }
+	    rc = dh->ktseq->set_range(dh->ktseq, 1, KTKEY_MAX_PARENT);
+	    if (rc != 0) { msg = "seq->set_range"; goto logabort; }
+	    DBT_in(dbt_seq, (void*)"keytree_seq", strlen("keytree_seq"));
+	    rc = dh->ktseq->open(dh->ktseq, NULL, &dbt_seq, DB_CREATE);
+	    if (rc != 0) { msg = "seq->open"; goto logabort; }
+	    rc = dh->ktseq->set_cachesize(dh->ktseq, 32);
+	    if (rc != 0) { msg = "seq->set_cachesize"; goto logabort; }
+	}
+	db_seq_t seqnum;
+	rc = dh->ktseq->get(dh->ktseq, NULL, 1, &seqnum,
+	    DB_AUTO_COMMIT | DB_TXN_NOSYNC);
+	if (rc != 0) {
+	    dbats_log(LOG_ERROR, "ktseq->get: %s", db_strerror(rc));
+	    goto abort;
+	}
+	dh->ktcache[dh->keyglob_lvl].id = htonl(seqnum) | KTID_IS_NODE;
+	rc = raw_db_set(dh, dh->dbKeytree, ktkey, ktkey_size,
+	    &dh->ktcache[dh->keyglob_lvl].id, sizeof(dh->ktcache[dh->keyglob_lvl].id), 0);
+	if (rc != 0) goto abort;
+
+	dh->keyglob_lvl++;
+	dh->ktcache[dh->keyglob_lvl].start = end + 1;
+	goto nextlevel;
+
+    } else {
+	// create leaf (metric key)
+	db_recno_t recno;
+	DBT_out(dbt_keyrecno, &recno, sizeof(recno)); // put() will fill
+	DBT_in(dbt_keyname, (void*)dh->keyglob, strlen(dh->keyglob));
+	rc = dh->dbKeyid->put(dh->dbKeyid, current_txn(dh),
+	    &dbt_keyrecno, &dbt_keyname, DB_APPEND);
+	if (rc != 0) {
+	    if (dh->action_in_prog && rc == DB_LOCK_DEADLOCK)
+		dh->action_cancelled = 1;
+	    dbats_log(LOG_ERROR, "Error creating keyid for %s: %s",
+		dh->keyglob, db_strerror(rc));
+	    goto abort;
+	}
+	*key_id_p = recno - 1;
+	if (*key_id_p >= MAX_NUM_FRAGS * ENTRIES_PER_FRAG) {
+	    dbats_log(LOG_ERROR, "Out of space for key %s", dh->keyglob);
+	    rc = ENOMEM;
+	    goto abort;
+	}
+
+	dh->ktcache[dh->keyglob_lvl].id = htonl(*key_id_p);
+	rc = raw_db_set(dh, dh->dbKeytree, ktkey, ktkey_size,
+	    &dh->ktcache[dh->keyglob_lvl].id, sizeof(dh->ktcache[dh->keyglob_lvl].id),
+	    DB_NOOVERWRITE);
+	if (rc != 0) goto abort;
+
+	dbats_log(LOG_FINEST, "Assigned key #%u: %s",
+	    *key_id_p, dh->keyglob);
+	return 0;
+    }
 
 logabort:
     dbats_log(LOG_ERROR, "%s: %s", msg, db_strerror(rc));
 abort:
+    return rc;
+}
+
+int dbats_bulk_get_key_id(dbats_handler *dh, uint32_t n_keys,
+    const char * const *keys, uint32_t *key_ids, uint32_t flags)
+{
+    // XXX if (dh->keyglob) ... conflict
+    int rc = 0;
+    int my_txn = dh->cfg.exclusive && dh->n_txn == 0;
+
     if (my_txn)
-	abort_transaction(dh); // key txn
+	begin_transaction(dh, "key txn");
+
+    for (int i = 0; i < n_keys; i++) {
+	dbats_glob_keyname_start(dh, keys[i]);
+
+	rc = glob_keyname_next(dh, &key_ids[i], NULL, flags & ~DBATS_GLOB);
+	if (rc != 0)
+	    break;
+	if (key_ids[i] & DBATS_KEY_IS_PREFIX) {
+	    dbats_log(LOG_ERROR, "Key %s is only a prefix", keys[i]);
+	    rc = EISDIR;
+	    break;
+	}
+	dbats_log(LOG_FINEST, "Found key #%u: %s", key_ids[i],
+	    keys[i]);
+    }
+
+    dbats_glob_keyname_end(dh);
+    if (my_txn) {
+	if (rc == 0)
+	    rc = commit_transaction(dh); // key txn
+	else
+	    abort_transaction(dh); // key txn
+    }
     return rc;
 }
 
@@ -1705,6 +1737,32 @@ int dbats_get_key_id(dbats_handler *dh, const char *key,
     uint32_t *key_id_p, uint32_t flags)
 {
     return dbats_bulk_get_key_id(dh, 1, &key, key_id_p, flags);
+}
+
+int dbats_glob_keyname_start(dbats_handler *dh, const char *pattern)
+{
+    // XXX if (dh->keyglob) ... conflict
+    if (!dh->ktcache) {
+        dh->ktcache = emalloc(sizeof(kt_node_t) * KTKEY_MAX_LEVEL,
+            "keytree cache");
+        dh->kt_levels = 0;
+    }
+
+    dh->keyglob = pattern;
+    dh->keyglob_lvl = 0;
+    return 0;
+}
+
+int dbats_glob_keyname_next(dbats_handler *dh, uint32_t *key_id_p,
+    char *namebuf)
+{
+    return glob_keyname_next(dh, key_id_p, namebuf, DBATS_GLOB);
+}
+
+int dbats_glob_keyname_end(dbats_handler *dh)
+{
+    dh->keyglob = NULL;
+    return 0;
 }
 
 int dbats_get_key_name(dbats_handler *dh, uint32_t key_id, char *namebuf)

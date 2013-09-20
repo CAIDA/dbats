@@ -74,6 +74,7 @@
 #define DBATS_DB_VERSION     6   ///< Version of db format written by this API
 
 #define DBATS_KEYLEN         128 ///< max length of key name
+#define DBATS_KEY_IS_PREFIX  0x80000000
 
 /** @name Flags */
 ///@{
@@ -85,6 +86,7 @@
 #define DBATS_NO_TXN       0x0040 ///< don't use transactions (fast but unsafe)
 #define DBATS_UPDATABLE    0x0080 ///< allow updates to existing values
 #define DBATS_MULTIWRITE   0x0100 ///< allow multiple processes to write in parallel
+#define DBATS_GLOB         0x0200 // allow glob
 ///@}
 
 /** @name Aggregation functions */
@@ -500,6 +502,13 @@ extern int dbats_get_by_key(dbats_handler *handler, const char *key,
  *  @return 0 for success, nonzero for error.
  */
 extern int dbats_num_keys(dbats_handler *handler, uint32_t *num_keys);
+
+extern int dbats_glob_keyname_start(dbats_handler *dh, const char *pattern);
+
+extern int dbats_glob_keyname_next(dbats_handler *dh, uint32_t *key_id_p,
+    char *namebuf);
+
+extern int dbats_glob_keyname_end(dbats_handler *dh);
 
 #if 0
 /** Prepare to iterate over the list of keys ordered by name.
