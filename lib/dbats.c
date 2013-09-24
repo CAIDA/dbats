@@ -99,6 +99,7 @@ typedef struct {
     const char *start; // start of substr of dh->keyglob that matched this node
     uint32_t gnlen;    // length of glob node in dh->keyglob
     uint32_t anlen;    // length of actual node in key.nodename
+    uint32_t pfxlen;   // length of literal prefix of nodename glob
     keytree_key key;   // db key for this node
     DBC *cursor;       // db cursor for globbing this node
 } kt_node_t;
@@ -1569,8 +1570,10 @@ next_glob:
 	    &dbt_ktkey, &dbt_ktid, DB_NEXT);
 
 glob_result:
-	if (rc == 0 && node->key.parent == dh->ktstate[lvl-1].id) {
-	    // found match with correct parent
+	if (rc == 0 && node->key.parent == dh->ktstate[lvl-1].id &&
+	    strncmp(node->key.nodename, node->start, node->pfxlen) == 0)
+	{
+	    // found match with correct parent and nodename prefix
 	    node->anlen = dbt_ktkey.size - KTKEY_SIZE(0);
 	    node->key.nodename[node->anlen] =
 		(node->id & KTID_IS_NODE) ? '.' : '\0';
@@ -1597,12 +1600,18 @@ glob_result:
 
 next_level:
     node->gnlen = strcspn(node->start, ".");
-    if ((flags & DBATS_GLOB) && strncmp(node->start, "*", node->gnlen) == 0) {
+    if (flags & DBATS_GLOB) {
 	// search for a glob match for this level
+	node->pfxlen = strcspn(node->start, "*.");
+	if (node->pfxlen < node->gnlen - 1) {
+	    dbats_log(LOG_ERROR, "Illegal glob");
+	    return EINVAL;
+	}
 	rc = dh->dbKeytree->cursor(dh->dbKeytree, NULL, &node->cursor, 0);
 	if (rc != 0) { msg = "cursor"; goto logabort; }
 	node->key.parent = dh->ktstate[lvl-1].id;
-	DBT_init_in(dbt_ktkey, &node->key, KTKEY_SIZE(0));
+	memcpy(node->key.nodename, node->start, node->pfxlen);
+	DBT_init_in(dbt_ktkey, &node->key, KTKEY_SIZE(node->pfxlen));
 	dbt_ktkey.ulen = sizeof(keytree_key);
 	DBT_init_out(dbt_ktid, &node->id, sizeof(uint32_t));
 	rc = raw_cursor_get(dh, dh->dbKeytree, node->cursor,
