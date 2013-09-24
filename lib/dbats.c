@@ -76,19 +76,12 @@ typedef struct {
 
 
 #define KTKEY_NODENAME_MAXLEN 255
-#define KTKEY_PARENT(key) ((key).u.level_parent & KTKEY_PARENT_MASK) 
 #define KTKEY_MAX_LEVEL 0xFF
-#define KTKEY_MAX_PARENT 0x00FFFFFF
+#define KTKEY_MAX_NODE 0x7FFFFFFF
 
-// keytree key layout:
-// 1 bytes: position
-// 3 bytes: parent_id
-// n bytes: nodename
+// dbKeytree table's key
 typedef struct {
-    union {
-	uint8_t level; // overlaps first 8 bits of level_parent
-	uint32_t level_parent; // 8b level, 24b parent_id, in network byte order
-    } u;
+    uint32_t parent; // big endian
     char nodename[KTKEY_NODENAME_MAXLEN];
 } keytree_key;
 #define KTKEY_SIZE(nodenamelen) (sizeof(uint32_t) + nodenamelen)
@@ -96,17 +89,18 @@ typedef struct {
 #ifdef WORDS_BIGENDIAN
 #define chtonl(x) (x)
 #else
-#define chtonl(x) (((x&0xFF)<<24) | ((x&0xFF00)<<8) | ((x&0xFF0000)>>8) | ((x&0xFF000000)>>24))
+#define chtonl(x) ((((x)&0xFF)<<24) | (((x)&0xFF00)<<8) | (((x)&0xFF0000)>>8) | (((x)&0xFF000000)>>24))
 #endif
-const uint32_t KTKEY_PARENT_MASK = chtonl(0x00FFFFFF);
-const uint32_t KTKEY_ID_MASK     = chtonl(0x7FFFFFFF);
 const uint32_t KTID_IS_NODE      = chtonl(DBATS_KEY_IS_PREFIX);
 
 // cache of previous key lookup
 typedef struct {
     uint32_t id; // 1 bit flag (0=keyid, 1=nodeid); 31 bits id.  Big endian.
-    keytree_key key;
-    const char *start;
+    const char *start; // start of substr of dh->keyglob that matched this node
+    uint32_t gnlen;    // length of glob node in dh->keyglob
+    uint32_t anlen;    // length of actual node in key.nodename
+    keytree_key key;   // db key for this node
+    DBC *cursor;       // db cursor for globbing this node
 } kt_node_t;
 
 
@@ -133,8 +127,8 @@ struct dbats_handler {
     DBC *keyname_cursor;       // for iterating over key names
     DBC *keyid_cursor;         // for iterating over key ids
     DB_SEQUENCE *ktseq;        // sequence for keytree node ids
-    kt_node_t *ktcache;        // keytree node cache
-    int kt_levels;             // # of levels in ktcache
+    kt_node_t *ktstate;        // keytree state: node stack
+    int kt_levels;             // # of levels in ktstate
     const char *keyglob;       // keyglob state: pattern
     int keyglob_lvl;           // keyglob state: current level
     dbats_tslice **tslice;     // a tslice for each time series bundle
@@ -166,26 +160,34 @@ const char *dbats_agg_func_label[] = {
  ************************************************************************/
 
 // Construct a DBT for sending data to DB.
-#define DBT_in(_var, _data, _size) \
-    DBT _var; \
+#define DBT_init_in(_var, _data, _size) \
     memset(&_var, 0, sizeof(DBT)); \
     _var.data = _data; \
     _var.size = _size; \
     _var.flags = DB_DBT_USERMEM
 
+// Construct a DBT for sending data to DB.
+#define DBT_in(_var, _data, _size) DBT _var; DBT_init_in(_var, _data, _size)
+
+
 // Construct a DBT for receiving data from DB.
-#define DBT_out(_var, _data, _ulen) \
-    DBT _var; \
+#define DBT_init_out(_var, _data, _ulen) \
     memset(&_var, 0, sizeof(DBT)); \
     _var.data = _data; \
     _var.ulen = _ulen; \
     _var.flags = DB_DBT_USERMEM
 
+// Construct a DBT for receiving data from DB.
+#define DBT_out(_var, _data, _ulen) DBT _var; DBT_init_out(_var, _data, _ulen)
+
+
 // Construct a DBT for receiving nothing from DB.
-#define DBT_null(_var) \
-    DBT _var; \
+#define DBT_init_null(_var) \
     memset(&_var, 0, sizeof(DBT)); \
     _var.flags = DB_DBT_PARTIAL
+
+// Construct a DBT for receiving nothing from DB.
+#define DBT_null(_var) DBT _var; DBT_init_null(_var)
 
 static inline uint32_t min(uint32_t a, uint32_t b) { return a < b ? a : b; }
 static inline uint32_t max(uint32_t a, uint32_t b) { return a > b ? a : b; }
@@ -327,9 +329,8 @@ static void log_db_op(int level, const char *fname, int line, dbats_handler *dh,
 	sprintf(keybuf, "%d", *(uint8_t*)key);
     } else if (db == dh->dbKeytree) {
 	keytree_key* ktkey = (keytree_key*)key;
-	sprintf(keybuf, "level=%d parent=%d name=\"%.*s\"",
-	    ktkey->u.level, ntohl(KTKEY_PARENT(*ktkey)),
-	    key_len - sizeof(*ktkey), ktkey->nodename);
+	sprintf(keybuf, "parent=%x name=\"%.*s\"",
+	    ntohl(ktkey->parent), key_len - KTKEY_SIZE(0), ktkey->nodename);
     } else if (db == dh->dbMeta) {
 	sprintf(keybuf, "\"%.*s\"", key_len, (char*)key);
     } else if (db == dh->dbKeyid) {
@@ -429,8 +430,8 @@ static int (raw_cursor_get)(const char *fname, int line,
     // version 4 didn't support DB_READ_COMMITTED in cursor get
     flags = flags & ~DB_READ_COMMITTED;
 #endif
+    char label[32] = "cursor_get()";
     if (dbats_log_level >= LOG_FINEST) {
-	char label[32];
 	int op = flags & DB_OPFLAGS_MASK;
 	const char *opstr =
 	    (op == DB_NEXT) ? "NEXT" :
@@ -447,6 +448,9 @@ static int (raw_cursor_get)(const char *fname, int line,
 	log_db_op(LOG_FINEST, fname, line, dh, db, label, key->data, key->size, "");
     }
     int rc = dbc->get(dbc, key, data, flags);
+    if (rc != 0)
+	log_db_op((rc == DB_NOTFOUND) ? LOG_FINE : LOG_WARNING,
+	    fname, line, dh, db, label, key->data, key->size, db_strerror(rc));
     if (dh->action_in_prog && rc == DB_LOCK_DEADLOCK)
 	dh->action_cancelled = 1;
     return rc;
@@ -1162,7 +1166,7 @@ int dbats_close(dbats_handler *dh)
     if (dh->db_get_buf) free(dh->db_get_buf);
     if (dh->bundle) free(dh->bundle);
     if (dh->tslice) free(dh->tslice);
-    if (dh->ktcache) free(dh->ktcache);
+    if (dh->ktstate) free(dh->ktstate);
 
     if (dh->ktseq) {
 	rc = dh->ktseq->close(dh->ktseq, 0);
@@ -1525,177 +1529,246 @@ retry:
     goto restart;
 }
 
+
 /*************************************************************************/
 
-static int glob_keyname_next(dbats_handler *dh, uint32_t *key_id_p, char *keynamebuf,
-    uint32_t flags)
+static inline void glob_keyname_prev_level(dbats_handler *dh)
+{
+    kt_node_t *kts = dh->ktstate;
+    int lvl = dh->keyglob_lvl;
+
+    if (kts[lvl].cursor) {
+	kts[lvl].cursor->close(kts[lvl].cursor);
+	kts[lvl].cursor = NULL;
+    }
+    dh->keyglob_lvl--;
+}
+
+static int glob_keyname_next(dbats_handler *dh, uint32_t *key_id_p,
+    char *keynamebuf, uint32_t flags)
 {
     int rc;
-    size_t namelen;
     const char *msg = NULL;
+    DBT dbt_ktkey;
+    DBT dbt_ktid;
 
-    if (dh->keyglob_lvl == 0) {
-	// this is the first call
-	dh->keyglob_lvl = 1;
-	dh->ktcache[1].start = dh->keyglob;
-    } else if (flags & DBATS_GLOB) {
-#if 0
-	foo:
-	if (glob cursor in progress) {
-	    next cursor
-	    if (next) goto found;
-	}
-	back out to previous level with a cursor in progress
-	if none found, return DB_NOTFOUND (the walk is done)
-	goto foo;
-#endif
-    }
+// shorthands
+#define lvl (dh->keyglob_lvl)
+#define node (&dh->ktstate[lvl])
 
-nextlevel:
-    namelen = strcspn(dh->ktcache[dh->keyglob_lvl].start, ".");
-    if (namelen > KTKEY_NODENAME_MAXLEN) {
-	dbats_log(LOG_ERROR,
-	    "Node name too long at level %d (%.*s) in key %s",
-	    dh->keyglob_lvl, namelen, dh->ktcache[dh->keyglob_lvl].start, dh->keyglob);
-	rc = EINVAL;
-	goto abort;
-    }
-    const char *end = dh->ktcache[dh->keyglob_lvl].start + namelen;
-    if (dh->keyglob_lvl <= dh->kt_levels &&
-	strncmp(dh->ktcache[dh->keyglob_lvl].key.nodename, dh->ktcache[dh->keyglob_lvl].start, namelen+1) == 0)
-    {
-	dbats_log(LOG_FINEST, "Found cached node %u at level %d: %.*s",
-	    ntohl(dh->ktcache[dh->keyglob_lvl].id), dh->keyglob_lvl,
-	    namelen + 1, dh->ktcache[dh->keyglob_lvl].start);
-	goto found;
-    }
+next_key:
+    if (lvl == 0)
+	return DB_NOTFOUND;
 
-    dh->kt_levels = dh->keyglob_lvl - 1;
+    if (node->cursor) {
+next_glob:
+	// continue with glob scan in progress
+	DBT_init_out(dbt_ktkey, &node->key, sizeof(keytree_key));
+	DBT_init_out(dbt_ktid, &node->id, sizeof(uint32_t));
+	rc = raw_cursor_get(dh, dh->dbKeytree, node->cursor,
+	    &dbt_ktkey, &dbt_ktid, DB_NEXT);
 
-    keytree_key *ktkey = &dh->ktcache[dh->keyglob_lvl].key;
-    ktkey->u.level_parent =
-	(dh->keyglob_lvl == 1) ? chtonl(0) : dh->ktcache[dh->keyglob_lvl-1].id;
-    ktkey->u.level = dh->keyglob_lvl; // overlaps u.level_parent
-    memcpy(ktkey->nodename, dh->ktcache[dh->keyglob_lvl].start, namelen+1);
-    uint32_t ktkey_size = KTKEY_SIZE(namelen);
+glob_result:
+	if (rc == 0 && node->key.parent == dh->ktstate[lvl-1].id) {
+	    // found match with correct parent
+	    node->anlen = dbt_ktkey.size - KTKEY_SIZE(0);
+	    node->key.nodename[node->anlen] =
+		(node->id & KTID_IS_NODE) ? '.' : '\0';
+	    dbats_log(LOG_FINEST, "Globbed %s %x at level %d: %.*s",
+		(node->id & KTID_IS_NODE) ? "node" : "leaf",
+		ntohl(node->id), lvl, node->anlen+1, node->key.nodename);
+	    goto found;
 
-    rc = raw_db_get(dh, dh->dbKeytree, ktkey, ktkey_size,
-	&dh->ktcache[dh->keyglob_lvl].id, sizeof(dh->ktcache[dh->keyglob_lvl].id), NULL, 0);
-    if (rc == 0) {
-	// found it
-	dbats_log(LOG_FINEST, "Found node %u at level %d: %.*s",
-	    ntohl(dh->ktcache[dh->keyglob_lvl].id), dh->keyglob_lvl,
-	    namelen + 1, dh->ktcache[dh->keyglob_lvl].start);
-
-	if (*end == '.' && !(dh->ktcache[dh->keyglob_lvl].id & KTID_IS_NODE)) {
-	    // expecting node, found leaf
-	    dbats_log(LOG_ERROR, "Found leaf at level %d (%.*s) in key %s",
-		dh->keyglob_lvl, namelen, dh->ktcache[dh->keyglob_lvl].start,
-		dh->keyglob);
-	    rc = ENOTDIR;
-	    goto abort;
-	}
-
-    found:
-	if (!*end) {
-	    if (keynamebuf) {
-		int offset = 0;
-		for (int i = 1; i <= dh->keyglob_lvl; i++) {
-		    offset = sprintf(keynamebuf + offset, "%s",
-			dh->ktcache[dh->keyglob_lvl].key.nodename);
-		}
+	} else if (rc == 0 || rc == DB_NOTFOUND) {
+	    // we've scanned past last matching node
+	    dbats_log(LOG_FINEST, "No match for parent=%x",
+		ntohl(dh->ktstate[lvl-1].id));
+	    while (1) {
+		glob_keyname_prev_level(dh);
+		if (lvl == 0) return DB_NOTFOUND;
+		if (node->cursor) goto next_glob;
 	    }
-	    *key_id_p = ntohl(dh->ktcache[dh->keyglob_lvl].id);
-	    return 0;
+
 	} else {
-	    dh->keyglob_lvl++;
-	    dh->ktcache[dh->keyglob_lvl].start = end + 1;
-	    goto nextlevel;
+	    // error
+	    return rc;
 	}
+    }
 
-    } else if (rc != DB_NOTFOUND) {
-	// error
-	goto abort;
+next_level:
+    node->gnlen = strcspn(node->start, ".");
+    if ((flags & DBATS_GLOB) && strncmp(node->start, "*", node->gnlen) == 0) {
+	// search for a glob match for this level
+	rc = dh->dbKeytree->cursor(dh->dbKeytree, NULL, &node->cursor, 0);
+	if (rc != 0) { msg = "cursor"; goto logabort; }
+	node->key.parent = dh->ktstate[lvl-1].id;
+	DBT_init_in(dbt_ktkey, &node->key, KTKEY_SIZE(0));
+	dbt_ktkey.ulen = sizeof(keytree_key);
+	DBT_init_out(dbt_ktid, &node->id, sizeof(uint32_t));
+	rc = raw_cursor_get(dh, dh->dbKeytree, node->cursor,
+	    &dbt_ktkey, &dbt_ktid, DB_SET_RANGE);
+	goto glob_result;
+    }
 
-    } else if (!(flags & DBATS_CREATE)) {
-	// didn't find, and creation not requested
-	dbats_log(LOG_FINE, "Key not found: %s", dh->keyglob);
-	goto abort;
-
-    } else if (dh->cfg.readonly) {
-	// creation requested but not allowed
-	rc = EPERM;
-	dbats_log(LOG_ERROR, "Unable to create key %s; %s",
-	    dh->keyglob, db_strerror(rc));
-	goto abort;
-
-    } else if (*end == '.') {
-	// create node
-	if (!dh->ktseq) {
-	    rc = db_sequence_create(&dh->ktseq, dh->dbSequence, 0);
-	    if (rc != 0) { msg = "db_sequence_create"; goto logabort; }
-	    rc = dh->ktseq->initial_value(dh->ktseq, 1);
-	    if (rc != 0) { msg = "seq->initial_value"; goto logabort; }
-	    rc = dh->ktseq->set_range(dh->ktseq, 1, KTKEY_MAX_PARENT);
-	    if (rc != 0) { msg = "seq->set_range"; goto logabort; }
-	    DBT_in(dbt_seq, (void*)"keytree_seq", strlen("keytree_seq"));
-	    rc = dh->ktseq->open(dh->ktseq, NULL, &dbt_seq, DB_CREATE);
-	    if (rc != 0) { msg = "seq->open"; goto logabort; }
-	    rc = dh->ktseq->set_cachesize(dh->ktseq, 32);
-	    if (rc != 0) { msg = "seq->set_cachesize"; goto logabort; }
-	}
-	db_seq_t seqnum;
-	rc = dh->ktseq->get(dh->ktseq, NULL, 1, &seqnum,
-	    DB_AUTO_COMMIT | DB_TXN_NOSYNC);
-	if (rc != 0) {
-	    dbats_log(LOG_ERROR, "ktseq->get: %s", db_strerror(rc));
-	    goto abort;
-	}
-	dh->ktcache[dh->keyglob_lvl].id = htonl(seqnum) | KTID_IS_NODE;
-	rc = raw_db_set(dh, dh->dbKeytree, ktkey, ktkey_size,
-	    &dh->ktcache[dh->keyglob_lvl].id, sizeof(dh->ktcache[dh->keyglob_lvl].id), 0);
-	if (rc != 0) goto abort;
-
-	dh->keyglob_lvl++;
-	dh->ktcache[dh->keyglob_lvl].start = end + 1;
-	goto nextlevel;
+    // search for an exact match for this level
+    if (lvl <= dh->kt_levels &&
+	strncmp(node->key.nodename, node->start, node->gnlen+1) == 0)
+    {
+	// found in cache
+	dbats_log(LOG_FINEST, "Found cached node %x at level %d: %.*s",
+	    ntohl(node->id), lvl, node->anlen + 1, node->start);
+	goto found;
 
     } else {
-	// create leaf (metric key)
-	db_recno_t recno;
-	DBT_out(dbt_keyrecno, &recno, sizeof(recno)); // put() will fill
-	DBT_in(dbt_keyname, (void*)dh->keyglob, strlen(dh->keyglob));
-	rc = dh->dbKeyid->put(dh->dbKeyid, current_txn(dh),
-	    &dbt_keyrecno, &dbt_keyname, DB_APPEND);
-	if (rc != 0) {
-	    if (dh->action_in_prog && rc == DB_LOCK_DEADLOCK)
-		dh->action_cancelled = 1;
-	    dbats_log(LOG_ERROR, "Error creating keyid for %s: %s",
+	// do a db lookup
+	dh->kt_levels = lvl - 1;
+	keytree_key *ktkey = &node->key;
+	ktkey->parent = dh->ktstate[lvl-1].id;
+	memcpy(ktkey->nodename, node->start, node->gnlen+1);
+	uint32_t ktkey_size = KTKEY_SIZE(node->gnlen);
+
+	rc = raw_db_get(dh, dh->dbKeytree, ktkey, ktkey_size,
+	    &node->id, sizeof(node->id), NULL, 0);
+
+	if (rc == 0) {
+	    // found it
+	    node->anlen = node->gnlen;
+	    dbats_log(LOG_FINEST, "Found node %x at level %d: %.*s",
+		ntohl(node->id), lvl, node->anlen + 1, node->start);
+	    goto found;
+
+	} else if (rc != DB_NOTFOUND) {
+	    // error
+	    return rc;
+
+	} else if (!(flags & DBATS_CREATE)) {
+	    // not found, and creation not requested
+	    dbats_log(LOG_FINE, "Key not found: %s", dh->keyglob);
+	    while (1) {
+		glob_keyname_prev_level(dh);
+		if (lvl == 0) return DB_NOTFOUND;
+		if (node->cursor) goto next_glob;
+	    }
+
+	} else if (dh->cfg.readonly) {
+	    // creation requested but not allowed
+	    rc = EPERM;
+	    dbats_log(LOG_ERROR, "Unable to create key %s; %s",
 		dh->keyglob, db_strerror(rc));
-	    goto abort;
-	}
-	*key_id_p = recno - 1;
-	if (*key_id_p >= MAX_NUM_FRAGS * ENTRIES_PER_FRAG) {
-	    dbats_log(LOG_ERROR, "Out of space for key %s", dh->keyglob);
-	    rc = ENOMEM;
-	    goto abort;
-	}
+	    return rc;
 
-	dh->ktcache[dh->keyglob_lvl].id = htonl(*key_id_p);
-	rc = raw_db_set(dh, dh->dbKeytree, ktkey, ktkey_size,
-	    &dh->ktcache[dh->keyglob_lvl].id, sizeof(dh->ktcache[dh->keyglob_lvl].id),
-	    DB_NOOVERWRITE);
-	if (rc != 0) goto abort;
+	} else {
+	    // create
+	    if (node->gnlen > KTKEY_NODENAME_MAXLEN) {
+		dbats_log(LOG_ERROR,
+		    "Node name too long at level %d (%.*s) in key %s",
+		    lvl, node->gnlen, node->start, dh->keyglob);
+		return EINVAL;
+	    }
+	    node->anlen = node->gnlen;
 
-	dbats_log(LOG_FINEST, "Assigned key #%u: %s",
-	    *key_id_p, dh->keyglob);
-	return 0;
+	    if (node->start[node->gnlen] == '.') {
+		// create node
+		if (!dh->ktseq) {
+		    rc = db_sequence_create(&dh->ktseq, dh->dbSequence, 0);
+		    if (rc != 0) { msg = "db_sequence_create"; goto logabort; }
+		    rc = dh->ktseq->initial_value(dh->ktseq, 1);
+		    if (rc != 0) { msg = "seq->initial_value"; goto logabort; }
+		    rc = dh->ktseq->set_range(dh->ktseq, 1, KTKEY_MAX_NODE);
+		    if (rc != 0) { msg = "seq->set_range"; goto logabort; }
+		    DBT_in(dbt_seq, (void*)"keytree_seq", strlen("keytree_seq"));
+		    rc = dh->ktseq->open(dh->ktseq, NULL, &dbt_seq, DB_CREATE);
+		    if (rc != 0) { msg = "seq->open"; goto logabort; }
+		    rc = dh->ktseq->set_cachesize(dh->ktseq, 32);
+		    if (rc != 0) { msg = "seq->set_cachesize"; goto logabort; }
+		}
+		db_seq_t seqnum;
+		rc = dh->ktseq->get(dh->ktseq, NULL, 1, &seqnum,
+		    DB_AUTO_COMMIT | DB_TXN_NOSYNC);
+		if (rc != 0) { msg = "ktseq->get"; goto logabort; }
+		node->id = htonl(seqnum) | KTID_IS_NODE;
+		rc = raw_db_set(dh, dh->dbKeytree, ktkey, ktkey_size,
+		    &node->id, sizeof(node->id), 0);
+		if (rc != 0) return rc;
+		dbats_log(LOG_FINEST, "Created node #%x: %.*s",
+		    ntohl(node->id), node->gnlen, node->key.nodename);
+		goto found;
+
+	    } else {
+		// create leaf (metric key)
+		db_recno_t recno;
+		DBT_out(dbt_keyrecno, &recno, sizeof(recno)); // put() will fill
+		DBT_in(dbt_keyname, (void*)dh->keyglob, strlen(dh->keyglob));
+		rc = dh->dbKeyid->put(dh->dbKeyid, current_txn(dh),
+		    &dbt_keyrecno, &dbt_keyname, DB_APPEND);
+		if (rc != 0) {
+		    if (dh->action_in_prog && rc == DB_LOCK_DEADLOCK)
+			dh->action_cancelled = 1;
+		    dbats_log(LOG_ERROR, "Error creating keyid for %s: %s",
+			dh->keyglob, db_strerror(rc));
+		    return rc;
+		}
+		node->id = htonl(recno - 1);
+		if (*key_id_p >= MAX_NUM_FRAGS * ENTRIES_PER_FRAG) {
+		    dbats_log(LOG_ERROR, "Out of space for key %s", dh->keyglob);
+		    return ENOMEM;
+		}
+
+		rc = raw_db_set(dh, dh->dbKeytree, ktkey, ktkey_size,
+		    &node->id, sizeof(node->id), DB_NOOVERWRITE);
+		if (rc != 0) return rc;
+
+		dbats_log(LOG_FINEST, "Assigned key #%x: %s",
+		    ntohl(node->id), dh->keyglob);
+		goto found;
+	    }
+	}
     }
+
+found:
+    if (node->start[node->gnlen] == '.') {
+	if (!(node->id & KTID_IS_NODE)) {
+	    // expecting node, found leaf
+	    if (!(flags & DBATS_GLOB)) {
+		dbats_log(LOG_ERROR, "Found leaf at level %d (%.*s) in key %s",
+		    lvl, node->gnlen, node->start, dh->keyglob);
+		return ENOTDIR;
+	    }
+	    while (lvl > 0 && !node->cursor) {
+		glob_keyname_prev_level(dh);
+	    }
+	    goto next_key;
+	}
+	// go to next level
+	++lvl;
+	node->start = dh->ktstate[lvl-1].start + dh->ktstate[lvl-1].gnlen + 1;
+	node->cursor = NULL;
+	goto next_level;
+    }
+
+    // generate result
+    if (keynamebuf) {
+	int offset = 0;
+	for (int i = 1; i <= lvl; i++) {
+	    offset += sprintf(keynamebuf + offset, "%.*s",
+		dh->ktstate[i].anlen + 1, dh->ktstate[i].key.nodename);
+	}
+    }
+    *key_id_p = ntohl(node->id);
+
+    // prepare for next call
+    while (lvl > 0 && !node->cursor) {
+	glob_keyname_prev_level(dh);
+    }
+
+    return 0;
 
 logabort:
     dbats_log(LOG_ERROR, "%s: %s", msg, db_strerror(rc));
-abort:
     return rc;
+
+#undef lvl
+#undef node
 }
 
 int dbats_bulk_get_key_id(dbats_handler *dh, uint32_t n_keys,
@@ -1742,14 +1815,17 @@ int dbats_get_key_id(dbats_handler *dh, const char *key,
 int dbats_glob_keyname_start(dbats_handler *dh, const char *pattern)
 {
     // XXX if (dh->keyglob) ... conflict
-    if (!dh->ktcache) {
-        dh->ktcache = emalloc(sizeof(kt_node_t) * KTKEY_MAX_LEVEL,
-            "keytree cache");
+    if (!dh->ktstate) {
+        dh->ktstate = emalloc(sizeof(kt_node_t) * KTKEY_MAX_LEVEL,
+            "keytree state");
+	dh->ktstate[0].key.parent = 0;
+	dh->ktstate[0].id = chtonl(0) | KTID_IS_NODE;
         dh->kt_levels = 0;
     }
 
-    dh->keyglob = pattern;
-    dh->keyglob_lvl = 0;
+    dh->keyglob_lvl = 1;
+    dh->ktstate[1].start = dh->keyglob = pattern;
+    dh->ktstate[1].cursor = NULL;
     return 0;
 }
 
@@ -1761,6 +1837,8 @@ int dbats_glob_keyname_next(dbats_handler *dh, uint32_t *key_id_p,
 
 int dbats_glob_keyname_end(dbats_handler *dh)
 {
+    while (dh->keyglob_lvl)
+	glob_keyname_prev_level(dh);
     dh->keyglob = NULL;
     return 0;
 }
