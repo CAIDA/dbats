@@ -503,12 +503,45 @@ extern int dbats_get_by_key(dbats_handler *handler, const char *key,
  */
 extern int dbats_num_keys(dbats_handler *handler, uint32_t *num_keys);
 
-extern int dbats_glob_keyname_start(dbats_handler *dh, const char *pattern);
+/** Prepare to iterate over the list of keys that match pattern.
+ *  The pattern is similar to shell filename globbing, except that
+ *  hierarchical components are separated by '.' instead of '/'.
+ *    - * matches any zero or more characters
+ *    - ? matches any one character
+ *    - [...] matches any one character in the character class
+ *      - A leading '^' negates the character class
+ *      - Two characters separated by '-' describe the range of ASCII
+ *        characters between the first and second characters, inclusive
+ *    - Any other character matches itself.
+ *    - Any special character can have its special meaning removed by
+ *      preceeding it with '\'.
+ *
+ *  @param[in] handler A dbats_handler created by dbats_open().
+ *  @param[in] pattern A fileglob-like pattern
+ *  @return 0 for success, or EINVAL if the pattern is invalid.
+ */
+extern int dbats_glob_keyname_start(dbats_handler *handler, const char *pattern);
 
-extern int dbats_glob_keyname_next(dbats_handler *dh, uint32_t *key_id_p,
+/** Get the next key id and key name in the sequence started by
+ *  dbats_glob_keyname_start().
+ *  @param[in] handler A dbats_handler created by dbats_open().
+ *  @param[out] key_id_p A pointer to a uint32_t where the key_id will be written.
+ *  @param[out] namebuf a pointer to an array of at least DBATS_KEYLEN
+ *    characters where the key's name will be written, or NULL if you do not
+ *    need the name.
+ *  @return
+ *    - 0 for success;
+ *    - DB_NOTFOUND if there are no more matching keys;
+ *    - other nonzero value for error.
+ */
+extern int dbats_glob_keyname_next(dbats_handler *handler, uint32_t *key_id_p,
     char *namebuf);
 
-extern int dbats_glob_keyname_end(dbats_handler *dh);
+/** End the sequence started by dbats_glob_keyname_start().
+ *  @param[in] handler A dbats_handler created by dbats_open().
+ *  @return 0 for success, nonzero for error.
+ */
+extern int dbats_glob_keyname_end(dbats_handler *handler);
 
 #if 0
 /** Prepare to iterate over the list of keys ordered by name.
@@ -554,7 +587,10 @@ extern int dbats_walk_keyid_start(dbats_handler *handler);
  *  @param[out] namebuf a pointer to an array of at least DBATS_KEYLEN
  *    characters where the key's name will be written, or NULL if you do not
  *    need the name.
- *  @return 0 for success, nonzero for error.
+ *  @return
+ *    - 0 for success;
+ *    - DB_NOTFOUND if there are no more keys;
+ *    - other nonzero value for error.
  */
 extern int dbats_walk_keyid_next(dbats_handler *handler, uint32_t *key_id_p,
     char *namebuf);
