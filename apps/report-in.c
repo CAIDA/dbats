@@ -61,6 +61,7 @@ retry:
 	dbats_log(LOG_ERROR, "error in dbats_commit()");
 	return -1;
     }
+    return 0;
 }
 
 int main(int argc, char *argv[]) {
