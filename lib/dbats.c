@@ -1575,45 +1575,66 @@ static int glob_match(const char *pat, const char *str)
 
         case '\\':
             pat++;
-            if (*pat++ != *str++) return 0;
             break;
 
         case '?':
             if (!*str) return 0;
             str++;
             pat++;
-            break;
+            continue;
 
         case '*':
             for (++pat; *pat == '*' || *pat == '?'; ++pat) {
-                if (*pat == '?') {
-                    if (!*str) return 0;
-                    str++;
-                }
+                if (*pat == '?' && !*str++) return 0;
             }
             if (!*pat) {
                 return 1;
-	    } else if (strchr("[\\", *pat)) {
+	    } else if (strchr("\\[{", *pat)) {
 		// '*' is followed by metachar
                 for ( ; *str; str++)
 		    if (glob_match(pat, str)) return 1;
                 return 0;
-            } else {
-		// optimization: scan for *pat before recursive function call
-                for ( ; *str; str++)
-                    if (*str == *pat && glob_match(pat+1, str+1))
-                        return 1;
-                return 0;
             }
+	    // optimization: scan for *pat before recursive function call
+	    for ( ; *str; str++)
+		if (*str == *pat && glob_match(pat+1, str+1))
+		    return 1;
+	    return 0;
 
         case '[':
             if (!(pat = char_match(pat, *str++))) return 0;
-            break;
+            continue;
 
-        default:
-            if (*pat++ != *str++) return 0;
-            break;
-        }
+	case '{':
+	    ++pat;
+	    {
+		int failed = 0;
+		const char *strstart = str;
+		while (1) {
+		    if (*pat == '\\') {
+			++pat;
+		    } else if (*pat == ',') {
+			if (failed) {
+			    str = strstart;
+			    failed = 0;
+			    ++pat;
+			    continue;
+			}
+			pat = estrchr(pat, '}') + 1;
+			break; // success
+		    } else if (*pat == '}') {
+			if (failed) return 0;
+			++pat;
+			break; // success
+		    }
+		    if (*pat++ != *str++)
+			failed = 1;
+		}
+	    }
+	    continue;
+	}
+
+	if (*pat++ != *str++) return 0;
     }
     return *pat == *str;
 }
@@ -1629,6 +1650,13 @@ static int glob_validate(const char *pat)
         case '[':
             if (!(pat = estrchr(pat, ']'))) {
                 dbats_log(LOG_ERROR, "glob error: unmatched '['");
+                return 0;
+            }
+            pat++;
+            break;
+        case '{':
+            if (!(pat = estrchr(pat, '}'))) {
+                dbats_log(LOG_ERROR, "glob error: unmatched '{'");
                 return 0;
             }
             pat++;
@@ -1725,7 +1753,7 @@ next_level:
     node->gnlen = strcspn(node->start, ".");
     if (flags & DBATS_GLOB) {
 	// search for a glob match for this level
-	node->pfxlen = strcspn(node->start, "\\?[*.");
+	node->pfxlen = strcspn(node->start, "\\?[{*.");
 	rc = dh->dbKeytree->cursor(dh->dbKeytree, NULL, &node->cursor, 0);
 	if (rc != 0) { msg = "cursor"; goto logabort; }
 	node->key.parent = dh->ktstate[lvl-1].id;

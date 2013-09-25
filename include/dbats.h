@@ -512,6 +512,8 @@ extern int dbats_num_keys(dbats_handler *handler, uint32_t *num_keys);
  *      - A leading '^' negates the character class
  *      - Two characters separated by '-' describe the range of ASCII
  *        characters between the first and second characters, inclusive
+ *    - {...} matches any one string of characters in the comma-separated list
+ *      of strings
  *    - Any other character matches itself.
  *    - Any special character can have its special meaning removed by
  *      preceeding it with '\'.
