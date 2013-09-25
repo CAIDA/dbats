@@ -93,15 +93,15 @@ typedef struct {
 #endif
 const uint32_t KTID_IS_NODE      = chtonl(DBATS_KEY_IS_PREFIX);
 
-// cache of previous key lookup
+// key tree lookup state
 typedef struct {
-    uint32_t id; // 1 bit flag (0=keyid, 1=nodeid); 31 bits id.  Big endian.
-    const char *start; // start of substr of dh->keyglob that matched this node
-    uint32_t gnlen;    // length of glob node in dh->keyglob
-    uint32_t anlen;    // length of actual node in key.nodename
-    uint32_t pfxlen;   // length of literal prefix of nodename glob
-    keytree_key key;   // db key for this node
-    DBC *cursor;       // db cursor for globbing this node
+    uint32_t id;     // 1 bit flag (0=keyid, 1=nodeid); 31 bit id.  Big endian.
+    char *start;     // start of substr of dh->keyglob that matched this node
+    uint32_t gnlen;  // length of glob node in dh->keyglob
+    uint32_t anlen;  // length of actual node in key.nodename
+    uint32_t pfxlen; // length of literal prefix of nodename glob
+    keytree_key key; // db key for this node
+    DBC *cursor;     // db cursor for globbing this node
 } kt_node_t;
 
 
@@ -130,7 +130,7 @@ struct dbats_handler {
     DB_SEQUENCE *ktseq;        // sequence for keytree node ids
     kt_node_t *ktstate;        // keytree state: node stack
     int kt_levels;             // # of levels in ktstate
-    const char *keyglob;       // keyglob state: pattern
+    char *keyglob;             // keyglob state: pattern
     int keyglob_lvl;           // keyglob state: current level
     dbats_tslice **tslice;     // a tslice for each time series bundle
     dbats_bundle_info *bundle; // parameters for each time series bundle
@@ -1533,6 +1533,118 @@ retry:
 
 /*************************************************************************/
 
+// like strchr(), except that c may be escaped by preceeding it with '\\'
+static char *estrchr(register const char *s, register int c)
+{
+    while (*s) {
+        if (*s == c) return (char *)s;
+        if (*s == '\\' && s[1]) s++;
+        s++;
+    }
+    return NULL;
+}
+
+// cclass is a pointer to a string of the form "[...]..."
+// c is compared against the character class described by cclass.
+// If c matches, char_match() returns a pointer to the char after ']' in cclass;
+// otherwise, char_match() returns NULL.
+static const char *char_match(const char *cclass, int c)
+{
+    int not = (*++cclass == '^');
+    if (not) ++cclass;
+    while (1) {
+        if (*cclass == ']') return (char*)(not ? cclass + 1 : NULL);
+        if (*cclass == '\\') ++cclass;
+        if (cclass[1] == '-' && cclass[2] != ']') {
+            char low = *cclass;
+            cclass += 2;
+            if (*cclass == '\\') ++cclass;
+            if (c >= low && c <= *cclass) break;
+        } else if (c == *cclass) {
+	    break;
+	}
+        ++cclass;
+    }
+    return not ? NULL : (estrchr(cclass+1, ']') + 1);
+}
+
+static int glob_match(const char *pat, const char *str)
+{
+    while (*pat) {
+        switch (*pat) {
+
+        case '\\':
+            pat++;
+            if (*pat++ != *str++) return 0;
+            break;
+
+        case '?':
+            if (!*str) return 0;
+            str++;
+            pat++;
+            break;
+
+        case '*':
+            for (++pat; *pat == '*' || *pat == '?'; ++pat) {
+                if (*pat == '?') {
+                    if (!*str) return 0;
+                    str++;
+                }
+            }
+            if (!*pat) {
+                return 1;
+	    } else if (strchr("[\\", *pat)) {
+		// '*' is followed by metachar
+                for ( ; *str; str++)
+		    if (glob_match(pat, str)) return 1;
+                return 0;
+            } else {
+		// optimization: scan for *pat before recursive function call
+                for ( ; *str; str++)
+                    if (*str == *pat && glob_match(pat+1, str+1))
+                        return 1;
+                return 0;
+            }
+
+        case '[':
+            if (!(pat = char_match(pat, *str++))) return 0;
+            break;
+
+        default:
+            if (*pat++ != *str++) return 0;
+            break;
+        }
+    }
+    return *pat == *str;
+}
+
+// verify syntax of glob pattern
+static int glob_validate(const char *pat)
+{
+    while (*pat) {
+        switch (*pat) {
+        case '\\':
+            if (*++pat) pat++;
+            break;
+        case '[':
+            if (!(pat = estrchr(pat, ']'))) {
+                dbats_log(LOG_ERROR, "glob error: unmatched '['");
+                return 0;
+            }
+            pat++;
+            break;
+        case '?':
+        case '*':
+        default:
+            pat++;
+            break;
+        }
+    }
+    return 1;
+}
+
+/*************************************************************************/
+
 static inline void glob_keyname_prev_level(dbats_handler *dh)
 {
     kt_node_t *kts = dh->ktstate;
@@ -1575,6 +1687,17 @@ glob_result:
 	{
 	    // found match with correct parent and nodename prefix
 	    node->anlen = dbt_ktkey.size - KTKEY_SIZE(0);
+	    char terminator = node->start[node->gnlen];
+	    node->start[node->gnlen] = '\0';
+	    node->key.nodename[node->anlen] = '\0';
+	    int ismatch = glob_match(node->start, node->key.nodename);
+	    node->start[node->gnlen] = terminator;
+	    if (!ismatch) {
+		dbats_log(LOG_FINEST, "Glob skip %s %x at level %d: %.*s",
+		    (node->id & KTID_IS_NODE) ? "node" : "leaf",
+		    ntohl(node->id), lvl, node->anlen+1, node->key.nodename);
+		goto next_glob;
+	    }
 	    node->key.nodename[node->anlen] =
 		(node->id & KTID_IS_NODE) ? '.' : '\0';
 	    dbats_log(LOG_FINEST, "Globbed %s %x at level %d: %.*s",
@@ -1602,11 +1725,7 @@ next_level:
     node->gnlen = strcspn(node->start, ".");
     if (flags & DBATS_GLOB) {
 	// search for a glob match for this level
-	node->pfxlen = strcspn(node->start, "*.");
-	if (node->pfxlen < node->gnlen - 1) {
-	    dbats_log(LOG_ERROR, "Illegal glob");
-	    return EINVAL;
-	}
+	node->pfxlen = strcspn(node->start, "\\?[*.");
 	rc = dh->dbKeytree->cursor(dh->dbKeytree, NULL, &node->cursor, 0);
 	if (rc != 0) { msg = "cursor"; goto logabort; }
 	node->key.parent = dh->ktstate[lvl-1].id;
@@ -1833,8 +1952,20 @@ int dbats_glob_keyname_start(dbats_handler *dh, const char *pattern)
     }
 
     dh->keyglob_lvl = 1;
-    dh->ktstate[1].start = dh->keyglob = pattern;
+    dh->ktstate[1].start = dh->keyglob = strdup(pattern);
     dh->ktstate[1].cursor = NULL;
+
+    char *start = dh->keyglob;
+    while (1) {
+	char *end = strchr(start, '.');
+	if (end) *end = '\0';
+	if (!glob_validate(start))
+	    return EINVAL;
+	if (!end) break;
+	*end = '.';
+	start = end + 1;
+    }
+
     return 0;
 }
 
@@ -1848,6 +1979,7 @@ int dbats_glob_keyname_end(dbats_handler *dh)
 {
     while (dh->keyglob_lvl)
 	glob_keyname_prev_level(dh);
+    if (dh->keyglob) free(dh->keyglob);
     dh->keyglob = NULL;
     return 0;
 }
