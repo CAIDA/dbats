@@ -9,10 +9,13 @@ static void help(void) {
     fprintf(stderr, "%s [{options}] {dbats_path}\n", progname);
     fprintf(stderr, "Display information about a DBATS database.\n");
     fprintf(stderr, "options:\n");
-    fprintf(stderr, "-v{N}    verbosity level\n");
-    fprintf(stderr, "-x       obtain exclusive lock on db\n");
-    fprintf(stderr, "-t       don't use transactions (fast, but unsafe)\n");
-    fprintf(stderr, "-k       also print list of keys in db\n");
+    fprintf(stderr, "-v{N}       verbosity level\n");
+    fprintf(stderr, "-x          obtain exclusive lock on db\n");
+    fprintf(stderr, "-t          don't use transactions (fast, but unsafe)\n");
+    fprintf(stderr, "-s          print summary statistics\n");
+    fprintf(stderr, "-k          print list of keys in db\n");
+    fprintf(stderr, "-K{pattern} print list of keys in db matching {pattern}\n");
+    fprintf(stderr, "-a          print all information (-s -k)\n");
     exit(-1);
 }
 
@@ -42,7 +45,9 @@ int main(int argc, char *argv[]) {
     dbats_handler *handler;
     uint32_t period = 60;
     int open_flags = DBATS_READONLY;
+    int opt_summary = 0;
     int opt_keys = 0;
+    char *keyglob = NULL;
     progname = argv[0];
     int rc = 0;
     const dbats_config *cfg;
@@ -50,7 +55,7 @@ int main(int argc, char *argv[]) {
     dbats_log_level = LOG_INFO;
 
     int c;
-    while ((c = getopt(argc, argv, "v:xtk")) != -1) {
+    while ((c = getopt(argc, argv, "v:xtaskK:")) != -1) {
 	switch (c) {
 	case 'v':
 	    dbats_log_level = atoi(optarg);
@@ -61,8 +66,18 @@ int main(int argc, char *argv[]) {
 	case 't':
 	    open_flags |= DBATS_NO_TXN;
 	    break;
+	case 'a':
+	    opt_summary = 1;
+	    opt_keys = 1;
+	    break;
+	case 's':
+	    opt_summary = 1;
+	    break;
 	case 'k':
 	    opt_keys = 1;
+	    break;
+	case 'K':
+	    keyglob = strdup(optarg);
 	    break;
 	default:
 	    help();
@@ -71,6 +86,9 @@ int main(int argc, char *argv[]) {
     }
     argv += optind;
     argc -= optind;
+
+    if (optind == 1) // no options given
+	opt_summary = 1;
 
     if (argc != 1)
 	help();
@@ -81,35 +99,51 @@ int main(int argc, char *argv[]) {
     dbats_commit(handler);
 
     cfg = dbats_get_config(handler);
-    printf("dbats database version: %d\n", cfg->version);
-    printf("values_per_entry: %d\n", cfg->values_per_entry);
-    printf("entry_size: %d bytes\n", cfg->entry_size);
-    uint32_t num_keys;
-    dbats_num_keys(handler, &num_keys);
-    printf("keys: %d\n", num_keys);
-    print_duration("period: ", cfg->period);
 
-    for (int bid = 0; bid < cfg->num_bundles; bid++) {
-	const dbats_bundle_info *bundle = dbats_get_bundle_info(handler, bid);
-	uint32_t start, end;
-	dbats_get_start_time(handler, bid, &start);
-	dbats_get_end_time(handler, bid, &end);
-	printf("bundle %d:\n", bid);
-	printf("  function: %s\n", dbats_agg_func_label[bundle->func]);
-	printf("  steps: %u\n", bundle->steps);
-	print_duration("  period: ", bundle->period);
-	printf("  keep: %u\n", bundle->keep);
-	print_time("  start: ", start);
-	print_time("  end:   ", end);
+    if (opt_summary) {
+	printf("dbats database version: %d\n", cfg->version);
+	printf("values_per_entry: %d\n", cfg->values_per_entry);
+	printf("entry_size: %d bytes\n", cfg->entry_size);
+	uint32_t num_keys;
+	dbats_num_keys(handler, &num_keys);
+	printf("keys: %d\n", num_keys);
+	print_duration("period: ", cfg->period);
+
+	for (int bid = 0; bid < cfg->num_bundles; bid++) {
+	    const dbats_bundle_info *bundle =
+		dbats_get_bundle_info(handler, bid);
+	    uint32_t start, end;
+	    dbats_get_start_time(handler, bid, &start);
+	    dbats_get_end_time(handler, bid, &end);
+	    printf("bundle %d:\n", bid);
+	    printf("  function: %s\n", dbats_agg_func_label[bundle->func]);
+	    printf("  steps: %u\n", bundle->steps);
+	    print_duration("  period: ", bundle->period);
+	    printf("  keep: %u\n", bundle->keep);
+	    print_time("  start: ", start);
+	    print_time("  end:   ", end);
+	}
+    }
+
+    if (keyglob) {
+	printf("keys matching \"%s\":\n", keyglob);
+	if (dbats_glob_keyname_start(handler, keyglob) == 0) {
+	    uint32_t keyid;
+	    char keybuf[DBATS_KEYLEN];
+	    while (dbats_glob_keyname_next(handler, &keyid, keybuf) == 0) {
+		printf("  %10u: %s\n", keyid, keybuf);
+	    }
+	    dbats_glob_keyname_end(handler);
+	}
     }
 
     if (opt_keys) {
-	printf("keys:\n");
+	printf("all keys:\n");
 	dbats_walk_keyid_start(handler);
 	uint32_t keyid;
 	char keybuf[DBATS_KEYLEN];
 	while (dbats_walk_keyid_next(handler, &keyid, keybuf) == 0) {
-	    printf("  %8u: %s\n", keyid, keybuf);
+	    printf("  %10u: %s\n", keyid, keybuf);
 	}
 	dbats_walk_keyid_end(handler);
     }
