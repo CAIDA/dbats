@@ -43,8 +43,8 @@ ct_assert((sizeof(double) <= sizeof(dbats_value)), dbats_value_is_smaller_than_d
 #define vec_reset(vec, i) (vec[(i)/8] &= ~(1<<((i)%8)))  // reset the ith bit
 #define vec_test(vec, i)  (vec && (vec[(i)/8] & (1<<((i)%8)))) // test ith bit
 
-#define valueptr(dh, bid, frag_id, offset) \
-    ((dbats_value*)(&dh->tslice[bid]->frag[frag_id]->data[offset * dh->cfg.entry_size]))
+#define valueptr(ds, bid, frag_id, offset) \
+    ((dbats_value*)(&ds->tslice[bid]->frag[frag_id]->data[offset * dh->cfg.entry_size]))
 
 // "Fragment", containing a large subset of entries for a timeslice
 typedef struct dbats_frag {
@@ -74,6 +74,22 @@ typedef struct {
     uint32_t frag_id;
 } fragkey_t;
 
+#define N_TXN 16
+
+typedef struct txn_info_t {
+    DB_TXN *txn[N_TXN]; // stack of transactions ([0] is NULL)
+    int n_txn;          // number of transactions in stack (not incl [0])
+    uint8_t in_prog;    // action in progress?
+    uint8_t cancelled;  // cancelled due to deadlock
+} txn_info_t;
+
+typedef struct {
+    dbats_handler *dh;
+    DB *db;
+    DBC *dbc;
+    txn_info_t *txn_info;
+} cursor_wrapper;
+
 
 #define KTKEY_NODENAME_MAXLEN 255
 #define KTKEY_MAX_LEVEL 0xFF
@@ -96,50 +112,18 @@ const uint32_t KTID_IS_NODE      = chtonl(DBATS_KEY_IS_PREFIX);
 // key tree lookup state
 typedef struct {
     uint32_t id;     // 1 bit flag (0=keyid, 1=nodeid); 31 bit id.  Big endian.
-    char *start;     // start of substr of dh->keyglob that matched this node
-    uint32_t gnlen;  // length of glob node in dh->keyglob
+    char *start;     // start of substr of dh->pattern that matched this node
+    uint32_t gnlen;  // length of glob node in dh->pattern
     uint32_t anlen;  // length of actual node in key.nodename
     uint32_t pfxlen; // length of literal prefix of nodename glob
     keytree_key key; // db key for this node
-    DBC *cursor;     // db cursor for globbing this node
+    cursor_wrapper cursor;     // db cursor for globbing this node
 } kt_node_t;
 
 
-#define N_TXN 16
-
-struct dbats_handler {
-    dbats_config cfg;
-    const char *path;          // path of BDB environment directory
-    uint8_t is_open;
-    uint8_t preload;           // load frags when tslice is selected
-    uint8_t serialize;         // allow only one writer at a time
-    uint8_t changed;           // has changes that need to be written to db?
-    uint8_t emulate_exclusive; // emulating set_lk_exclusive()?
-    void *state_compress;
-    void *state_decompress;
-    DB_ENV *dbenv;             // DB environment
-    DB *dbMeta;                // config parameters
-    DB *dbBundle;              // bundle parameters
-    DB *dbKeytree;             // {level, parent, nodename} -> node id or key id
-    DB *dbKeyid;               // recno -> key name (note: keyid == recno - 1)
-    DB *dbData;                // {bid, time, frag_id} -> value fragment
-    DB *dbIsSet;               // {bid, time, frag_id} -> is_set fragment
-    DB *dbSequence;            // BDB sequences
-    DBC *keyname_cursor;       // for iterating over key names
-    DBC *keyid_cursor;         // for iterating over key ids
-    DB_SEQUENCE *ktseq;        // sequence for keytree node ids
-    kt_node_t *ktstate;        // keytree state: node stack
-    int kt_levels;             // # of levels in ktstate
-    char *keyglob;             // keyglob state: pattern
-    int keyglob_lvl;           // keyglob state: current level
+struct dbats_snapshot {
+    dbats_handler *dh;
     dbats_tslice **tslice;     // a tslice for each time series bundle
-    dbats_bundle_info *bundle; // parameters for each time series bundle
-    uint8_t *db_get_buf;       // buffer for data fragment
-    size_t db_get_buf_len;
-    DB_TXN *txn[N_TXN];        // stack of transactions ([0] is NULL)
-    int n_txn;                 // number of transactions in stack (not incl [0])
-    uint8_t action_in_prog;    // action in progress?
-    uint8_t action_cancelled;  // cancelled due to deadlock
     uint32_t active_start;     // first timestamp in active period
                                // (corresponding to is_set[0])
     uint32_t active_end;       // last timestamp in active period
@@ -148,9 +132,52 @@ struct dbats_handler {
     uint32_t min_keep_time;    // earliest time for which a value can be set
     uint8_t ***is_set;         // each is_set[timeindex][fragid] is a bitvector
                                // indicating which cols have values
+    txn_info_t txn_info;       // transaction info
+    void *state_compress;
+    void *state_decompress;
+    uint8_t *db_get_buf;       // buffer for data fragment
+    uint8_t preload;           // load frags when tslice is selected
+    uint8_t changed;           // has changes that need to be written to db?
+    size_t db_get_buf_len;
+    uint16_t num_bundles;      // Number of time series bundles
 };
 
-#define current_txn(dh) ((dh)->txn[(dh)->n_txn])
+struct dbats_handler {
+    dbats_config cfg;
+    const char *path;          // path of BDB environment directory
+    uint8_t is_open;
+    uint8_t serialize;         // allow only one writer at a time
+    DB_ENV *dbenv;             // DB environment
+    DB *dbMeta;                // config parameters
+    DB *dbBundle;              // bundle parameters
+    DB *dbKeytree;             // {level, parent, nodename} -> node id or key id
+    DB *dbKeyid;               // recno -> key name (note: keyid == recno - 1)
+    DB *dbData;                // {bid, time, frag_id} -> value fragment
+    DB *dbIsSet;               // {bid, time, frag_id} -> is_set fragment
+    DB *dbSequence;            // BDB sequences
+    dbats_bundle_info *bundle; // parameters for each time series bundle
+    txn_info_t txn_info;       // transaction info
+};
+
+struct dbats_keytree_iterator {
+    dbats_handler *dh;
+    dbats_snapshot *ds;
+    txn_info_t *txn_info;
+    char *pattern;                      // pattern
+    kt_node_t nodes[KTKEY_MAX_LEVEL+1]; // node stack
+    int kt_levels;                      // # of levels in nodes
+    int lvl;                            // current level
+    DB_SEQUENCE *ktseq;                 // for generating node numbers
+};
+
+struct dbats_keyid_iterator {
+    dbats_handler *dh;
+    dbats_snapshot *ds;
+    txn_info_t *txn_info;
+    cursor_wrapper cursor;
+};
+
+#define current_txn(txn_info)  ((txn_info)->txn[(txn_info)->n_txn])
 
 const char *dbats_agg_func_label[] = {
     "data", "min", "max", "avg", "last", "sum"
@@ -227,34 +254,36 @@ static void *ecalloc(size_t n, size_t sz, const char *msg)
  * DB wrappers
  ************************************************************************/
 
-static inline int begin_transaction(dbats_handler *dh, const char *name)
+static inline int begin_transaction(dbats_handler *dh, dbats_snapshot *ds, const char *name)
 {
     if (dh->cfg.no_txn) return 0;
     dbats_log(LOG_FINE, "begin txn: %s", name);
+    txn_info_t *txn_info = ds ? &ds->txn_info : &dh->txn_info;
     int rc;
-    DB_TXN *parent = current_txn(dh);
-    dh->n_txn++;
-    if (dh->n_txn > N_TXN) {
+    DB_TXN *parent = current_txn(txn_info);
+    txn_info->n_txn++;
+    if (txn_info->n_txn > N_TXN) {
 	dbats_log(LOG_ERROR, "begin txn: %s: too many txns", name);
 	return ENOMEM;
     }
-    DB_TXN **childp = &current_txn(dh);
+    DB_TXN **childp = &current_txn(txn_info);
     rc = dh->dbenv->txn_begin(dh->dbenv, parent, childp, 0);
     if (rc != 0) {
 	dbats_log(LOG_ERROR, "begin txn: %s: %s", name, db_strerror(rc));
-	dh->n_txn--;
+	txn_info->n_txn--;
 	return rc;
     }
     (*childp)->set_name(*childp, name);
     return 0;
 }
 
-static inline int commit_transaction(dbats_handler *dh)
+static inline int commit_transaction(dbats_handler *dh, dbats_snapshot *ds)
 {
-    if (!dh->n_txn) return 0;
+    txn_info_t *txn_info = ds ? &ds->txn_info : &dh->txn_info;
+    if (!txn_info->n_txn) return 0;
     int rc;
-    DB_TXN *txn = current_txn(dh);
-    dh->n_txn--;
+    DB_TXN *txn = current_txn(txn_info);
+    txn_info->n_txn--;
     const char *name;
     txn->get_name(txn, &name);
     dbats_log(LOG_FINE, "commit txn: %s", name);
@@ -266,12 +295,13 @@ static inline int commit_transaction(dbats_handler *dh)
     return rc;
 }
 
-static int abort_transaction(dbats_handler *dh)
+static int abort_transaction(dbats_handler *dh, dbats_snapshot *ds)
 {
-    if (!dh->n_txn) return 0;
+    txn_info_t *txn_info = ds ? &ds->txn_info : &dh->txn_info;
+    if (!txn_info->n_txn) return 0;
     int rc;
-    DB_TXN *txn = current_txn(dh);
-    dh->n_txn--;
+    DB_TXN *txn = current_txn(txn_info);
+    txn_info->n_txn--;
     const char *name;
     txn->get_name(txn, &name);
     dbats_log(LOG_FINE, "abort txn: %s", name);
@@ -306,8 +336,10 @@ static int raw_db_open(dbats_handler *dh, DB **dbp, const char *name,
 	dbflags |= DB_CREATE;
     if (flags & DBATS_READONLY)
 	dbflags |= DB_RDONLY;
+    if (!(flags & DBATS_EXCLUSIVE))
+	dbflags |= DB_THREAD;
 
-    rc = (*dbp)->open(*dbp, use_txn ? current_txn(dh) : NULL, name, NULL,
+    rc = (*dbp)->open(*dbp, use_txn ? current_txn(&dh->txn_info) : NULL, name, NULL,
 	dbtype, dbflags, mode);
     if (rc != 0) {
 	dbats_log(LOG_ERROR, "Error opening DB %s/%s (mode=%o): %s",
@@ -343,12 +375,12 @@ static void log_db_op(int level, const char *fname, int line, dbats_handler *dh,
 	label, dbname, keybuf, msg);
 }
 
-#define raw_db_set(dh, db, key, key_len, value, value_len, dbflags) \
-    (raw_db_set)(__FILE__, __LINE__, dh, db, key, key_len, value, value_len, dbflags)
+#define raw_db_set(dh, ds, db, key, key_len, value, value_len, dbflags) \
+    (raw_db_set)(__FILE__, __LINE__, dh, ds, db, key, key_len, value, value_len, dbflags)
 
 static int (raw_db_set)(
     const char *fname, int line,
-    dbats_handler *dh, DB *db,
+    dbats_handler *dh, dbats_snapshot *ds, DB *db,
     const void *key, uint32_t key_len,
     const void *value, uint32_t value_len,
     uint32_t dbflags)
@@ -367,9 +399,10 @@ static int (raw_db_set)(
     DBT_in(dbt_key, (void*)key, key_len);
     DBT_in(dbt_data, (void*)value, value_len);
 
-    if ((rc = db->put(db, current_txn(dh), &dbt_key, &dbt_data, dbflags)) != 0) {
-	if (dh->action_in_prog && rc == DB_LOCK_DEADLOCK)
-	    dh->action_cancelled = 1;
+    txn_info_t *txn_info = ds ? &ds->txn_info : &dh->txn_info;
+    if ((rc = db->put(db, current_txn(txn_info), &dbt_key, &dbt_data, dbflags)) != 0) {
+	if (txn_info->in_prog && rc == DB_LOCK_DEADLOCK)
+	    txn_info->cancelled = 1;
 	log_db_op(LOG_WARNING, fname, line, dh, db, "db_set", key, key_len, db_strerror(rc));
 	return rc;
     }
@@ -378,15 +411,15 @@ static int (raw_db_set)(
 
 #define QLZ_OVERHEAD 400
 
-#define raw_db_get(dh, db, key, key_len, value, buflen, value_len_p, dbflags) \
-    (raw_db_get)(__FILE__, __LINE__, dh, db, key, key_len, value, buflen, value_len_p, dbflags)
+#define raw_db_get(dh, ds, db, key, key_len, value, buflen, value_len_p, dbflags) \
+    (raw_db_get)(__FILE__, __LINE__, dh, ds, db, key, key_len, value, buflen, value_len_p, dbflags)
 
 // Get a value from the database.
 // buflen must contain the length of the memory pointed to by value.
 // If value_len_p != NULL, then after the call, *value_len_p will contain the
 // length of data written into the memory pointed to by value.
 static int (raw_db_get)(const char *fname, int line,
-    dbats_handler *dh, DB* db,
+    dbats_handler *dh, dbats_snapshot *ds, DB* db,
     const void *key, uint32_t key_len,
     void *value, size_t buflen, uint32_t *value_len_p,
     uint32_t dbflags)
@@ -400,7 +433,8 @@ static int (raw_db_get)(const char *fname, int line,
 
     DBT_in(dbt_key, (void*)key, key_len);
     DBT_out(dbt_data, value, buflen);
-    rc = db->get(db, current_txn(dh), &dbt_key, &dbt_data, dbflags);
+    txn_info_t *txn_info = ds ? &ds->txn_info : &dh->txn_info;
+    rc = db->get(db, current_txn(txn_info), &dbt_key, &dbt_data, dbflags);
     if (rc == 0) {
 	if (value_len_p) {
 	    *value_len_p = dbt_data.size;
@@ -412,8 +446,8 @@ static int (raw_db_get)(const char *fname, int line,
     }
     log_db_op(rc == DB_NOTFOUND ? LOG_FINE : LOG_WARNING, fname, line, dh, db,
 	label, key, key_len, db_strerror(rc));
-    if (dh->action_in_prog && rc == DB_LOCK_DEADLOCK)
-	dh->action_cancelled = 1;
+    if (txn_info->in_prog && rc == DB_LOCK_DEADLOCK)
+	txn_info->cancelled = 1;
     if (rc == DB_BUFFER_SMALL) {
 	dbats_log(LOG_WARNING, "db_get: had %" PRIu32 ", needed %" PRIu32,
 	    dbt_data.ulen, dbt_data.size);
@@ -421,11 +455,27 @@ static int (raw_db_get)(const char *fname, int line,
     return rc;
 }
 
-#define raw_cursor_get(dh, db, dbc, key, data, flags) \
-    (raw_cursor_get)(__FILE__, __LINE__, dh, db, dbc, key, data, flags)
+static int raw_cursor_open(dbats_handler *dh, DB *db, txn_info_t *txn_info,
+    cursor_wrapper *cw, int flags)
+{
+    cw->dh = dh;
+    cw->db = db;
+    cw->txn_info = txn_info;
+    return db->cursor(db, current_txn(txn_info), &cw->dbc, flags);
+}
+
+static int raw_cursor_close(cursor_wrapper *cw)
+{
+    int rc = cw->dbc->close(cw->dbc);
+    cw->dbc = NULL;
+    return rc;
+}
+
+#define raw_cursor_get(cw, key, data, flags) \
+    (raw_cursor_get)(__FILE__, __LINE__, cw, key, data, flags)
 
 static int (raw_cursor_get)(const char *fname, int line,
-    dbats_handler *dh, DB *db, DBC *dbc, DBT *key, DBT *data, int flags)
+    cursor_wrapper *cw, DBT *key, DBT *data, int flags)
 {
 #if (DB_VERSION_MAJOR < 5)
     // version 4 didn't support DB_READ_COMMITTED in cursor get
@@ -446,46 +496,48 @@ static int (raw_cursor_get)(const char *fname, int line,
 	    (flags & DB_READ_COMMITTED) ? "t" :
 	    "r";
 	sprintf(label, "cursor_get(%s,%s)", opstr, lockstr);
-	log_db_op(LOG_FINEST, fname, line, dh, db, label, key->data, key->size, "");
+	log_db_op(LOG_FINEST, fname, line, cw->dh, cw->db, label, key->data, key->size, "");
     }
-    int rc = dbc->get(dbc, key, data, flags);
+    int rc = cw->dbc->get(cw->dbc, key, data, flags);
     if (rc != 0)
 	log_db_op((rc == DB_NOTFOUND) ? LOG_FINE : LOG_WARNING,
-	    fname, line, dh, db, label, key->data, key->size, db_strerror(rc));
-    if (dh->action_in_prog && rc == DB_LOCK_DEADLOCK)
-	dh->action_cancelled = 1;
+	    fname, line, cw->dh, cw->db, label, key->data, key->size, db_strerror(rc));
+    if (cw->txn_info->in_prog && rc == DB_LOCK_DEADLOCK)
+	cw->txn_info->cancelled = 1;
     return rc;
 }
 
-#define CFG_SET(dh, key, val) \
-    raw_db_set(dh, dh->dbMeta, key, strlen(key), &val, sizeof(val), 0)
+#define CFG_SET(dh, ds, key, val) \
+    raw_db_set(dh, ds, dh->dbMeta, key, strlen(key), &val, sizeof(val), 0)
 
-#define CFG_GET(dh, key, val, flags) \
-    raw_db_get(dh, dh->dbMeta, key, strlen(key), &val, sizeof(val), NULL, flags)
+#define CFG_GET(dh, ds, key, val, flags) \
+    raw_db_get(dh, ds, dh->dbMeta, key, strlen(key), &val, sizeof(val), NULL, flags)
 
 /*************************************************************************/
 
 #define bundle_info_key(dh, keybuf, bid) \
     sprintf(keybuf, "bundle%d", bid)
 
-static int read_bundle_info(dbats_handler *dh, int bid, uint32_t flags)
+static int read_bundle_info(dbats_handler *dh, dbats_snapshot *ds, int bid,
+    uint32_t flags)
 {
     uint8_t key = bid;
-    return raw_db_get(dh, dh->dbBundle, &key, sizeof(key), &dh->bundle[bid],
+    return raw_db_get(dh, ds, dh->dbBundle, &key, sizeof(key), &dh->bundle[bid],
 	sizeof(dh->bundle[bid]), NULL, flags);
 }
 
-static int write_bundle_info(dbats_handler *dh, int bid)
+static int write_bundle_info(dbats_handler *dh, dbats_snapshot *ds, int bid)
 {
     uint8_t key = bid;
-    return raw_db_set(dh, dh->dbBundle, &key, sizeof(key), &dh->bundle[bid],
+    return raw_db_set(dh, ds, dh->dbBundle, &key, sizeof(key), &dh->bundle[bid],
 	sizeof(dh->bundle[bid]), 0);
 }
 
 /*************************************************************************/
 
 // Warning: never open the same dbats more than once in the same process,
-// because there must be only one DB_ENV per environment per process.
+// because there must be only one DB_ENV per environment per process when
+// using DB_REGISTER.
 // http://docs.oracle.com/cd/E17076_02/html/programmer_reference/transapp_app.html
 dbats_handler *dbats_open(const char *path,
     uint16_t values_per_entry,
@@ -494,9 +546,15 @@ dbats_handler *dbats_open(const char *path,
 {
     dbats_log(LOG_CONFIG, "db_version: '%s'", db_version(0,0,0));
 
+    if (!HAVE_DB_SET_LK_EXCLUSIVE && (flags & DBATS_EXCLUSIVE)) {
+	dbats_log(LOG_ERROR, "Exclusive open is not supported in this version of BDB.");
+	errno = EINVAL;
+	return NULL;
+    }
+
     int rc;
     int mode = 00666;
-    uint32_t dbflags = DB_INIT_MPOOL | DB_INIT_LOCK | DB_INIT_LOG |
+    uint32_t dbflags = DB_THREAD | DB_INIT_MPOOL | DB_INIT_LOCK | DB_INIT_LOG |
 	DB_INIT_TXN | DB_REGISTER | DB_RECOVER | DB_CREATE;
     int is_new = 0;
 
@@ -603,14 +661,9 @@ dbats_handler *dbats_open(const char *path,
 # error "no DB_LOG_AUTO_REMOVE option"
 #endif
 
-    if (!HAVE_DB_SET_LK_EXCLUSIVE && dh->cfg.exclusive) {
-	// emulate exclusive lock with an outer txn and a write lock
-	if (begin_transaction(dh, "exclusive txn") != 0) return NULL;
-	dh->emulate_exclusive = 1;
-    }
-    if (begin_transaction(dh, "open txn") != 0) goto abort;
-    dh->action_in_prog = 1;
-    dh->action_cancelled = 0;
+    if (begin_transaction(dh, NULL, "open txn") != 0) goto abort;
+    dh->txn_info.in_prog = 1;
+    dh->txn_info.cancelled = 0;
 
 #define open_db(db,name,type,use_txn) raw_db_open(dh, &dh->db, name, type, flags, mode, use_txn)
     if (open_db(dbMeta,    "meta",    DB_BTREE, 1) != 0) goto abort;
@@ -621,11 +674,11 @@ dbats_handler *dbats_open(const char *path,
     do { \
 	if (is_new) { \
 	    dh->cfg.field = (defaultval); \
-	    if (CFG_SET(dh, key, dh->cfg.field) != 0) \
+	    if (CFG_SET(dh, NULL, key, dh->cfg.field) != 0) \
 		goto abort; \
 	} else { \
-	    int writelock = !dh->cfg.readonly || dh->emulate_exclusive; \
-	    if (CFG_GET(dh, key, dh->cfg.field, writelock ? DB_RMW : 0) != 0) {\
+	    int writelock = !dh->cfg.readonly; \
+	    if (CFG_GET(dh, NULL, key, dh->cfg.field, writelock ? DB_RMW : 0) != 0) {\
 		dbats_log(LOG_ERROR, "%s: missing config: %s", path, key); \
 		goto abort; \
 	    } \
@@ -652,50 +705,51 @@ dbats_handler *dbats_open(const char *path,
     if (open_db(dbKeyid,   "keyid",   DB_RECNO, 1) != 0) goto abort;
     if (open_db(dbData,    "data",    DB_BTREE, 1) != 0) goto abort;
     if (open_db(dbIsSet,   "is_set",  DB_BTREE, 1) != 0) goto abort;
-    if (open_db(dbSequence,"sequence",DB_BTREE, 0) != 0) goto abort;
+    if (open_db(dbSequence,"sequence",DB_BTREE, 1) != 0) goto abort;
 #undef open_db
 #undef initcfg
 
     dh->bundle = emalloc(MAX_NUM_BUNDLES * sizeof(*dh->bundle), "dh->bundle");
-    if (!dh->bundle) return NULL;
-    dh->tslice = emalloc(MAX_NUM_BUNDLES * sizeof(*dh->tslice), "dh->tslice");
-    if (!dh->tslice) return NULL;
+    if (!dh->bundle) goto abort;
 
     dh->cfg.entry_size = dh->cfg.values_per_entry * sizeof(dbats_value);
 
-    // load metadata for time series bundles
     if (is_new) {
+	// initialize metadata for time series bundles
 	memset(&dh->bundle[0], 0, sizeof(dbats_bundle_info));
 	dh->bundle[0].func = DBATS_AGG_NONE;
 	dh->bundle[0].steps = 1;
 	dh->bundle[0].period = dh->cfg.period;
 	dh->cfg.num_bundles = 1;
-	rc = write_bundle_info(dh, 0);
-	if (rc != 0) return NULL;
-	rc = CFG_SET(dh, "min_keep_time", dh->min_keep_time);
-	if (rc != 0) return NULL;
+	rc = write_bundle_info(dh, NULL, 0);
+	if (rc != 0) goto abort;
+
+	// initialize other metadata
+	uint32_t min_keep_time = 0;
+	rc = CFG_SET(dh, NULL, "min_keep_time", min_keep_time);
+	if (rc != 0) goto abort;
+
+	DB_SEQUENCE *ktseq;
+	rc = db_sequence_create(&ktseq, dh->dbSequence, 0);
+	if (rc != 0) goto abort;
+	rc = ktseq->initial_value(ktseq, 1);
+	if (rc != 0) goto abort;
+	rc = ktseq->set_range(ktseq, 1, KTKEY_MAX_NODE);
+	if (rc != 0) goto abort;
+	DBT_in(dbt_seq, (void*)"keytree_seq", strlen("keytree_seq"));
+	rc = ktseq->open(ktseq, NULL, &dbt_seq, DB_CREATE);
+	if (rc != 0) goto abort;
+	ktseq->close(ktseq, 0);
+
     } else {
+	// load metadata for time series bundles
 	for (int bid = 0; ; bid++) {
-	    rc = read_bundle_info(dh, bid, 0);
+	    rc = read_bundle_info(dh, NULL, bid, 0);
 	    if (rc != 0) {
 		if (rc == DB_NOTFOUND && bid > 0) break; // no more bundles
-		return NULL;
+		goto abort;
 	    }
 	    dh->cfg.num_bundles = bid + 1;
-	}
-    }
-
-    // allocate tslice for each time series bundle
-    for (int bid = 0; bid < dh->cfg.num_bundles; bid++) {
-	if (!(dh->tslice[bid] = ecalloc(1, sizeof(dbats_tslice), "tslice")))
-	    return NULL;
-    }
-
-    if (!dh->cfg.readonly) {
-	if (dh->cfg.compress) {
-	    dh->state_compress = ecalloc(1, sizeof(qlz_state_compress),
-		"qlz_state_compress");
-	    if (!dh->state_compress) return NULL;
 	}
     }
 
@@ -703,7 +757,7 @@ dbats_handler *dbats_open(const char *path,
     return dh;
 
 abort:
-    dbats_abort(dh);
+    dbats_abort_open(dh);
     return NULL;
 }
 
@@ -711,8 +765,17 @@ int dbats_aggregate(dbats_handler *dh, int func, int steps)
 {
     int rc;
 
+    if (dh->cfg.readonly)
+	return EPERM;
+
+    // We don't need this value, but it locks against other threads/processes
+    // calling dbats_select_time() or dbats_aggregate().
+    uint32_t dummy;
+    rc = CFG_GET(dh, NULL, "min_keep_time", dummy, DB_RMW);
+    if (rc != 0) return rc;
+
     DB_BTREE_STAT *stats;
-    rc = dh->dbIsSet->stat(dh->dbIsSet, current_txn(dh), &stats, DB_FAST_STAT);
+    rc = dh->dbIsSet->stat(dh->dbIsSet, current_txn(&dh->txn_info), &stats, DB_FAST_STAT);
     if (rc != 0) {
 	dbats_log(LOG_ERROR, "Error getting is_set stats: %s", db_strerror(rc));
 	return rc;
@@ -723,7 +786,7 @@ int dbats_aggregate(dbats_handler *dh, int func, int steps)
     if (!empty) {
 	dbats_log(LOG_ERROR,
 	    "Adding a new aggregation to existing data is not yet supported.");
-	return -1;
+	return EINVAL;
     }
 
     if (dh->cfg.num_bundles >= MAX_NUM_BUNDLES) {
@@ -733,28 +796,26 @@ int dbats_aggregate(dbats_handler *dh, int func, int steps)
 
     int bid = dh->cfg.num_bundles;
 
-    if (!(dh->tslice[bid] = ecalloc(1, sizeof(dbats_tslice), "tslice")))
-	return errno ? errno : ENOMEM;
-
     memset(&dh->bundle[bid], 0, sizeof(dbats_bundle_info));
     dh->bundle[bid].func = func;
     dh->bundle[bid].steps = steps;
     dh->bundle[bid].period = dh->bundle[0].period * steps;
 
-    rc = write_bundle_info(dh, bid);
+    rc = write_bundle_info(dh, NULL, bid);
     if (rc != 0) return rc;
 
     dh->cfg.num_bundles++;
     return 0;
 }
 
-int dbats_get_start_time(dbats_handler *dh, int bid, uint32_t *start)
+int dbats_get_start_time(dbats_handler *dh, dbats_snapshot *ds, int bid, uint32_t *start)
 {
     int rc;
-    DBC *dbc;
+    cursor_wrapper cw;
 
     *start = 0;
-    rc = dh->dbData->cursor(dh->dbData, current_txn(dh), &dbc, 0);
+    txn_info_t *txn_info = ds ? &ds->txn_info : &dh->txn_info;
+    rc = raw_cursor_open(dh, dh->dbData, txn_info, &cw, 0);
     if (rc != 0) {
 	dbats_log(LOG_ERROR, "dbats_get_start_time %d: cursor: %s", bid, db_strerror(rc));
 	return rc;
@@ -763,7 +824,7 @@ int dbats_get_start_time(dbats_handler *dh, int bid, uint32_t *start)
     DBT_in(dbt_key, &dbkey, sizeof(dbkey));
     dbt_key.ulen = sizeof(dbkey);
     DBT_null(dbt_data);
-    rc = raw_cursor_get(dh, dh->dbData, dbc, &dbt_key, &dbt_data, DB_SET_RANGE | DB_READ_COMMITTED);
+    rc = raw_cursor_get(&cw, &dbt_key, &dbt_data, DB_SET_RANGE | DB_READ_COMMITTED);
     if (rc == DB_NOTFOUND) {
 	// do nothing
     } else if (rc != 0) {
@@ -772,17 +833,18 @@ int dbats_get_start_time(dbats_handler *dh, int bid, uint32_t *start)
 	*start = ntohl(dbkey.time);
     }
 
-    dbc->close(dbc);
+    raw_cursor_close(&cw);
     return rc;
 }
 
-int dbats_get_end_time(dbats_handler *dh, int bid, uint32_t *end)
+int dbats_get_end_time(dbats_handler *dh, dbats_snapshot *ds, int bid, uint32_t *end)
 {
     int rc;
-    DBC *dbc;
+    cursor_wrapper cw;
 
     *end = 0;
-    rc = dh->dbData->cursor(dh->dbData, current_txn(dh), &dbc, 0);
+    txn_info_t *txn_info = ds ? &ds->txn_info : &dh->txn_info;
+    rc = raw_cursor_open(dh, dh->dbData, txn_info, &cw, 0);
     if (rc != 0) {
 	dbats_log(LOG_ERROR, "dbats_get_end_time %d: cursor: %s", bid, db_strerror(rc));
 	return rc;
@@ -791,15 +853,15 @@ int dbats_get_end_time(dbats_handler *dh, int bid, uint32_t *end)
     DBT_in(dbt_key, &dbkey, sizeof(dbkey));
     dbt_key.ulen = sizeof(dbkey);
     DBT_null(dbt_data);
-    rc = raw_cursor_get(dh, dh->dbData, dbc, &dbt_key, &dbt_data, DB_SET_RANGE | DB_READ_COMMITTED);
+    rc = raw_cursor_get(&cw, &dbt_key, &dbt_data, DB_SET_RANGE | DB_READ_COMMITTED);
 
     if (rc == 0) {
-	rc = raw_cursor_get(dh, dh->dbData, dbc, &dbt_key, &dbt_data, DB_PREV | DB_READ_COMMITTED);
+	rc = raw_cursor_get(&cw, &dbt_key, &dbt_data, DB_PREV | DB_READ_COMMITTED);
     } else if (rc == DB_NOTFOUND) {
-	rc = raw_cursor_get(dh, dh->dbData, dbc, &dbt_key, &dbt_data, DB_LAST | DB_READ_COMMITTED);
+	rc = raw_cursor_get(&cw, &dbt_key, &dbt_data, DB_LAST | DB_READ_COMMITTED);
     } else {
 	dbats_log(LOG_ERROR, "dbats_get_end_time %d: get: %s", bid, db_strerror(rc));
-	dbc->close(dbc);
+	raw_cursor_close(&cw);
 	return rc;
     }
 
@@ -813,7 +875,7 @@ int dbats_get_end_time(dbats_handler *dh, int bid, uint32_t *end)
 	*end = ntohl(dbkey.time);
     }
 
-    dbc->close(dbc);
+    raw_cursor_close(&cw);
     return rc;
 }
 
@@ -821,13 +883,13 @@ int dbats_best_bundle(dbats_handler *dh, uint32_t func, uint32_t start)
 {
     int best_bid = 0;
     uint32_t best_start;
-    dbats_get_start_time(dh, 0, &best_start);
+    dbats_get_start_time(dh, NULL, 0, &best_start);
     uint32_t best_bounded_start = max(best_start, start);
 
     for (int bid = 1; bid < dh->cfg.num_bundles; bid++) {
 	if (dh->bundle[bid].func != func) continue;
 	uint32_t this_start;
-	dbats_get_start_time(dh, bid, &this_start);
+	dbats_get_start_time(dh, NULL, bid, &this_start);
 	uint32_t this_bounded_start = max(this_start, start);
 	if (this_bounded_start < best_bounded_start) {
 	    best_bid = bid;
@@ -838,7 +900,7 @@ int dbats_best_bundle(dbats_handler *dh, uint32_t func, uint32_t start)
 }
 
 // "DELETE FROM db WHERE db.bid = bid AND db.time >= start AND db.time < end"
-static int delete_frags(dbats_handler *dh, DB *db, int bid,
+static int delete_frags(dbats_snapshot *ds, DB *db, int bid,
     uint32_t start, uint32_t end)
 {
     const char *name;
@@ -847,8 +909,8 @@ static int delete_frags(dbats_handler *dh, DB *db, int bid,
     dbats_log(LOG_FINE, "delete_frags %s %d [%u,%u)", name,
 	bid, start, end);
     int rc;
-    DBC *dbc;
-    rc = db->cursor(db, current_txn(dh), &dbc, 0);
+    cursor_wrapper cw;
+    rc = raw_cursor_open(ds->dh, db, &ds->txn_info, &cw, 0);
     if (rc != 0) {
 	dbats_log(LOG_ERROR, "delete_frags %s %d [%u,%u): cursor: %s", name,
 	    bid, start, end, db_strerror(rc));
@@ -860,7 +922,7 @@ static int delete_frags(dbats_handler *dh, DB *db, int bid,
     DBT_null(dbt_data);
     // Range cursor search depends on dbkey being {bid, time, frag_id}, in
     // that order, with big endian values.
-    rc = raw_cursor_get(dh, db, dbc, &dbt_key, &dbt_data, DB_SET_RANGE);
+    rc = raw_cursor_get(&cw, &dbt_key, &dbt_data, DB_SET_RANGE);
     while (1) {
 	if (rc == DB_NOTFOUND) break;
 	if (rc != 0) {
@@ -870,7 +932,7 @@ static int delete_frags(dbats_handler *dh, DB *db, int bid,
 	    return rc;
 	}
 	if (ntohl(dbkey.bid) != bid || ntohl(dbkey.time) >= end) break;
-	rc = dbc->del(dbc, 0);
+	rc = cw.dbc->del(cw.dbc, 0);
 	if (rc != 0) {
 	    dbats_log(LOG_ERROR, "delete_frags %s %d %u %d: del: %s", name,
 		ntohl(dbkey.bid), ntohl(dbkey.time), ntohl(dbkey.frag_id),
@@ -880,9 +942,9 @@ static int delete_frags(dbats_handler *dh, DB *db, int bid,
 	    dbats_log(LOG_FINE, "delete_frags %d %u %d",
 		ntohl(dbkey.bid), ntohl(dbkey.time), ntohl(dbkey.frag_id));
 	}
-	rc = raw_cursor_get(dh, db, dbc, &dbt_key, &dbt_data, DB_NEXT);
+	rc = raw_cursor_get(&cw, &dbt_key, &dbt_data, DB_NEXT);
     }
-    rc = dbc->close(dbc);
+    rc = raw_cursor_close(&cw);
     if (rc != 0) {
 	dbats_log(LOG_ERROR, "delete_frags %s %d [%u,%u): close: %s", name,
 	    bid, start, end, db_strerror(rc));
@@ -892,7 +954,7 @@ static int delete_frags(dbats_handler *dh, DB *db, int bid,
 }
 
 // Delete values earlier than the keep limit
-static int truncate_bundle(dbats_handler *dh, int bid)
+static int truncate_bundle(dbats_handler *dh, dbats_snapshot *ds, int bid)
 {
     dbats_log(LOG_FINE, "truncate_bundle %d", bid);
     int rc;
@@ -901,29 +963,29 @@ static int truncate_bundle(dbats_handler *dh, int bid)
     if (bundle->keep == 0) return 0; // keep all
 
     uint32_t start, end;
-    dbats_get_start_time(dh, bid, &start);
-    dbats_get_end_time(dh, bid, &end);
+    dbats_get_start_time(dh, ds, bid, &start);
+    dbats_get_end_time(dh, ds, bid, &end);
     uint32_t keep_period = (bundle->keep-1) * bundle->period;
     uint32_t new_start = (keep_period > end) ? 0 : (end - keep_period);
-    if (bid == 0 && dh->min_keep_time < new_start) {
-	dh->min_keep_time = new_start;
-	rc = CFG_SET(dh, "min_keep_time", dh->min_keep_time);
+    if (bid == 0 && ds->min_keep_time < new_start) {
+	ds->min_keep_time = new_start;
+	rc = CFG_SET(dh, ds, "min_keep_time", ds->min_keep_time);
 	if (rc != 0) return rc;
     }
     if (start >= new_start) return 0; // there's nothing to truncate
 
-    rc = begin_transaction(dh, "truncate txn");
+    rc = begin_transaction(dh, ds, "truncate txn");
     if (rc != 0) return rc;
-    rc = delete_frags(dh, dh->dbData, bid, 0, new_start);
+    rc = delete_frags(ds, dh->dbData, bid, 0, new_start);
     if (rc != 0) goto abort;
-    rc = delete_frags(dh, dh->dbIsSet, bid, 0, new_start);
+    rc = delete_frags(ds, dh->dbIsSet, bid, 0, new_start);
     if (rc != 0) goto abort;
-    commit_transaction(dh); // truncate txn
+    commit_transaction(dh, ds); // truncate txn
     return 0;
 
 abort:
     // failing to delete frags is just an annoyance, not an error
-    abort_transaction(dh); // truncate txn
+    abort_transaction(dh, ds); // truncate txn
     return 0;
 }
 
@@ -931,15 +993,15 @@ int dbats_series_limit(dbats_handler *dh, int bid, int keep)
 {
     int rc = 0;
 
-    rc = begin_transaction(dh, "keep txn");
+    rc = begin_transaction(dh, NULL, "keep txn");
     if (rc != 0) return rc;
 
-    rc = read_bundle_info(dh, bid, DB_RMW);
+    rc = read_bundle_info(dh, NULL, bid, DB_RMW);
     if (rc != 0) goto abort;
 
     if (bid == 0) {
 	for (int a = 1; a < dh->cfg.num_bundles; a++) {
-	    rc = read_bundle_info(dh, a, 0);
+	    rc = read_bundle_info(dh, NULL, a, 0);
 	    if (rc != 0) goto abort;
 	    if (keep > 0 && dh->bundle[a].steps > keep) {
 		dbats_log(LOG_ERROR, "bundle %d requires keeping at least %d "
@@ -951,25 +1013,25 @@ int dbats_series_limit(dbats_handler *dh, int bid, int keep)
     }
 
     dh->bundle[bid].keep = keep;
-    rc = truncate_bundle(dh, bid);
+    rc = truncate_bundle(dh, NULL, bid);
     if (rc != 0) goto abort;
 
-    rc = write_bundle_info(dh, bid); // write new keep
+    rc = write_bundle_info(dh, NULL, bid); // write new keep
     if (rc != 0) goto abort;
 
-    return commit_transaction(dh); // "keep txn"
+    return commit_transaction(dh, NULL); // "keep txn"
 
 abort:
-    abort_transaction(dh); // "keep txn"
+    abort_transaction(dh, NULL); // "keep txn"
     return rc;
 }
 
 /*************************************************************************/
 
 // Free contents of in-memory tslice.
-static int clear_tslice(dbats_handler *dh, int bid)
+static int clear_tslice(dbats_snapshot *ds, int bid)
 {
-    dbats_tslice *tslice = dh->tslice[bid];
+    dbats_tslice *tslice = ds->tslice[bid];
     dbats_log(LOG_FINE, "Free tslice t=%u bid=%d", tslice->time, bid);
 
     for (int f = 0; f < tslice->num_frags; f++) {
@@ -989,54 +1051,59 @@ static int clear_tslice(dbats_handler *dh, int bid)
 }
 
 // Writes tslice to db.
-static int flush_tslice(dbats_handler *dh, int bid)
+static int flush_tslice(dbats_snapshot *ds, int bid)
 {
-    dbats_log(LOG_FINE, "Flush t=%u bid=%d", dh->tslice[bid]->time, bid);
-    size_t frag_size = fragsize(dh);
+    dbats_log(LOG_FINE, "Flush t=%u bid=%d", ds->tslice[bid]->time, bid);
+    size_t frag_size = fragsize(ds->dh);
     char *buf = NULL;
     int rc;
 
     // Write fragments to the DB
-    fragkey_t dbkey = { htonl(bid), htonl(dh->tslice[bid]->time), 0};
-    for (int f = 0; f < dh->tslice[bid]->num_frags; f++) {
-	if (!dh->tslice[bid]->frag[f]) continue;
+    fragkey_t dbkey = { htonl(bid), htonl(ds->tslice[bid]->time), 0};
+    for (int f = 0; f < ds->tslice[bid]->num_frags; f++) {
+	if (!ds->tslice[bid]->frag[f]) continue;
 	dbkey.frag_id = htonl(f);
-	if (!dh->tslice[bid]->frag_changed[f]) {
+	if (!ds->tslice[bid]->frag_changed[f]) {
 	    dbats_log(LOG_VERYFINE, "Skipping frag %d (unchanged)", f);
 	} else {
-	    if (dh->cfg.compress) {
+	    if (ds->dh->cfg.compress) {
+		if (!ds->state_compress) {
+		    ds->state_compress = ecalloc(1, sizeof(qlz_state_compress),
+			"state_compress");
+		    if (!ds->state_compress) return ENOMEM;
+		}
 		if (!buf) {
 		    buf = (char*)emalloc(1 + frag_size + QLZ_OVERHEAD,
 			"compression buffer");
 		    if (!buf) return errno ? errno : ENOMEM;
 		}
 		buf[0] = 1; // compression flag
-		dh->tslice[bid]->frag[f]->compressed = 1;
-		size_t compress_len = qlz_compress(dh->tslice[bid]->frag[f],
-		    buf+1, frag_size, dh->state_compress);
+		ds->tslice[bid]->frag[f]->compressed = 1;
+		size_t compress_len = qlz_compress(ds->tslice[bid]->frag[f],
+		    buf+1, frag_size, ds->state_compress);
 		dbats_log(LOG_VERYFINE, "Frag %d compression: %zu -> %zu "
 		    "(%.1f %%)", f, frag_size, compress_len,
 		    compress_len*100.0/frag_size);
-		rc = raw_db_set(dh, dh->dbData, &dbkey, sizeof(dbkey),
+		rc = raw_db_set(ds->dh, ds, ds->dh->dbData, &dbkey, sizeof(dbkey),
 		    buf, compress_len + 1, 0);
 		if (rc != 0) return rc;
 	    } else {
-		dh->tslice[bid]->frag[f]->compressed = 0;
+		ds->tslice[bid]->frag[f]->compressed = 0;
 		dbats_log(LOG_VERYFINE, "Frag %d write: %zu", f, frag_size);
-		rc = raw_db_set(dh, dh->dbData, &dbkey, sizeof(dbkey),
-		    dh->tslice[bid]->frag[f], frag_size, 0);
+		rc = raw_db_set(ds->dh, ds, ds->dh->dbData, &dbkey, sizeof(dbkey),
+		    ds->tslice[bid]->frag[f], frag_size, 0);
 		if (rc != 0) return rc;
 	    }
-	    dh->tslice[bid]->frag_changed[f] = 0;
+	    ds->tslice[bid]->frag_changed[f] = 0;
 
-	    rc = raw_db_set(dh, dh->dbIsSet, &dbkey, sizeof(dbkey),
-		dh->tslice[bid]->is_set[f], vec_size(ENTRIES_PER_FRAG), 0);
+	    rc = raw_db_set(ds->dh, ds, ds->dh->dbIsSet, &dbkey, sizeof(dbkey),
+		ds->tslice[bid]->is_set[f], vec_size(ENTRIES_PER_FRAG), 0);
 	    if (rc != 0) return rc;
 	}
     }
     if (buf) free(buf);
 
-    rc = truncate_bundle(dh, bid);
+    rc = truncate_bundle(ds->dh, ds, bid);
     if (rc != 0) return rc;
 
     return 0;
@@ -1044,53 +1111,111 @@ static int flush_tslice(dbats_handler *dh, int bid)
 
 /*************************************************************************/
 
-static void free_isset(dbats_handler *dh)
+static void free_isset(dbats_snapshot *ds)
 {
-    if (dh->is_set) {
-	int tn = (dh->active_end - dh->active_start) / dh->bundle[0].period + 1;
+    if (ds->is_set) {
+	int tn = (ds->active_end - ds->active_start) / ds->dh->bundle[0].period + 1;
 	for (int ti = 0; ti < tn; ti++) {
-	    if (dh->is_set[ti]) {
-		for (int f = 0; f < dh->tslice[0]->num_frags; f++) {
-		    if (dh->is_set[ti][f]) {
-			if (dh->tslice[0]->is_set[f] != dh->is_set[ti][f])
-			    free(dh->is_set[ti][f]); // shared; don't free twice
-			dh->is_set[ti][f] = 0;
+	    if (ds->is_set[ti]) {
+		for (int f = 0; f < ds->tslice[0]->num_frags; f++) {
+		    if (ds->is_set[ti][f]) {
+			if (ds->tslice[0]->is_set[f] != ds->is_set[ti][f])
+			    free(ds->is_set[ti][f]); // shared; don't free twice
+			ds->is_set[ti][f] = 0;
 		    }
 		}
-		free(dh->is_set[ti]);
-		dh->is_set[ti] = 0;
+		free(ds->is_set[ti]);
+		ds->is_set[ti] = 0;
 	    }
 	}
-	free(dh->is_set);
-	dh->is_set = 0;
+	free(ds->is_set);
+	ds->is_set = 0;
     }
 }
 
-int dbats_commit(dbats_handler *dh)
+int dbats_commit_open(dbats_handler *dh)
 {
     int rc = 0;
-    if (!dh->action_in_prog) return 0;
-    if (dh->action_cancelled) return DB_LOCK_DEADLOCK;
-    dbats_log(LOG_FINE, "dbats_commit %u", dh->tslice[0]->time);
+    if (!dh->txn_info.in_prog) return 0;
+    if (dh->txn_info.cancelled) return DB_LOCK_DEADLOCK;
+    dbats_log(LOG_FINE, "dbats_commit_open");
 
-    free_isset(dh);
+    if (rc == 0)
+	rc = commit_transaction(dh, NULL);
 
-    if (!dh->serialize) {
+    if (rc == 0) {
+	dh->txn_info.in_prog = 0;
+	dh->txn_info.cancelled = 0;
+    }
+
+    return rc;
+}
+
+int dbats_abort_open(dbats_handler *dh)
+{
+    if (!dh->txn_info.in_prog) return 0;
+    dbats_log(LOG_FINE, "dbats_abort_open");
+
+    dh->txn_info.in_prog = 0;
+    dh->txn_info.cancelled = 0;
+    return abort_transaction(dh, NULL);
+}
+
+static void free_snapshot(dbats_snapshot *ds)
+{
+    for (int bid = 0; bid < ds->num_bundles; bid++) {
+	clear_tslice(ds, bid);
+	free(ds->tslice[bid]);
+	// ds->tslice[bid] = NULL;
+    }
+
+    if (ds->state_decompress)
+	free(ds->state_decompress);
+    if (ds->state_compress)
+	free(ds->state_compress);
+    if (ds->db_get_buf)
+	free(ds->db_get_buf);
+
+    ds->dh = NULL;
+    free(ds);
+}
+
+#if 0
+static void recycle_snapshot(dbats_snapshot *ds)
+{
+    ds->changed = 0;
+    ds->txn_info.in_prog = 0;
+    ds->txn_info.cancelled = 0;
+    // XXX don't clear or free tslice
+    // XXX store ds in dh->snapshot_pool (thread-safely)
+}
+#endif
+
+int dbats_commit_snap(dbats_snapshot *ds)
+{
+    int rc = 0;
+    if (!ds->txn_info.in_prog) return 0;
+    if (ds->txn_info.cancelled) return DB_LOCK_DEADLOCK;
+    dbats_log(LOG_FINE, "dbats_commit_snap %u", ds->tslice[0]->time);
+
+    free_isset(ds);
+
+    if (!ds->dh->serialize) {
 	// In dbats_select_time(), we read min_keep_time with DB_READ_COMMITTED;
 	// it may have changed since then.
-	rc = CFG_GET(dh, "min_keep_time", dh->min_keep_time, DB_RMW);
+	rc = CFG_GET(ds->dh, ds, "min_keep_time", ds->min_keep_time, DB_RMW);
 	if (rc != 0) {
 	    dbats_log(LOG_ERROR, "error getting %s: %s", "min_keep_time",
 		db_strerror(rc));
 	    goto end;
 	}
 
-	for (int bid = 0; bid < dh->cfg.num_bundles; bid++) {
-	    if (dh->changed && dh->tslice[bid]->time < dh->min_keep_time) {
+	for (int bid = 0; bid < ds->num_bundles; bid++) {
+	    if (ds->changed && ds->tslice[bid]->time < ds->min_keep_time) {
 		dbats_log(LOG_ERROR, "dbats_commit %u: illegal attempt to set "
 		    "value in bundle %d at time %u before series limit %u",
-		    dh->tslice[bid]->time, bid, dh->tslice[bid]->time,
-		    dh->min_keep_time);
+		    ds->tslice[bid]->time, bid, ds->tslice[bid]->time,
+		    ds->min_keep_time);
 		rc = EINVAL;
 		goto end;
 	    }
@@ -1098,42 +1223,50 @@ int dbats_commit(dbats_handler *dh)
     }
 
 end:
-    for (int bid = 0; bid < dh->cfg.num_bundles; bid++) {
-	if (dh->changed && rc == 0) {
-	    rc = flush_tslice(dh, bid);
-	}
-	if (!dh->cfg.exclusive || !dh->is_open || rc != 0) {
-	    clear_tslice(dh, bid);
+    for (int bid = 0; bid < ds->num_bundles; bid++) {
+	if (ds->changed && rc == 0) {
+	    rc = flush_tslice(ds, bid);
 	}
     }
 
     if (rc == 0)
-	rc = commit_transaction(dh);
+	rc = commit_transaction(ds->dh, ds);
 
     if (rc == 0) {
-	dh->changed = 0;
-	dh->action_in_prog = 0;
-	dh->action_cancelled = 0;
+	ds->changed = 0;
+	ds->txn_info.in_prog = 0;
+	ds->txn_info.cancelled = 0;
     }
+
+#if 0
+    if (ds->dh->cfg.exclusive && ds->dh->is_open && rc == 0)
+	recycle_snapshot(ds);
+    else
+#endif
+	free_snapshot(ds);
 
     return rc;
 }
 
-int dbats_abort(dbats_handler *dh)
+int dbats_abort_snap(dbats_snapshot *ds)
 {
-    if (!dh->action_in_prog) return 0;
-    dbats_log(LOG_FINE, "dbats_abort %u", dh->tslice[0]->time);
+    if (!ds->txn_info.in_prog) return 0;
+    dbats_log(LOG_FINE, "dbats_abort_snap %u", ds->tslice[0]->time);
 
-    free_isset(dh);
+    free_isset(ds);
 
-    for (int bid = 0; bid < dh->cfg.num_bundles; bid++) {
-	clear_tslice(dh, bid);
+    for (int bid = 0; bid < ds->num_bundles; bid++) {
+	clear_tslice(ds, bid);
     }
 
-    dh->changed = 0;
-    dh->action_in_prog = 0;
-    dh->action_cancelled = 0;
-    return abort_transaction(dh);
+    for (int bid = 0; bid < ds->num_bundles; bid++) {
+	free(ds->tslice[bid]);
+	ds->tslice[bid] = NULL;
+    }
+
+    int rc = abort_transaction(ds->dh, ds);
+    free_snapshot(ds);
+    return rc;
 }
 
 /*************************************************************************/
@@ -1146,35 +1279,7 @@ int dbats_close(dbats_handler *dh)
 	return EINVAL;
     dh->is_open = 0;
 
-    if (dh->action_cancelled) {
-	dbats_log(LOG_INFO, "aborting cancelled transaction");
-	rc = dbats_abort(dh);
-    } else if (dh->action_in_prog) {
-	rc = dbats_commit(dh);
-    }
-    if (myrc == 0 && rc != 0) myrc = rc;
-
-    if (dh->emulate_exclusive) {
-	rc = commit_transaction(dh); // exclusive txn
-	if (myrc == 0 && rc != 0) myrc = rc;
-    }
-
-    for (int bid = 0; bid < dh->cfg.num_bundles; bid++) {
-	free(dh->tslice[bid]);
-	dh->tslice[bid] = NULL;
-    }
-
-    if (dh->db_get_buf) free(dh->db_get_buf);
     if (dh->bundle) free(dh->bundle);
-    if (dh->tslice) free(dh->tslice);
-    if (dh->ktstate) free(dh->ktstate);
-
-    if (dh->ktseq) {
-	rc = dh->ktseq->close(dh->ktseq, 0);
-	if (rc != 0)
-	    dbats_log(LOG_ERROR, "ktseq->close: %s", db_strerror(rc));
-	dh->ktseq = NULL;
-    }
 
     // BDB v4 requires explicit close of each db
     dh->dbMeta->close(dh->dbMeta, 0);
@@ -1188,10 +1293,6 @@ int dbats_close(dbats_handler *dh)
     rc = dh->dbenv->close(dh->dbenv, 0);
     if (myrc == 0 && rc != 0) myrc = rc;
 
-    if (dh->state_decompress)
-	free(dh->state_decompress);
-    if (dh->state_compress)
-	free(dh->state_compress);
     free(dh);
     return myrc;
 }
@@ -1208,7 +1309,7 @@ uint32_t dbats_normalize_time(const dbats_handler *dh, int bid, uint32_t *t)
 
 /*************************************************************************/
 
-static int load_isset(dbats_handler *dh, fragkey_t *dbkey, uint8_t **dest,
+static int load_isset(dbats_snapshot *ds, fragkey_t *dbkey, uint8_t **dest,
     uint32_t flags)
 {
     static uint8_t *buf = NULL; // can recycle memory across calls
@@ -1217,11 +1318,11 @@ static int load_isset(dbats_handler *dh, fragkey_t *dbkey, uint8_t **dest,
     if (!buf && !(buf = emalloc(vec_size(ENTRIES_PER_FRAG), "is_set")))
 	return errno ? errno : ENOMEM; // error
 
-    rc = raw_db_get(dh, dh->dbIsSet, dbkey, sizeof(*dbkey),
+    rc = raw_db_get(ds->dh, ds, ds->dh->dbIsSet, dbkey, sizeof(*dbkey),
 	buf, vec_size(ENTRIES_PER_FRAG), NULL, flags);
 
     if (rc == DB_NOTFOUND) {
-	if (ntohl(dbkey->time) == dh->tslice[ntohl(dbkey->bid)]->time) {
+	if (ntohl(dbkey->time) == ds->tslice[ntohl(dbkey->bid)]->time) {
 	    memset(buf, 0, vec_size(ENTRIES_PER_FRAG));
 	    *dest = buf;
 	    buf = NULL;
@@ -1238,43 +1339,43 @@ static int load_isset(dbats_handler *dh, fragkey_t *dbkey, uint8_t **dest,
     *dest = buf;
     buf = NULL;
 
-    if (ntohl(dbkey->bid) == 0 && dh->active_last_data < ntohl(dbkey->time))
-	dh->active_last_data = ntohl(dbkey->time);
+    if (ntohl(dbkey->bid) == 0 && ds->active_last_data < ntohl(dbkey->time))
+	ds->active_last_data = ntohl(dbkey->time);
 
     return 0; // ok
 }
 
-static int load_frag(dbats_handler *dh, uint32_t t, int bid,
+static int load_frag(dbats_snapshot *ds, uint32_t t, int bid,
     uint32_t frag_id)
 {
     // load fragment
     fragkey_t dbkey = { htonl(bid), htonl(t), htonl(frag_id) };
     int rc;
-    uint32_t flags = dh->cfg.readonly ? 0 : DB_RMW;
+    uint32_t flags = ds->dh->cfg.readonly ? 0 : DB_RMW;
 
-    assert(!dh->tslice[bid]->is_set[frag_id]);
-    rc = load_isset(dh, &dbkey, &dh->tslice[bid]->is_set[frag_id], flags);
+    assert(!ds->tslice[bid]->is_set[frag_id]);
+    rc = load_isset(ds, &dbkey, &ds->tslice[bid]->is_set[frag_id], flags);
     if (rc == DB_NOTFOUND) return 0; // no match
     if (rc != 0) return rc; // error
 
-    if (dh->db_get_buf_len < fragsize(dh) + QLZ_OVERHEAD) {
-	if (dh->db_get_buf) free(dh->db_get_buf);
-	dh->db_get_buf_len = fragsize(dh) + QLZ_OVERHEAD;
-	dh->db_get_buf = emalloc(dh->db_get_buf_len, "get buffer");
-	if (!dh->db_get_buf) return errno ? errno : ENOMEM;
+    if (ds->db_get_buf_len < fragsize(ds->dh) + QLZ_OVERHEAD) {
+	if (ds->db_get_buf) free(ds->db_get_buf);
+	ds->db_get_buf_len = fragsize(ds->dh) + QLZ_OVERHEAD;
+	ds->db_get_buf = emalloc(ds->db_get_buf_len, "get buffer");
+	if (!ds->db_get_buf) return errno ? errno : ENOMEM;
     }
 
     uint32_t value_len;
-    rc = raw_db_get(dh, dh->dbData, &dbkey, sizeof(dbkey), dh->db_get_buf,
-	dh->db_get_buf_len, &value_len, flags);
+    rc = raw_db_get(ds->dh, ds, ds->dh->dbData, &dbkey, sizeof(dbkey),
+	ds->db_get_buf, ds->db_get_buf_len, &value_len, flags);
     if (rc != 0) {
 	if (rc == DB_NOTFOUND) return 0; // no match
 	return rc; // error
     }
 
-    int compressed = ((dbats_frag*)dh->db_get_buf)->compressed;
-    uint32_t len = !compressed ? fragsize(dh) :
-	qlz_size_decompressed((void*)(dh->db_get_buf+1));
+    int compressed = ((dbats_frag*)ds->db_get_buf)->compressed;
+    uint32_t len = !compressed ? fragsize(ds->dh) :
+	qlz_size_decompressed((void*)(ds->db_get_buf+1));
     void *ptr = malloc(len);
     if (!ptr) {
 	rc = errno;
@@ -1285,13 +1386,13 @@ static int load_frag(dbats_handler *dh, uint32_t t, int bid,
 
     if (compressed) {
 	// decompress fragment
-	if (!dh->state_decompress) {
-	    dh->state_decompress = ecalloc(1, sizeof(qlz_state_decompress),
+	if (!ds->state_decompress) {
+	    ds->state_decompress = ecalloc(1, sizeof(qlz_state_decompress),
 		"qlz_state_decompress");
-	    if (!dh->state_decompress) return errno ? errno : ENOMEM;
+	    if (!ds->state_decompress) return errno ? errno : ENOMEM;
 	}
-	len = qlz_decompress((void*)(dh->db_get_buf+1), ptr, dh->state_decompress);
-	// assert(len == fragsize(dh));
+	len = qlz_decompress((void*)(ds->db_get_buf+1), ptr, ds->state_decompress);
+	// assert(len == fragsize(ds));
 	dbats_log(LOG_VERYFINE, "decompressed frag t=%u, bid=%u, frag_id=%u: "
 	    "%u -> %u (%.1f%%)",
 	    t, bid, frag_id, value_len-1, len, 100.0*len/(value_len-1));
@@ -1299,56 +1400,56 @@ static int load_frag(dbats_handler *dh, uint32_t t, int bid,
     } else {
 	// copy fragment
 	// XXX TODO: don't memcpy; get directly into ptr
-	memcpy(ptr, dh->db_get_buf, len);
+	memcpy(ptr, ds->db_get_buf, len);
 	dbats_log(LOG_VERYFINE, "copied frag t=%u, bid=%u, frag_id=%u",
 	    t, bid, frag_id);
     }
 
-    dh->tslice[bid]->frag[frag_id] = ptr;
+    ds->tslice[bid]->frag[frag_id] = ptr;
 
-    dbats_tslice *tslice = dh->tslice[bid];
+    dbats_tslice *tslice = ds->tslice[bid];
     if (tslice->num_frags <= frag_id)
 	tslice->num_frags = frag_id + 1;
 
     return 0;
 }
 
-// Instantiate dh->is_set[*][frag_id]
-static int instantiate_isset_frags(dbats_handler *dh, int fid)
+// Instantiate ds->is_set[*][frag_id]
+static int instantiate_isset_frags(dbats_snapshot *ds, int fid)
 {
-    if (dh->cfg.readonly)
-	return 0; // dh->is_set is never needed in readonly mode
+    if (ds->dh->cfg.readonly)
+	return 0; // ds->is_set is never needed in readonly mode
 
-    int tn = (dh->active_end - dh->active_start) / dh->bundle[0].period + 1;
+    int tn = (ds->active_end - ds->active_start) / ds->dh->bundle[0].period + 1;
 
-    if (!dh->is_set) {
-	dh->is_set = ecalloc(tn, sizeof(uint8_t**), "dh->is_set");
-	if (!dh->is_set) return errno ? errno : ENOMEM;
+    if (!ds->is_set) {
+	ds->is_set = ecalloc(tn, sizeof(uint8_t**), "ds->is_set");
+	if (!ds->is_set) return errno ? errno : ENOMEM;
     }
 
-    uint32_t t = dh->active_start;
-    for (int ti = 0; ti < tn; ti++, t += dh->bundle[0].period) {
+    uint32_t t = ds->active_start;
+    for (int ti = 0; ti < tn; ti++, t += ds->dh->bundle[0].period) {
 	fragkey_t dbkey = { 0, htonl(t), 0 };
-	if (!dh->is_set[ti]) {
-	    dh->is_set[ti] = ecalloc(MAX_NUM_FRAGS, sizeof(uint8_t*),
-		"dh->is_set[ti]");
-	    if (!dh->is_set[ti]) return errno ? errno : ENOMEM;
+	if (!ds->is_set[ti]) {
+	    ds->is_set[ti] = ecalloc(MAX_NUM_FRAGS, sizeof(uint8_t*),
+		"ds->is_set[ti]");
+	    if (!ds->is_set[ti]) return errno ? errno : ENOMEM;
 	}
 
-	if (t == dh->tslice[0]->time && dh->tslice[0]->is_set[fid]) {
-	    assert(!dh->is_set[ti][fid] || dh->is_set[ti][fid] == dh->tslice[0]->is_set[fid]);
-	    dh->is_set[ti][fid] = dh->tslice[0]->is_set[fid]; // share
-	} else if (!dh->is_set[ti][fid]) {
+	if (t == ds->tslice[0]->time && ds->tslice[0]->is_set[fid]) {
+	    assert(!ds->is_set[ti][fid] || ds->is_set[ti][fid] == ds->tslice[0]->is_set[fid]);
+	    ds->is_set[ti][fid] = ds->tslice[0]->is_set[fid]; // share
+	} else if (!ds->is_set[ti][fid]) {
 	    dbkey.frag_id = htonl(fid);
-	    assert(!dh->is_set[ti][fid]);
-	    int is_current = (t == dh->tslice[0]->time);
-	    int rc = load_isset(dh, &dbkey, &dh->is_set[ti][fid],
+	    assert(!ds->is_set[ti][fid]);
+	    int is_current = (t == ds->tslice[0]->time);
+	    int rc = load_isset(ds, &dbkey, &ds->is_set[ti][fid],
 		is_current ? DB_RMW : 0);
 	    if (rc != 0 && rc != DB_NOTFOUND)
 		return rc; // error
 	    if (is_current) {
-		assert(!dh->tslice[0]->is_set[fid]);
-		dh->tslice[0]->is_set[fid] = dh->is_set[ti][fid]; // share
+		assert(!ds->tslice[0]->is_set[fid]);
+		ds->tslice[0]->is_set[fid] = ds->is_set[ti][fid]; // share
 	    }
 	}
     }
@@ -1360,7 +1461,7 @@ int dbats_num_keys(dbats_handler *dh, uint32_t *num_keys)
     int rc;
     DB_BTREE_STAT *stats;
 
-    rc = dh->dbKeyid->stat(dh->dbKeyid, current_txn(dh), &stats, DB_FAST_STAT);
+    rc = dh->dbKeyid->stat(dh->dbKeyid, current_txn(&dh->txn_info), &stats, DB_FAST_STAT);
     if (rc != 0) {
 	dbats_log(LOG_ERROR, "Error getting keys stats: %s", db_strerror(rc));
 	return rc;
@@ -1371,11 +1472,12 @@ int dbats_num_keys(dbats_handler *dh, uint32_t *num_keys)
     return 0;
 }
 
-static void set_priority(dbats_handler *dh, uint32_t priority)
+static void set_priority(dbats_snapshot *ds, uint32_t priority)
 {
-    if (!dh->n_txn) return;
+    if (!ds->txn_info.n_txn) return;
 #if HAVE_DB_SET_PRIORITY
-    int rc = current_txn(dh)->set_priority(current_txn(dh), priority);
+    DB_TXN *txn = current_txn(&ds->txn_info);
+    int rc = txn->set_priority(txn, priority);
     if (rc != 0) {
 	dbats_log(LOG_ERROR, "set_priority %u: %s", priority, db_strerror(rc));
     } else {
@@ -1389,7 +1491,8 @@ static void set_priority(dbats_handler *dh, uint32_t priority)
 #endif
 }
 
-int dbats_select_time(dbats_handler *dh, uint32_t time_value, uint32_t flags)
+int dbats_select_time(dbats_handler *dh, dbats_snapshot **dsp,
+    uint32_t time_value, uint32_t flags)
 {
     int rc;
     uint32_t min_time = 0;
@@ -1398,21 +1501,24 @@ int dbats_select_time(dbats_handler *dh, uint32_t time_value, uint32_t flags)
 
     dbats_log(LOG_FINE, "select_time %u", time_value);
 
-    if ((rc = dbats_commit(dh)) != 0)
-	return rc;
+    (*dsp) = ecalloc(1, sizeof(dbats_snapshot), "snapshot");
+    if (!*dsp) return ENOMEM;
 
-    dh->preload = !!(flags & DBATS_PRELOAD);
+    (*dsp)->dh = dh;
+    (*dsp)->preload = !!(flags & DBATS_PRELOAD);
+
+    // (*dsp)->txn_info.txn[0] = current_txn(&dh->txn_info); // make ds txn child of dh txn
 
 restart:
-    if ((rc = begin_transaction(dh, "tslice txn")) != 0)
+    if ((rc = begin_transaction(dh, *dsp, "tslice txn")) != 0)
 	return rc;
-    dh->action_in_prog = 1;
-    dh->action_cancelled = 0;
+    (*dsp)->txn_info.in_prog = 1;
+    (*dsp)->txn_info.cancelled = 0;
 
     if (!dh->cfg.readonly) {
 	// DB_RMW will block other writers trying to select_time().
 	// DB_READ_COMMITTED won't hold a read lock, so won't block anyone.
-	rc = CFG_GET(dh, "min_keep_time", dh->min_keep_time,
+	rc = CFG_GET(dh, *dsp, "min_keep_time", (*dsp)->min_keep_time,
 	    dh->serialize ? DB_RMW : DB_READ_COMMITTED);
 	if (rc == DB_LOCK_DEADLOCK) {
 	    if (--tries_limit > 0) goto retry;
@@ -1421,35 +1527,48 @@ restart:
 	}
 	if (rc != 0) goto abort;
 	dbats_log(LOG_FINE, "select_time %u: got %s = %u", time_value,
-	    "min_keep_time", dh->min_keep_time);
+	    "min_keep_time", (*dsp)->min_keep_time);
 
-	dbats_get_end_time(dh, 0, &dh->end_time);
+	dbats_get_end_time(dh, (*dsp), 0, &(*dsp)->end_time);
     }
 
     for (int bid = 0; ; bid++) {
-	rc = read_bundle_info(dh, bid, 0);
+	rc = read_bundle_info(dh, *dsp, bid, 0);
 	if (rc != 0) {
 	    if (rc == DB_NOTFOUND && bid > 0) break; // no more bundles
 	    goto abort;
 	}
-	dh->cfg.num_bundles = bid + 1;
+	dh->cfg.num_bundles = (*dsp)->num_bundles = bid + 1;
     }
 
-    for (int bid = 0; bid < dh->cfg.num_bundles; bid++) {
-	dbats_tslice *tslice = dh->tslice[bid];
+    (*dsp)->tslice = ecalloc((*dsp)->num_bundles, sizeof(*(*dsp)->tslice), "ds->tslice");
+    if (!(*dsp)->tslice) {
+	rc = ENOMEM;
+	goto abort;
+    }
+
+    for (int bid = 0; bid < (*dsp)->num_bundles; bid++) {
 	uint32_t t = time_value;
 
 	dbats_normalize_time(dh, bid, &t);
 
 	if (!dh->cfg.readonly) {
-	    if (t < dh->min_keep_time) {
+	    if (t < (*dsp)->min_keep_time) {
 		dbats_log(LOG_ERROR, "select_time %u: illegal attempt to set "
 		    "value in bundle %d at time %u before series limit %u",
-		    time_value, bid, t, dh->min_keep_time);
+		    time_value, bid, t, (*dsp)->min_keep_time);
 		rc = EINVAL;
 		goto abort;
 	    }
 	}
+
+	if (!(*dsp)->tslice[bid])
+	    (*dsp)->tslice[bid] = ecalloc(1, sizeof(dbats_tslice), "ds->tslice[bid]");
+	if (!(*dsp)->tslice[bid]) {
+	    rc = ENOMEM;
+	    goto abort;
+	}
+	dbats_tslice *tslice = (*dsp)->tslice[bid];
 
 	if (dh->cfg.exclusive) {
 	    if (tslice->time == t) {
@@ -1458,13 +1577,13 @@ restart:
 		    t, bid);
 	    } else {
 		// free obsolete fragments
-		clear_tslice(dh, bid);
+		clear_tslice((*dsp), bid);
 	    }
 	}
 
 	tslice->time = t;
 	if (bid == 0)
-	    dh->active_last_data = t;
+	    (*dsp)->active_last_data = t;
 
 	if (!min_time || t < min_time)
 	    min_time = t;
@@ -1472,30 +1591,30 @@ restart:
 	if (t > max_time)
 	    max_time = t;
     }
-    dh->active_start = min_time;
-    dh->active_end = max_time;
+    (*dsp)->active_start = min_time;
+    (*dsp)->active_end = max_time;
 
     if (!dh->cfg.readonly) {
 	// Make priority depend on time, so a writer of realtime data always
 	// beats a writer of historical data.
-	set_priority(dh, dh->tslice[0]->time / dh->bundle[0].period);
+	set_priority((*dsp), (*dsp)->tslice[0]->time / dh->bundle[0].period);
     }
 
-    if (!dh->preload)
+    if (!(*dsp)->preload)
 	return 0;
 
     uint32_t num_keys;
     rc = dbats_num_keys(dh, &num_keys);
     if (rc != 0) goto abort;
 
-    for (int bid = 0; bid < dh->cfg.num_bundles; bid++) {
-	dbats_tslice *tslice = dh->tslice[bid];
+    for (int bid = 0; bid < (*dsp)->num_bundles; bid++) {
+	dbats_tslice *tslice = (*dsp)->tslice[bid];
 	uint32_t t = tslice->time;
 	int loaded = 0;
 
 	tslice->num_frags = div_ceil(num_keys, ENTRIES_PER_FRAG);
 	for (uint32_t frag_id = 0; frag_id < tslice->num_frags; frag_id++) {
-	    rc = load_frag(dh, t, bid, frag_id);
+	    rc = load_frag((*dsp), t, bid, frag_id);
 	    if (rc == DB_LOCK_DEADLOCK) {
 		if (--tries_limit > 0) goto retry;
 		dbats_log(LOG_ERROR, "select_time %u: too many deadlocks",
@@ -1509,8 +1628,8 @@ restart:
 	    time_value, bid, loaded, tslice->num_frags);
     }
 
-    for (int frag_id = 0; frag_id < dh->tslice[0]->num_frags; frag_id++) {
-	rc = instantiate_isset_frags(dh, frag_id);
+    for (int frag_id = 0; frag_id < (*dsp)->tslice[0]->num_frags; frag_id++) {
+	rc = instantiate_isset_frags((*dsp), frag_id);
 	if (rc == DB_LOCK_DEADLOCK) {
 	    if (--tries_limit > 0) goto retry;
 	    dbats_log(LOG_ERROR, "select_time %u: too many deadlocks",
@@ -1522,11 +1641,11 @@ restart:
     return 0;
 
 abort:
-    dbats_abort(dh); // tslice txn
+    dbats_abort_snap((*dsp)); // tslice txn
     return rc;
 
 retry:
-    dbats_abort(dh); // tslice txn
+    dbats_abort_snap((*dsp)); // tslice txn
     goto restart;
 }
 
@@ -1673,19 +1792,18 @@ static int glob_validate(const char *pat)
 
 /*************************************************************************/
 
-static inline void glob_keyname_prev_level(dbats_handler *dh)
+static inline void glob_keyname_prev_level(dbats_keytree_iterator *dki)
 {
-    kt_node_t *kts = dh->ktstate;
-    int lvl = dh->keyglob_lvl;
+    kt_node_t *kts = dki->nodes;
+    int lvl = dki->lvl;
 
-    if (kts[lvl].cursor) {
-	kts[lvl].cursor->close(kts[lvl].cursor);
-	kts[lvl].cursor = NULL;
+    if (kts[lvl].cursor.dbc) {
+	raw_cursor_close(&kts[lvl].cursor);
     }
-    dh->keyglob_lvl--;
+    dki->lvl--;
 }
 
-static int glob_keyname_next(dbats_handler *dh, uint32_t *key_id_p,
+static int glob_keyname_next(dbats_keytree_iterator *dki, uint32_t *key_id_p,
     char *keynamebuf, uint32_t flags)
 {
     int rc;
@@ -1694,23 +1812,22 @@ static int glob_keyname_next(dbats_handler *dh, uint32_t *key_id_p,
     DBT dbt_ktid;
 
 // shorthands
-#define lvl (dh->keyglob_lvl)
-#define node (&dh->ktstate[lvl])
+#define lvl (dki->lvl)
+#define node (&dki->nodes[lvl])
 
 next_key:
     if (lvl == 0)
 	return DB_NOTFOUND;
 
-    if (node->cursor) {
+    if (node->cursor.dbc) {
 next_glob:
 	// continue with glob scan in progress
 	DBT_init_out(dbt_ktkey, &node->key, sizeof(keytree_key));
 	DBT_init_out(dbt_ktid, &node->id, sizeof(uint32_t));
-	rc = raw_cursor_get(dh, dh->dbKeytree, node->cursor,
-	    &dbt_ktkey, &dbt_ktid, DB_NEXT);
+	rc = raw_cursor_get(&node->cursor, &dbt_ktkey, &dbt_ktid, DB_NEXT);
 
 glob_result:
-	if (rc == 0 && node->key.parent == dh->ktstate[lvl-1].id &&
+	if (rc == 0 && node->key.parent == dki->nodes[lvl-1].id &&
 	    strncmp(node->key.nodename, node->start, node->pfxlen) == 0)
 	{
 	    // found match with correct parent and nodename prefix
@@ -1736,11 +1853,11 @@ glob_result:
 	} else if (rc == 0 || rc == DB_NOTFOUND) {
 	    // we've scanned past last matching node
 	    dbats_log(LOG_FINEST, "No match for parent=%x",
-		ntohl(dh->ktstate[lvl-1].id));
+		ntohl(dki->nodes[lvl-1].id));
 	    while (1) {
-		glob_keyname_prev_level(dh);
+		glob_keyname_prev_level(dki);
 		if (lvl == 0) return DB_NOTFOUND;
-		if (node->cursor) goto next_glob;
+		if (node->cursor.dbc) goto next_glob;
 	    }
 
 	} else {
@@ -1754,20 +1871,21 @@ next_level:
     if (flags & DBATS_GLOB) {
 	// search for a glob match for this level
 	node->pfxlen = strcspn(node->start, "\\?[{*.");
-	rc = dh->dbKeytree->cursor(dh->dbKeytree, NULL, &node->cursor, 0);
+	rc = raw_cursor_open(dki->dh, dki->dh->dbKeytree,
+	    dki->ds ? &dki->ds->txn_info : &dki->dh->txn_info,
+	    &node->cursor, 0);
 	if (rc != 0) { msg = "cursor"; goto logabort; }
-	node->key.parent = dh->ktstate[lvl-1].id;
+	node->key.parent = dki->nodes[lvl-1].id;
 	memcpy(node->key.nodename, node->start, node->pfxlen);
 	DBT_init_in(dbt_ktkey, &node->key, KTKEY_SIZE(node->pfxlen));
 	dbt_ktkey.ulen = sizeof(keytree_key);
 	DBT_init_out(dbt_ktid, &node->id, sizeof(uint32_t));
-	rc = raw_cursor_get(dh, dh->dbKeytree, node->cursor,
-	    &dbt_ktkey, &dbt_ktid, DB_SET_RANGE);
+	rc = raw_cursor_get(&node->cursor, &dbt_ktkey, &dbt_ktid, DB_SET_RANGE);
 	goto glob_result;
     }
 
     // search for an exact match for this level
-    if (lvl <= dh->kt_levels &&
+    if (lvl <= dki->kt_levels &&
 	strncmp(node->key.nodename, node->start, node->gnlen+1) == 0)
     {
 	// found in cache
@@ -1777,13 +1895,13 @@ next_level:
 
     } else {
 	// do a db lookup
-	dh->kt_levels = lvl - 1;
+	dki->kt_levels = lvl - 1;
 	keytree_key *ktkey = &node->key;
-	ktkey->parent = dh->ktstate[lvl-1].id;
+	ktkey->parent = dki->nodes[lvl-1].id;
 	memcpy(ktkey->nodename, node->start, node->gnlen+1);
 	uint32_t ktkey_size = KTKEY_SIZE(node->gnlen);
 
-	rc = raw_db_get(dh, dh->dbKeytree, ktkey, ktkey_size,
+	rc = raw_db_get(dki->dh, dki->ds, dki->dh->dbKeytree, ktkey, ktkey_size,
 	    &node->id, sizeof(node->id), NULL, 0);
 
 	if (rc == 0) {
@@ -1799,18 +1917,18 @@ next_level:
 
 	} else if (!(flags & DBATS_CREATE)) {
 	    // not found, and creation not requested
-	    dbats_log(LOG_FINE, "Key not found: %s", dh->keyglob);
+	    dbats_log(LOG_FINE, "Key not found: %s", dki->pattern);
 	    while (1) {
-		glob_keyname_prev_level(dh);
+		glob_keyname_prev_level(dki);
 		if (lvl == 0) return DB_NOTFOUND;
-		if (node->cursor) goto next_glob;
+		if (node->cursor.dbc) goto next_glob;
 	    }
 
-	} else if (dh->cfg.readonly) {
+	} else if (dki->dh->cfg.readonly) {
 	    // creation requested but not allowed
 	    rc = EPERM;
 	    dbats_log(LOG_ERROR, "Unable to create key %s; %s",
-		dh->keyglob, db_strerror(rc));
+		dki->pattern, db_strerror(rc));
 	    return rc;
 
 	} else {
@@ -1818,32 +1936,28 @@ next_level:
 	    if (node->gnlen > KTKEY_NODENAME_MAXLEN) {
 		dbats_log(LOG_ERROR,
 		    "Node name too long at level %d (%.*s) in key %s",
-		    lvl, node->gnlen, node->start, dh->keyglob);
+		    lvl, node->gnlen, node->start, dki->pattern);
 		return EINVAL;
 	    }
 	    node->anlen = node->gnlen;
 
 	    if (node->start[node->gnlen] == '.') {
 		// create node
-		if (!dh->ktseq) {
-		    rc = db_sequence_create(&dh->ktseq, dh->dbSequence, 0);
+		if (!dki->ktseq) {
+		    rc = db_sequence_create(&dki->ktseq, dki->dh->dbSequence, 0);
 		    if (rc != 0) { msg = "db_sequence_create"; goto logabort; }
-		    rc = dh->ktseq->initial_value(dh->ktseq, 1);
-		    if (rc != 0) { msg = "seq->initial_value"; goto logabort; }
-		    rc = dh->ktseq->set_range(dh->ktseq, 1, KTKEY_MAX_NODE);
-		    if (rc != 0) { msg = "seq->set_range"; goto logabort; }
+		    //rc = dki->ktseq->set_cachesize(dki->ktseq, 32);
+		    //if (rc != 0) { msg = "seq->set_cachesize"; goto logabort; }
 		    DBT_in(dbt_seq, (void*)"keytree_seq", strlen("keytree_seq"));
-		    rc = dh->ktseq->open(dh->ktseq, NULL, &dbt_seq, DB_CREATE);
+		    rc = dki->ktseq->open(dki->ktseq, NULL, &dbt_seq, DB_CREATE);
 		    if (rc != 0) { msg = "seq->open"; goto logabort; }
-		    rc = dh->ktseq->set_cachesize(dh->ktseq, 32);
-		    if (rc != 0) { msg = "seq->set_cachesize"; goto logabort; }
 		}
 		db_seq_t seqnum;
-		rc = dh->ktseq->get(dh->ktseq, NULL, 1, &seqnum,
+		rc = dki->ktseq->get(dki->ktseq, current_txn(dki->txn_info), 1, &seqnum,
 		    DB_AUTO_COMMIT | DB_TXN_NOSYNC);
 		if (rc != 0) { msg = "ktseq->get"; goto logabort; }
 		node->id = htonl(seqnum) | KTID_IS_NODE;
-		rc = raw_db_set(dh, dh->dbKeytree, ktkey, ktkey_size,
+		rc = raw_db_set(dki->dh, dki->ds, dki->dh->dbKeytree, ktkey, ktkey_size,
 		    &node->id, sizeof(node->id), 0);
 		if (rc != 0) return rc;
 		dbats_log(LOG_FINEST, "Created node #%x: %.*s",
@@ -1854,28 +1968,28 @@ next_level:
 		// create leaf (metric key)
 		db_recno_t recno;
 		DBT_out(dbt_keyrecno, &recno, sizeof(recno)); // put() will fill
-		DBT_in(dbt_keyname, (void*)dh->keyglob, strlen(dh->keyglob));
-		rc = dh->dbKeyid->put(dh->dbKeyid, current_txn(dh),
+		DBT_in(dbt_keyname, (void*)dki->pattern, strlen(dki->pattern));
+		rc = dki->dh->dbKeyid->put(dki->dh->dbKeyid, current_txn(dki->txn_info),
 		    &dbt_keyrecno, &dbt_keyname, DB_APPEND);
 		if (rc != 0) {
-		    if (dh->action_in_prog && rc == DB_LOCK_DEADLOCK)
-			dh->action_cancelled = 1;
+		    if (dki->txn_info->in_prog && rc == DB_LOCK_DEADLOCK)
+			dki->txn_info->cancelled = 1;
 		    dbats_log(LOG_ERROR, "Error creating keyid for %s: %s",
-			dh->keyglob, db_strerror(rc));
+			dki->pattern, db_strerror(rc));
 		    return rc;
 		}
 		node->id = htonl(recno - 1);
 		if (*key_id_p >= MAX_NUM_FRAGS * ENTRIES_PER_FRAG) {
-		    dbats_log(LOG_ERROR, "Out of space for key %s", dh->keyglob);
+		    dbats_log(LOG_ERROR, "Out of space for key %s", dki->pattern);
 		    return ENOMEM;
 		}
 
-		rc = raw_db_set(dh, dh->dbKeytree, ktkey, ktkey_size,
+		rc = raw_db_set(dki->dh, dki->ds, dki->dh->dbKeytree, ktkey, ktkey_size,
 		    &node->id, sizeof(node->id), DB_NOOVERWRITE);
 		if (rc != 0) return rc;
 
 		dbats_log(LOG_FINEST, "Assigned key #%x: %s",
-		    ntohl(node->id), dh->keyglob);
+		    ntohl(node->id), dki->pattern);
 		goto found;
 	    }
 	}
@@ -1887,18 +2001,18 @@ found:
 	    // expecting node, found leaf
 	    if (!(flags & DBATS_GLOB)) {
 		dbats_log(LOG_ERROR, "Found leaf at level %d (%.*s) in key %s",
-		    lvl, node->gnlen, node->start, dh->keyglob);
+		    lvl, node->gnlen, node->start, dki->pattern);
 		return ENOTDIR;
 	    }
-	    while (lvl > 0 && !node->cursor) {
-		glob_keyname_prev_level(dh);
+	    while (lvl > 0 && !node->cursor.dbc) {
+		glob_keyname_prev_level(dki);
 	    }
 	    goto next_key;
 	}
 	// go to next level
 	++lvl;
-	node->start = dh->ktstate[lvl-1].start + dh->ktstate[lvl-1].gnlen + 1;
-	node->cursor = NULL;
+	node->start = dki->nodes[lvl-1].start + dki->nodes[lvl-1].gnlen + 1;
+	node->cursor.dbc = NULL;
 	goto next_level;
     }
 
@@ -1907,14 +2021,14 @@ found:
 	int offset = 0;
 	for (int i = 1; i <= lvl; i++) {
 	    offset += sprintf(keynamebuf + offset, "%.*s",
-		dh->ktstate[i].anlen + 1, dh->ktstate[i].key.nodename);
+		dki->nodes[i].anlen + 1, dki->nodes[i].key.nodename);
 	}
     }
     *key_id_p = ntohl(node->id);
 
     // prepare for next call
-    while (lvl > 0 && !node->cursor) {
-	glob_keyname_prev_level(dh);
+    while (lvl > 0 && !node->cursor.dbc) {
+	glob_keyname_prev_level(dki);
     }
 
     return 0;
@@ -1927,63 +2041,34 @@ logabort:
 #undef node
 }
 
-int dbats_bulk_get_key_id(dbats_handler *dh, uint32_t n_keys,
-    const char * const *keys, uint32_t *key_ids, uint32_t flags)
+static dbats_keytree_iterator *dbats_glob_keyname_alloc(void)
 {
-    // XXX if (dh->keyglob) ... conflict
-    int rc = 0;
-    int my_txn = dh->cfg.exclusive && dh->n_txn == 0;
-
-    if (my_txn)
-	begin_transaction(dh, "key txn");
-
-    for (int i = 0; i < n_keys; i++) {
-	dbats_glob_keyname_start(dh, keys[i]);
-
-	rc = glob_keyname_next(dh, &key_ids[i], NULL, flags & ~DBATS_GLOB);
-	if (rc != 0)
-	    break;
-	if (key_ids[i] & DBATS_KEY_IS_PREFIX) {
-	    dbats_log(LOG_ERROR, "Key %s is only a prefix", keys[i]);
-	    rc = EISDIR;
-	    break;
-	}
-	dbats_log(LOG_FINEST, "Found key #%u: %s", key_ids[i],
-	    keys[i]);
-    }
-
-    dbats_glob_keyname_end(dh);
-    if (my_txn) {
-	if (rc == 0)
-	    rc = commit_transaction(dh); // key txn
-	else
-	    abort_transaction(dh); // key txn
-    }
-    return rc;
+    dbats_keytree_iterator *dki;
+    dki = emalloc(sizeof(dbats_keytree_iterator), "iterator");
+    if (!dki) return NULL;
+    dki->pattern = NULL;
+    dki->ktseq = NULL;
+    return dki;
 }
 
-int dbats_get_key_id(dbats_handler *dh, const char *key,
-    uint32_t *key_id_p, uint32_t flags)
+static int dbats_glob_keyname_init(dbats_handler *dh, dbats_snapshot *ds,
+    dbats_keytree_iterator *dki, const char *pattern)
 {
-    return dbats_bulk_get_key_id(dh, 1, &key, key_id_p, flags);
-}
+    dki->dh = dh;
+    dki->ds = ds;
+    dki->txn_info = ds ? &ds->txn_info : &dh->txn_info;
 
-int dbats_glob_keyname_start(dbats_handler *dh, const char *pattern)
-{
-    // XXX if (dh->keyglob) ... conflict
-    if (!dh->ktstate) {
-        dh->ktstate = emalloc(sizeof(kt_node_t) * KTKEY_MAX_LEVEL,
-            "keytree state");
-	dh->ktstate[0].key.parent = 0;
-	dh->ktstate[0].id = chtonl(0) | KTID_IS_NODE;
-        dh->kt_levels = 0;
-    }
+    dki->nodes[0].key.parent = 0;
+    dki->nodes[0].id = chtonl(0) | KTID_IS_NODE;
+    dki->kt_levels = 0;
 
-    dh->keyglob_lvl = 1;
-    dh->ktstate[1].start = dh->keyglob = strdup(pattern);
-    dh->ktstate[1].cursor = NULL;
+    dki->lvl = 1;
+    dki->nodes[1].start = dki->pattern = strdup(pattern);
+    dki->nodes[1].cursor.dbc = NULL;
 
-    char *start = dh->keyglob;
+    // don't init dki->ktseq
+
+    char *start = dki->pattern;
     while (1) {
 	char *end = strchr(start, '.');
 	if (end) *end = '\0';
@@ -1997,28 +2082,89 @@ int dbats_glob_keyname_start(dbats_handler *dh, const char *pattern)
     return 0;
 }
 
-int dbats_glob_keyname_next(dbats_handler *dh, uint32_t *key_id_p,
-    char *namebuf)
+int dbats_glob_keyname_start(dbats_handler *dh, dbats_snapshot *ds,
+    dbats_keytree_iterator **dkip, const char *pattern)
 {
-    return glob_keyname_next(dh, key_id_p, namebuf, DBATS_GLOB);
+    *dkip = dbats_glob_keyname_alloc();
+    if (!*dkip) return ENOMEM;
+    return dbats_glob_keyname_init(dh, ds, *dkip, pattern);
 }
 
-int dbats_glob_keyname_end(dbats_handler *dh)
+int dbats_glob_keyname_next(dbats_keytree_iterator *dki, uint32_t *key_id_p,
+    char *namebuf)
 {
-    while (dh->keyglob_lvl)
-	glob_keyname_prev_level(dh);
-    if (dh->keyglob) free(dh->keyglob);
-    dh->keyglob = NULL;
+    return glob_keyname_next(dki, key_id_p, namebuf, DBATS_GLOB);
+}
+
+static int dbats_glob_keyname_clear(dbats_keytree_iterator *dki)
+{
+    while (dki->lvl)
+	glob_keyname_prev_level(dki);
+    if (dki->pattern) free(dki->pattern);
+    dki->pattern = NULL;
+    // don't close dki->ktseq
     return 0;
 }
 
-int dbats_get_key_name(dbats_handler *dh, uint32_t key_id, char *namebuf)
+int dbats_glob_keyname_end(dbats_keytree_iterator *dki)
+{
+    int rc = dbats_glob_keyname_clear(dki);
+    if (dki->ktseq)
+	dki->ktseq->close(dki->ktseq, 0);
+    free(dki);
+    return rc;
+}
+
+int dbats_bulk_get_key_id(dbats_handler *dh, dbats_snapshot *ds,
+    uint32_t n_keys, const char * const *keys, uint32_t *key_ids, uint32_t flags)
+{
+    int rc = 0;
+    int my_txn = dh->cfg.exclusive && dh->txn_info.n_txn == 0;
+
+    if (my_txn)
+	begin_transaction(dh, ds, "key txn");
+
+    dbats_keytree_iterator *dki = dbats_glob_keyname_alloc();
+
+    for (int i = 0; i < n_keys; i++) {
+	rc = dbats_glob_keyname_init(dh, ds, dki, keys[i]);
+	if (rc != 0) break;
+	rc = glob_keyname_next(dki, &key_ids[i], NULL, flags & ~DBATS_GLOB);
+	if (rc != 0) break;
+	if (key_ids[i] & DBATS_KEY_IS_PREFIX) {
+	    dbats_log(LOG_ERROR, "Key %s is only a prefix", keys[i]);
+	    rc = EISDIR;
+	    break;
+	}
+	dbats_log(LOG_FINEST, "Found key #%u: %s", key_ids[i],
+	    keys[i]);
+	rc = dbats_glob_keyname_clear(dki);
+    }
+
+    free(dki);
+    if (my_txn) {
+	if (rc == 0)
+	    rc = commit_transaction(dh, ds); // key txn
+	else
+	    abort_transaction(dh, ds); // key txn
+    }
+    return rc;
+}
+
+int dbats_get_key_id(dbats_handler *dh, dbats_snapshot *ds, const char *key,
+    uint32_t *key_id_p, uint32_t flags)
+{
+    return dbats_bulk_get_key_id(dh, ds, 1, &key, key_id_p, flags);
+}
+
+int dbats_get_key_name(dbats_handler *dh, dbats_snapshot *ds,
+    uint32_t key_id, char *namebuf)
 {
     int rc;
     db_recno_t recno = key_id + 1;
     uint32_t value_len;
 
-    rc = raw_db_get(dh, dh->dbKeyid, &recno, sizeof(recno),
+    rc = raw_db_get(dh, ds, dh->dbKeyid, &recno, sizeof(recno),
 	namebuf, DBATS_KEYLEN - 1, &value_len, DB_READ_COMMITTED);
     if (rc != 0) return rc;
     namebuf[value_len] = '\0';
@@ -2027,22 +2173,22 @@ int dbats_get_key_name(dbats_handler *dh, uint32_t key_id, char *namebuf)
 
 /*************************************************************************/
 
-static int instantiate_frag_func(dbats_handler *dh, int bid, uint32_t frag_id)
+static int instantiate_frag_func(dbats_snapshot *ds, int bid, uint32_t frag_id)
 {
     int rc;
-    dbats_tslice *tslice = dh->tslice[bid];
+    dbats_tslice *tslice = ds->tslice[bid];
 
-    if (!dh->preload || dh->cfg.readonly) {
+    if (!ds->preload || ds->dh->cfg.readonly) {
 	// Try to load the fragment.
-	rc = load_frag(dh, tslice->time, bid, frag_id);
+	rc = load_frag(ds, tslice->time, bid, frag_id);
 	if (rc != 0) // error
 	    return rc;
 	if (tslice->frag[frag_id]) { // found it
 	    if (bid == 0)
-		rc = instantiate_isset_frags(dh, frag_id);
+		rc = instantiate_isset_frags(ds, frag_id);
 	    return rc;
 	}
-	if (dh->cfg.readonly) // didn't find it and can't create it
+	if (ds->dh->cfg.readonly) // didn't find it and can't create it
 	    return DB_NOTFOUND; // fragment not found
     }
 
@@ -2050,7 +2196,7 @@ static int instantiate_frag_func(dbats_handler *dh, int bid, uint32_t frag_id)
     dbats_log(LOG_VERYFINE, "grow tslice for time %u, bid %d, frag_id %u",
 	tslice->time, bid, frag_id);
 
-    size_t len = fragsize(dh);
+    size_t len = fragsize(ds->dh);
     if (!(tslice->frag[frag_id] = ecalloc(1, len, "tslice->frag[frag_id]"))) {
 	return errno ? errno : ENOMEM;
     }
@@ -2058,7 +2204,7 @@ static int instantiate_frag_func(dbats_handler *dh, int bid, uint32_t frag_id)
     if (tslice->num_frags <= frag_id)
 	tslice->num_frags = frag_id + 1;
     if (bid == 0) {
-	rc = instantiate_isset_frags(dh, frag_id);
+	rc = instantiate_isset_frags(ds, frag_id);
 	if (rc != 0) return rc;
     }
 
@@ -2069,20 +2215,21 @@ static int instantiate_frag_func(dbats_handler *dh, int bid, uint32_t frag_id)
 }
 
 // inline version handles the common case without a function call
-static inline int instantiate_frag(dbats_handler *dh, int bid, uint32_t frag_id)
+static inline int instantiate_frag(dbats_snapshot *ds, int bid, uint32_t frag_id)
 {
-    return dh->tslice[bid]->frag[frag_id] ?
+    return ds->tslice[bid]->frag[frag_id] ?
 	0 : // We already have the fragment.
-	instantiate_frag_func(dh, bid, frag_id);
+	instantiate_frag_func(ds, bid, frag_id);
 }
 
 /*************************************************************************/
 
-int dbats_set(dbats_handler *dh, uint32_t key_id, const dbats_value *valuep)
+int dbats_set(dbats_snapshot *ds, uint32_t key_id, const dbats_value *valuep)
 {
     dbats_log(LOG_VERYFINE, "dbats_set %u #%u = %" PRIval,
-	dh->tslice[0]->time, key_id, valuep[0]); // XXX
+	ds->tslice[0]->time, key_id, valuep[0]); // XXX
     int rc;
+    dbats_handler *dh = ds->dh;
 
     uint32_t frag_id = keyfrag(key_id);
     uint32_t offset = keyoff(key_id);
@@ -2093,45 +2240,45 @@ int dbats_set(dbats_handler *dh, uint32_t key_id, const dbats_value *valuep)
 	return EPERM;
     }
 
-    if (!dh->tslice[0]->time || !dh->action_in_prog) {
+    if (!ds->tslice[0]->time || !ds->txn_info.in_prog) {
 	dbats_log(LOG_ERROR, "dbats_set() without dbats_select_time()");
 	return -1;
     }
 
 retry:
     if (TXN_PER_OP && !dh->serialize)
-	begin_transaction(dh, "set txn");
+	begin_transaction(dh, ds, "set txn");
 
-    if ((rc = instantiate_frag(dh, 0, frag_id)) != 0) {
+    if ((rc = instantiate_frag(ds, 0, frag_id)) != 0) {
 	if (TXN_PER_OP && !dh->serialize) {
-	    abort_transaction(dh); // set txn
+	    abort_transaction(ds->dh, ds); // set txn
 	    if (rc == DB_LOCK_DEADLOCK) goto retry;
 	}
 	return rc;
     }
 
-    uint8_t was_set = vec_test(dh->tslice[0]->is_set[frag_id], offset);
+    uint8_t was_set = vec_test(ds->tslice[0]->is_set[frag_id], offset);
     if (was_set & !dh->cfg.updatable) {
 	dbats_log(LOG_ERROR, "value is already set: t=%" PRIu32 " keyid=%d",
-	    dh->tslice[0]->time, key_id);
+	    ds->tslice[0]->time, key_id);
 	return DB_KEYEXIST;
     }
-    dbats_value *oldvaluep = valueptr(dh, 0, frag_id, offset);
+    dbats_value *oldvaluep = valueptr(ds, 0, frag_id, offset);
 
     // For each bid, aggregate *valuep into tslice[bid].
-    for (int bid = 1; bid < dh->cfg.num_bundles; bid++) {
+    for (int bid = 1; bid < ds->num_bundles; bid++) {
 
 	if (dh->bundle[bid].keep > 0) {
 	    // Skip if the time is outside of bundle's keep limit
 	    uint32_t keep_period = (dh->bundle[bid].keep-1) * dh->bundle[bid].period;
-	    if (keep_period < dh->end_time &&
-		dh->tslice[bid]->time < dh->end_time - keep_period)
+	    if (keep_period < ds->end_time &&
+		ds->tslice[bid]->time < ds->end_time - keep_period)
 		    continue;
 	}
 
-	if ((rc = instantiate_frag(dh, bid, frag_id)) != 0) {
+	if ((rc = instantiate_frag(ds, bid, frag_id)) != 0) {
 	    if (TXN_PER_OP && !dh->serialize) {
-		abort_transaction(dh); // set txn
+		abort_transaction(ds->dh, ds); // set txn
 		if (rc == DB_LOCK_DEADLOCK) goto retry;
 	    }
 	    return rc;
@@ -2139,19 +2286,19 @@ retry:
 
 	uint8_t changed = 0;
 	uint8_t failed = 0;
-	dbats_value *aggval = valueptr(dh, bid, frag_id, offset);
-	uint32_t aggstart = dh->tslice[bid]->time;
-	uint32_t aggend = min(dh->active_last_data,
+	dbats_value *aggval = valueptr(ds, bid, frag_id, offset);
+	uint32_t aggstart = ds->tslice[bid]->time;
+	uint32_t aggend = min(ds->active_last_data,
 	    aggstart + dh->bundle[bid].period - dh->bundle[0].period);
 
 	// Count the number of steps contributing to the aggregate.
 	int n = 0;
 	{
-	    int ti = (aggstart - dh->active_start) / dh->bundle[0].period;
+	    int ti = (aggstart - ds->active_start) / dh->bundle[0].period;
 	    uint32_t t = aggstart;
 	    while (t <= aggend) {
-		if (t == dh->tslice[0]->time ||
-		    vec_test(dh->is_set[ti][frag_id], offset))
+		if (t == ds->tslice[0]->time ||
+		    vec_test(ds->is_set[ti][frag_id], offset))
 			n++;
 		ti++;
 		t += dh->bundle[0].period;
@@ -2200,22 +2347,22 @@ retry:
 		}
 		break;
 	    case DBATS_AGG_LAST:
-		if (dh->tslice[0]->time >= dh->active_last_data) {
+		if (ds->tslice[0]->time >= ds->active_last_data) {
 		    // common case: value is latest ever seen
 		    aggval[i] = valuep[i];
 		    changed = 1;
 		} else {
 		    // find time of last sample for this key within agg period
 		    uint32_t t = aggend;
-		    int ti = (t - dh->active_start) / dh->bundle[0].period;
+		    int ti = (t - ds->active_start) / dh->bundle[0].period;
 		    while (t >= aggstart) {
-			if (t == dh->tslice[0]->time) {
+			if (t == ds->tslice[0]->time) {
 			    // the new value is the last
 			    aggval[i] = valuep[i];
 			    changed = 1;
 			    break;
 			}
-			if (vec_test(dh->is_set[ti][frag_id], offset))
+			if (vec_test(ds->is_set[ti][frag_id], offset))
 			    // an existing value is later than the new value
 			    break;
 			t -= dh->bundle[0].period;
@@ -2253,11 +2400,11 @@ retry:
 	}
 	if (changed) {
 	    // XXX if (n >= xff * steps)
-	    vec_set(dh->tslice[bid]->is_set[frag_id], offset);
-	    dh->tslice[bid]->frag_changed[frag_id] = 1;
+	    vec_set(ds->tslice[bid]->is_set[frag_id], offset);
+	    ds->tslice[bid]->frag_changed[frag_id] = 1;
 	} else if (failed) {
 	    if (TXN_PER_OP && !dh->serialize)
-		abort_transaction(dh); // set txn
+		abort_transaction(ds->dh, ds); // set txn
 	    return failed;
 	}
     }
@@ -2265,50 +2412,51 @@ retry:
     // Set value at bid 0 (after aggregations because aggregations need
     // both old and new values)
     memcpy(oldvaluep, valuep, dh->cfg.entry_size);
-    vec_set(dh->tslice[0]->is_set[frag_id], offset);
+    vec_set(ds->tslice[0]->is_set[frag_id], offset);
 
-    if (!dh->changed) {
+    if (!ds->changed) {
 	// Once we've started writing, increase priority over other processes
 	// that haven't yet done any writing.
-	set_priority(dh, (dh->tslice[0]->time + INT32_MAX) / dh->bundle[0].period);
-	dh->changed = 1;
+	set_priority(ds, (ds->tslice[0]->time + INT32_MAX) / dh->bundle[0].period);
+	ds->changed = 1;
     }
-    dh->tslice[0]->frag_changed[frag_id] = 1;
+    ds->tslice[0]->frag_changed[frag_id] = 1;
 
     dbats_log(LOG_VERYFINE, "Succesfully set value "
 	"bid=%d frag_id=%u offset=%" PRIu32 " value_len=%u value=%" PRIval,
 	0, frag_id, offset, dh->cfg.entry_size, valuep[0]);
 
     if (TXN_PER_OP && !dh->serialize)
-	commit_transaction(dh); // set txn
+	commit_transaction(ds->dh, ds); // set txn
     return 0;
 }
 
-int dbats_set_by_key(dbats_handler *dh, const char *key,
+int dbats_set_by_key(dbats_snapshot *ds, const char *key,
     const dbats_value *valuep, int flags)
 {
     int rc;
     uint32_t key_id;
 
-    if ((rc = dbats_get_key_id(dh, key, &key_id, flags)) != 0)
+    if ((rc = dbats_get_key_id(ds->dh, ds, key, &key_id, flags)) != 0)
 	return rc;
-    return dbats_set(dh, key_id, valuep);
+    return dbats_set(ds, key_id, valuep);
 }
 
 /*************************************************************************/
 
-int dbats_get(dbats_handler *dh, uint32_t key_id,
+int dbats_get(dbats_snapshot *ds, uint32_t key_id,
     const dbats_value **valuepp, int bid)
 {
     int rc;
-    dbats_tslice *tslice = dh->tslice[bid];
+    dbats_tslice *tslice = ds->tslice[bid];
+    dbats_handler *dh = ds->dh;
 
     if (!dh->is_open) {
 	*valuepp = NULL;
 	return -1;
     }
 
-    if (!dh->tslice[0]->time || !dh->action_in_prog) {
+    if (!ds->tslice[0]->time || !ds->txn_info.in_prog) {
 	dbats_log(LOG_ERROR, "dbats_get() without dbats_select_time()");
 	return -1;
     }
@@ -2318,28 +2466,28 @@ int dbats_get(dbats_handler *dh, uint32_t key_id,
 
 retry:
     if (TXN_PER_OP && !dh->serialize)
-	begin_transaction(dh, "get txn");
+	begin_transaction(dh, ds, "get txn");
 
-    if ((rc = instantiate_frag(dh, bid, frag_id)) == 0) {
+    if ((rc = instantiate_frag(ds, bid, frag_id)) == 0) {
 	if (!vec_test(tslice->is_set[frag_id], offset)) {
 	    char keyname[DBATS_KEYLEN] = "";
-	    dbats_get_key_name(dh, key_id, keyname);
+	    dbats_get_key_name(dh, ds, key_id, keyname);
 	    dbats_log(LOG_WARNING, "Value unset (v): %u %d %s",
 		tslice->time, bid, keyname);
 	    *valuepp = NULL;
 	    if (TXN_PER_OP && !dh->serialize)
-		commit_transaction(dh); // get txn
+		commit_transaction(dh, ds); // get txn
 	    return DB_NOTFOUND;
 	}
 	if (dh->bundle[bid].func == DBATS_AGG_AVG) {
-	    double *dval = (double*)valueptr(dh, bid, frag_id, offset);
+	    double *dval = (double*)valueptr(ds, bid, frag_id, offset);
 	    static dbats_value *avg_buf = NULL;
 	    if (!avg_buf) {
 		avg_buf = emalloc(dh->cfg.entry_size * dh->cfg.values_per_entry,
 		    "avg_buf");
 		if (!avg_buf) {
 		    if (TXN_PER_OP && !dh->serialize)
-			abort_transaction(dh); // get txn
+			abort_transaction(dh, ds); // get txn
 		    return errno ? errno : ENOMEM;
 		}
 	    }
@@ -2347,38 +2495,39 @@ retry:
 		avg_buf[i] = dval[i] + 0.5;
 	    *valuepp = avg_buf;
 	} else {
-	    *valuepp = valueptr(dh, bid, frag_id, offset);
+	    *valuepp = valueptr(ds, bid, frag_id, offset);
 	}
 	dbats_log(LOG_VERYFINE, "Succesfully read value off=%" PRIu32 " len=%u",
 	    offset, dh->cfg.entry_size);
 	if (TXN_PER_OP && !dh->serialize)
-	    commit_transaction(dh); // get txn
+	    commit_transaction(dh, ds); // get txn
 	return 0;
 
     } else if (rc == DB_NOTFOUND) {
 	char keyname[DBATS_KEYLEN] = "";
-	dbats_get_key_name(dh, key_id, keyname);
+	dbats_get_key_name(dh, ds, key_id, keyname);
 	dbats_log(LOG_WARNING, "Value unset (f): %u %d %s",
 	    tslice->time, bid, keyname);
 	*valuepp = NULL;
 	if (TXN_PER_OP && !dh->serialize)
-	    commit_transaction(dh); // get txn
+	    commit_transaction(dh, ds); // get txn
 	return rc;
 
     } else {
 	if (TXN_PER_OP && !dh->serialize) {
-	    abort_transaction(dh); // get txn
+	    abort_transaction(dh, ds); // get txn
 	    if (rc == DB_LOCK_DEADLOCK) goto retry;
 	}
 	return rc;
     }
 }
 
-int dbats_get_double(dbats_handler *dh, uint32_t key_id,
+int dbats_get_double(dbats_snapshot *ds, uint32_t key_id,
     const double **valuepp, int bid)
 {
     int rc;
-    dbats_tslice *tslice = dh->tslice[bid];
+    dbats_tslice *tslice = ds->tslice[bid];
+    dbats_handler *dh = ds->dh;
 
     if (!dh->is_open) {
 	*valuepp = NULL;
@@ -2396,55 +2545,55 @@ int dbats_get_double(dbats_handler *dh, uint32_t key_id,
 
 retry:
     if (TXN_PER_OP && !dh->serialize)
-	begin_transaction(dh, "get txn");
+	begin_transaction(dh, ds, "get txn");
 
-    if ((rc = instantiate_frag(dh, bid, frag_id)) == 0) {
+    if ((rc = instantiate_frag(ds, bid, frag_id)) == 0) {
 	if (!vec_test(tslice->is_set[frag_id], offset)) {
 	    char keyname[DBATS_KEYLEN] = "";
-	    dbats_get_key_name(dh, key_id, keyname);
+	    dbats_get_key_name(dh, ds, key_id, keyname);
 	    dbats_log(LOG_WARNING, "Value unset (v): %u %d %s",
 		tslice->time, bid, keyname);
 	    *valuepp = NULL;
 	    if (TXN_PER_OP && !dh->serialize)
-		commit_transaction(dh); // get txn
+		commit_transaction(dh, ds); // get txn
 	    return DB_NOTFOUND;
 	}
-	*valuepp = (double*)valueptr(dh, bid, frag_id, offset);
+	*valuepp = (double*)valueptr(ds, bid, frag_id, offset);
 	dbats_log(LOG_VERYFINE, "Succesfully read value off=%" PRIu32 " len=%u",
 	    offset, dh->cfg.entry_size);
 	if (TXN_PER_OP && !dh->serialize)
-	    commit_transaction(dh); // get txn
+	    commit_transaction(dh, ds); // get txn
 	return 0;
 
     } else if (rc == DB_NOTFOUND) {
 	char keyname[DBATS_KEYLEN] = "";
-	dbats_get_key_name(dh, key_id, keyname);
+	dbats_get_key_name(dh, ds, key_id, keyname);
 	dbats_log(LOG_WARNING, "Value unset (f): %u %d %s",
 	    tslice->time, bid, keyname);
 	*valuepp = NULL;
 	if (TXN_PER_OP && !dh->serialize)
-	    commit_transaction(dh); // get txn
+	    commit_transaction(dh, ds); // get txn
 	return rc;
 
     } else {
 	if (TXN_PER_OP && !dh->serialize) {
-	    abort_transaction(dh); // get txn
+	    abort_transaction(dh, ds); // get txn
 	    if (rc == DB_LOCK_DEADLOCK) goto retry;
 	}
 	return rc;
     }
 }
 
-int dbats_get_by_key(dbats_handler *dh, const char *key,
+int dbats_get_by_key(dbats_snapshot *ds, const char *key,
     const dbats_value **valuepp, int bid)
 {
     int rc;
     uint32_t key_id;
 
-    if ((rc = dbats_get_key_id(dh, key, &key_id, 0)) != 0) {
+    if ((rc = dbats_get_key_id(ds->dh, ds, key, &key_id, 0)) != 0) {
 	return rc;
     }
-    return dbats_get(dh, key_id, valuepp, bid);
+    return dbats_get(ds, key_id, valuepp, bid);
 }
 
 /*************************************************************************/
@@ -2497,9 +2646,13 @@ int dbats_walk_keyname_end(dbats_handler *dh)
 
 /*************************************************************************/
 
-int dbats_walk_keyid_start(dbats_handler *dh)
+int dbats_walk_keyid_start(dbats_handler *dh, dbats_snapshot *ds,
+    dbats_keyid_iterator **dkip)
 {
-    int rc = dh->dbKeyid->cursor(dh->dbKeyid, NULL, &dh->keyid_cursor, 0);
+    *dkip = emalloc(sizeof(dbats_keyid_iterator), "iterator");
+    if (!*dkip) return ENOMEM;
+    txn_info_t *txn_info = ds ? &ds->txn_info : &dh->txn_info;
+    int rc = raw_cursor_open(dh, dh->dbKeyid, txn_info, &(*dkip)->cursor, 0);
     if (rc != 0) {
 	dbats_log(LOG_ERROR, "Error in dbats_walk_keyid_start: %s",
 	    db_strerror(rc));
@@ -2508,7 +2661,7 @@ int dbats_walk_keyid_start(dbats_handler *dh)
     return 0;
 }
 
-int dbats_walk_keyid_next(dbats_handler *dh, uint32_t *key_id_p,
+int dbats_walk_keyid_next(dbats_keyid_iterator *dki, uint32_t *key_id_p,
     char *namebuf)
 {
     int rc;
@@ -2516,8 +2669,8 @@ int dbats_walk_keyid_next(dbats_handler *dh, uint32_t *key_id_p,
 
     DBT_out(dbt_keyrecno, &recno, sizeof(recno));
     DBT_out(dbt_keyname, namebuf, DBATS_KEYLEN-1);
-    rc = raw_cursor_get(dh, dh->dbKeyid, dh->keyid_cursor,
-	&dbt_keyrecno, &dbt_keyname, DB_NEXT | DB_READ_COMMITTED);
+    rc = raw_cursor_get(&dki->cursor, &dbt_keyrecno, &dbt_keyname,
+	DB_NEXT | DB_READ_COMMITTED);
     if (rc != 0) {
 	if (rc != DB_NOTFOUND)
 	    dbats_log(LOG_ERROR, "Error in dbats_walk_keyid_next: %s",
@@ -2530,9 +2683,9 @@ int dbats_walk_keyid_next(dbats_handler *dh, uint32_t *key_id_p,
     return 0;
 }
 
-int dbats_walk_keyid_end(dbats_handler *dh)
+int dbats_walk_keyid_end(dbats_keyid_iterator *dki)
 {
-    int rc = dh->keyid_cursor->close(dh->keyid_cursor);
+    int rc = raw_cursor_close(&dki->cursor);
     if (rc != 0) {
 	dbats_log(LOG_ERROR, "Error in dbats_walk_keyid_end: %s",
 	    db_strerror(rc));

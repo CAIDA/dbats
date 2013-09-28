@@ -43,7 +43,7 @@ static void load_keys(dbats_handler *handler, const char *path)
     while (fgets(keybuf, sizeof(keybuf), keyfile)) {
 	char *p = strchr(keybuf, '\n');
 	if (p) *p = 0;
-	if (dbats_get_key_id(handler, keybuf, &keys[n_keys].keyid, 0) != 0) {
+	if (dbats_get_key_id(handler, NULL, keybuf, &keys[n_keys].keyid, 0) != 0) {
 	    fprintf(stderr, "no such key: %s\n", keybuf);
 	    exit(-1);
 	}
@@ -58,13 +58,14 @@ static void load_keys(dbats_handler *handler, const char *path)
 
 static void get_keys(dbats_handler *handler)
 {
-    dbats_walk_keyid_start(handler);
+    dbats_keyid_iterator *dki;
+    dbats_walk_keyid_start(handler, NULL, &dki);
     char keybuf[DBATS_KEYLEN];
-    while (dbats_walk_keyid_next(handler, &keys[n_keys].keyid, keybuf) == 0) {
+    while (dbats_walk_keyid_next(dki, &keys[n_keys].keyid, keybuf) == 0) {
 	keys[n_keys].key = strdup(keybuf);
 	n_keys++;
     }
-    dbats_walk_keyid_end(handler);
+    dbats_walk_keyid_end(dki);
 }
 
 enum { OT_TEXT, OT_GNUPLOT };
@@ -140,7 +141,7 @@ int main(int argc, char *argv[]) {
     const dbats_bundle_info *bundle = dbats_get_bundle_info(handler, 0);
     bundle0_period = bundle->period;
 
-    dbats_commit(handler); // commit the txn started by dbats_open
+    dbats_commit_open(handler); // commit the txn started by dbats_open
 
     if (keyfile_path)
 	load_keys(handler, keyfile_path);
@@ -153,7 +154,7 @@ int main(int argc, char *argv[]) {
 
     uint32_t end = opt_end;
     if (end == 0) {
-	dbats_get_end_time(handler, 0, &end);
+	dbats_get_end_time(handler, NULL, 0, &end);
 	if (end == 0) {
 	    dbats_log(LOG_INFO, "No data");
 	    exit(0);
@@ -164,11 +165,11 @@ int main(int argc, char *argv[]) {
 	uint32_t begin = opt_begin;
 	if (begin == 0) {
 	    // find earliest start time of all bundles
-	    dbats_get_start_time(handler, 0, &begin);
-	    for (int sid = 1; sid < cfg->num_bundles; sid++) {
+	    dbats_get_start_time(handler, NULL, 0, &begin);
+	    for (int bid = 1; bid < cfg->num_bundles; bid++) {
 		uint32_t bundle_begin;
-		dbats_get_start_time(handler, sid, &bundle_begin);
-		bundle = dbats_get_bundle_info(handler, sid);
+		dbats_get_start_time(handler, NULL, bid, &bundle_begin);
+		bundle = dbats_get_bundle_info(handler, bid);
 		if (begin > bundle_begin)
 		    begin = bundle_begin;
 	    }
@@ -188,30 +189,31 @@ int main(int argc, char *argv[]) {
 	    fprintf(out, "set grid xtics\n");
 	}
 	const char *prefix = "plot";
-	for (int sid = 0; sid < cfg->num_bundles; sid++) {
-	    bundle = dbats_get_bundle_info(handler, sid);
+	for (int bid = 0; bid < cfg->num_bundles; bid++) {
+	    bundle = dbats_get_bundle_info(handler, bid);
 	    fprintf(out, "%s '-' using ($1-%"PRIu32"+%f):($2):(%d) %s"
 		"linecolor %d title \"%"PRIu32"s %s\"",
 		prefix, begin, bundle->period/2.0, bundle->period,
-		sid == 0 ? "with boxes fs solid 0.1 " : "",
-		sid, bundle->period, dbats_agg_func_label[bundle->func]);
+		bid == 0 ? "with boxes fs solid 0.1 " : "",
+		bid, bundle->period, dbats_agg_func_label[bundle->func]);
 	    prefix = ", \\\n    ";
 	}
 	fprintf(out, "\n");
     }
 
-    for (int sid = 0; sid < cfg->num_bundles; sid++) {
-	bundle = dbats_get_bundle_info(handler, sid);
+    for (int bid = 0; bid < cfg->num_bundles; bid++) {
+	bundle = dbats_get_bundle_info(handler, bid);
 	uint32_t t;
 
 	uint32_t begin = opt_begin;
 	if (begin == 0)
-	    dbats_get_start_time(handler, sid, &begin);
+	    dbats_get_start_time(handler, NULL, bid, &begin);
 
 	for (t = begin; t <= end; t += bundle->period) {
 	    int rc;
+	    dbats_snapshot *snapshot;
 
-	    if ((rc = dbats_select_time(handler, t, 0)) != 0) {
+	    if ((rc = dbats_select_time(handler, &snapshot, t, 0)) != 0) {
 		dbats_log(LOG_INFO, "Unable to find time %u", t);
 		continue;
 	    }
@@ -219,11 +221,12 @@ int main(int argc, char *argv[]) {
 	    if (bundle->func == DBATS_AGG_AVG) {
 		const double *values;
 		for (int k = 0; k < n_keys; k++) {
-		    rc = dbats_get_double(handler, keys[k].keyid, &values, sid);
+		    rc = dbats_get_double(snapshot, keys[k].keyid, &values, bid);
 		    if (rc == DB_NOTFOUND)
 			continue;
 		    if (rc != 0) {
 			fprintf(stderr, "error in dbats_get(%s): rc=%d\n", keys[k].key, rc);
+			dbats_abort_snap(snapshot);
 			break;
 		    }
 		    switch (outtype) {
@@ -232,7 +235,7 @@ int main(int argc, char *argv[]) {
 			for (int j = 0; j < cfg->values_per_entry; j++) {
 			    fprintf(out, "%.3f ", values ? values[j] : 0);
 			}
-			fprintf(out, "%u %d\n", t, sid);
+			fprintf(out, "%u %d\n", t, bid);
 			break;
 		    case OT_GNUPLOT:
 			fprintf(out, "%u %.3f\n",
@@ -243,11 +246,12 @@ int main(int argc, char *argv[]) {
 	    } else {
 		const dbats_value *values;
 		for (int k = 0; k < n_keys; k++) {
-		    rc = dbats_get(handler, keys[k].keyid, &values, sid);
+		    rc = dbats_get(snapshot, keys[k].keyid, &values, bid);
 		    if (rc == DB_NOTFOUND)
 			continue;
 		    if (rc != 0) {
 			fprintf(stderr, "error in dbats_get(%s): rc=%d\n", keys[k].key, rc);
+			dbats_abort_snap(snapshot);
 			break;
 		    }
 		    switch (outtype) {
@@ -256,7 +260,7 @@ int main(int argc, char *argv[]) {
 			for (int j = 0; j < cfg->values_per_entry; j++) {
 			    fprintf(out, "%" PRIval " ", values ? values[j] : 0);
 			}
-			fprintf(out, "%u %d\n", t, sid);
+			fprintf(out, "%u %d\n", t, bid);
 			break;
 		    case OT_GNUPLOT:
 			fprintf(out, "%u %" PRIval "\n",
@@ -265,6 +269,7 @@ int main(int argc, char *argv[]) {
 		    }
 		}
 	    }
+	    dbats_commit_snap(snapshot);
 	}
 	if (outtype == OT_GNUPLOT) {
 	    fprintf(out, "e\n");

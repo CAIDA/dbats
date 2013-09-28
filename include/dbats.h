@@ -132,6 +132,9 @@ typedef uint64_t dbats_value;  ///< A value stored in a DBATS database.
 #define SCNval SCNu64          ///< scanf() conversion specifier for dbats_value
 
 typedef struct dbats_handler dbats_handler; ///< Opaque handle for a DBATS db
+typedef struct dbats_snapshot dbats_snapshot; ///< Opaque handle for a DBATS snapshot
+typedef struct dbats_keyid_iterator dbats_keyid_iterator; ///< Opaque handle for iterating over keys by id
+typedef struct dbats_keytree_iterator dbats_keytree_iterator; ///< Opaque handle for iterating over keys by name
 
 /* ************************************************** */
 
@@ -214,7 +217,7 @@ extern int dbats_aggregate(dbats_handler *handler, int func, int steps);
  *  @return 0 for success, DB_NOTFOUND if the bundle is empty,
  *    or other nonzero value for error.
  */
-extern int dbats_get_start_time(dbats_handler *handler, int bid, uint32_t *start);
+extern int dbats_get_start_time(dbats_handler *handler, dbats_snapshot *snapshot, int bid, uint32_t *start);
 
 /** Get the latest timestamp in a time series bundle.
  *  At least one key in the bundle will have a value at the end time.
@@ -225,7 +228,7 @@ extern int dbats_get_start_time(dbats_handler *handler, int bid, uint32_t *start
  *  @return 0 for success, DB_NOTFOUND if the bundle is empty,
  *    or other nonzero value for error.
  */
-extern int dbats_get_end_time(dbats_handler *handler, int bid, uint32_t *end);
+extern int dbats_get_end_time(dbats_handler *handler, dbats_snapshot *snapshot, int bid, uint32_t *end);
 
 /** Congfiure the number of data points to keep for each time series of a
  *  bundle.
@@ -316,7 +319,7 @@ extern uint32_t dbats_normalize_time(const dbats_handler *handler,
  *    - DB_LOCK_DEADLOCK if the operation was cancelled to resolve a deadlock;
  *    - other nonzero value for other errors.
  */
-extern int dbats_select_time(dbats_handler *handler,
+extern int dbats_select_time(dbats_handler *handler, dbats_snapshot **snapshotp,
     uint32_t time_value, uint32_t flags);
 
 /** Commit the transaction in progress, flushing any pending writes to the
@@ -334,7 +337,8 @@ extern int dbats_select_time(dbats_handler *handler,
  *    - DB_LOCK_DEADLOCK if the operation was cancelled to resolve a deadlock;
  *    - other nonzero value for other errors.
  */
-extern int dbats_commit(dbats_handler *handler);
+extern int dbats_commit_open(dbats_handler *handler);
+extern int dbats_commit_snap(dbats_snapshot *snapshot);
 
 /** Abort a transaction in progress (begun by dbats_open() or
  *  dbats_select_time()), undoing all changes made during the transaction and
@@ -344,7 +348,8 @@ extern int dbats_commit(dbats_handler *handler);
  *  @param[in] handler A dbats_handler created by dbats_open().
  *  @return 0 for success, nonzero for error.
  */
-extern int dbats_abort(dbats_handler *handler);
+extern int dbats_abort_open(dbats_handler *handler);
+extern int dbats_abort_snap(dbats_snapshot *snapshot);
 
 /** Get the id of a new or existing key.
  *  The key must already exist unless the DBATS_CREATE flag is given.
@@ -359,8 +364,8 @@ extern int dbats_abort(dbats_handler *handler);
  *  @return 0 for success, DB_NOTFOUND if the key does not exist and
  *    DBATS_CREATE flag was not set, or other nonzero value for error.
  */
-extern int dbats_get_key_id(dbats_handler *handler, const char *key,
-    uint32_t *key_id_p, uint32_t flags);
+extern int dbats_get_key_id(dbats_handler *handler, dbats_snapshot *ds,
+    const char *key, uint32_t *key_id_p, uint32_t flags);
 
 /** Get the ids of a large number of new or existing keys.
  *  The keys must already exist unless the DBATS_CREATE flag is given.
@@ -374,8 +379,9 @@ extern int dbats_get_key_id(dbats_handler *handler, const char *key,
  *  @return 0 for success, DB_NOTFOUND if any key does not exist and
  *    DBATS_CREATE flag was not set, or other nonzero value for error.
  */
-extern int dbats_bulk_get_key_id(dbats_handler *handler, uint32_t n_keys,
-    const char * const *keys, uint32_t *key_ids, uint32_t flags);
+extern int dbats_bulk_get_key_id(dbats_handler *handler, dbats_snapshot *ds,
+    uint32_t n_keys, const char * const *keys, uint32_t *key_ids,
+    uint32_t flags);
 
 /** Get the name of an existing key.
  *  @param[in] handler A dbats_handler created by dbats_open().
@@ -384,8 +390,8 @@ extern int dbats_bulk_get_key_id(dbats_handler *handler, uint32_t n_keys,
  *    characters where the key's name will be written.
  *  @return 0 for success, nonzero for error.
  */
-extern int dbats_get_key_name(dbats_handler *handler, uint32_t key_id,
-    char *namebuf);
+extern int dbats_get_key_name(dbats_handler *dh, dbats_snapshot *ds,
+    uint32_t key_id, char *namebuf);
 
 /** Write a value to the primary time series for the specified key and the
  *  time selected by dbats_select_time().
@@ -413,7 +419,7 @@ extern int dbats_get_key_name(dbats_handler *handler, uint32_t key_id,
  *    - DB_LOCK_DEADLOCK if the operation was cancelled to resolve a deadlock;
  *    - other nonzero value for other errors.
  */
-extern int dbats_set(dbats_handler *handler, uint32_t key_id,
+extern int dbats_set(dbats_snapshot *snapshot, uint32_t key_id,
     const dbats_value *valuep);
 
 /** Write a value to the primary time series for the specified key and the
@@ -437,7 +443,7 @@ extern int dbats_set(dbats_handler *handler, uint32_t key_id,
  *    - DB_LOCK_DEADLOCK if the operation was cancelled to resolve a deadlock;
  *    - other nonzero value for other errors.
  */
-extern int dbats_set_by_key (dbats_handler *handler, const char *key,
+extern int dbats_set_by_key (dbats_snapshot *snapshot, const char *key,
     const dbats_value *valuep, int flags);
 
 /** Read an entry (array of dbats_value) from the database for the specified
@@ -454,7 +460,7 @@ extern int dbats_set_by_key (dbats_handler *handler, const char *key,
  *    - DB_LOCK_DEADLOCK if the operation was cancelled to resolve a deadlock;
  *    - other nonzero value for other errors.
  */
-extern int dbats_get(dbats_handler *handler, uint32_t key_id,
+extern int dbats_get(dbats_snapshot *snapshot, uint32_t key_id,
     const dbats_value **valuepp, int bid);
 
 /** Read an array of double values from the database for the specified bundle
@@ -472,7 +478,7 @@ extern int dbats_get(dbats_handler *handler, uint32_t key_id,
  *    - DB_LOCK_DEADLOCK if the operation was cancelled to resolve a deadlock;
  *    - other nonzero value for other errors.
  */
-extern int dbats_get_double(dbats_handler *handler, uint32_t key_id,
+extern int dbats_get_double(dbats_snapshot *snapshot, uint32_t key_id,
     const double **valuepp, int bid);
 
 /** Read an array of dbats_values from the database for the specified bundle
@@ -492,7 +498,7 @@ extern int dbats_get_double(dbats_handler *handler, uint32_t key_id,
  *    - DB_LOCK_DEADLOCK if the operation was cancelled to resolve a deadlock;
  *    - other nonzero value for other errors.
  */
-extern int dbats_get_by_key(dbats_handler *handler, const char *key,
+extern int dbats_get_by_key(dbats_snapshot *snapshot, const char *key,
     const dbats_value **valuepp, int bid);
 
 /** Get the number of keys in the database.
@@ -522,7 +528,9 @@ extern int dbats_num_keys(dbats_handler *handler, uint32_t *num_keys);
  *  @param[in] pattern A fileglob-like pattern
  *  @return 0 for success, or EINVAL if the pattern is invalid.
  */
-extern int dbats_glob_keyname_start(dbats_handler *handler, const char *pattern);
+extern int dbats_glob_keyname_start(dbats_handler *handler,
+    dbats_snapshot *snapshot, dbats_keytree_iterator **dkip,
+    const char *pattern);
 
 /** Get the next key id and key name in the sequence started by
  *  dbats_glob_keyname_start().
@@ -536,14 +544,14 @@ extern int dbats_glob_keyname_start(dbats_handler *handler, const char *pattern)
  *    - DB_NOTFOUND if there are no more matching keys;
  *    - other nonzero value for error.
  */
-extern int dbats_glob_keyname_next(dbats_handler *handler, uint32_t *key_id_p,
-    char *namebuf);
+extern int dbats_glob_keyname_next(dbats_keytree_iterator *dki,
+    uint32_t *key_id_p, char *namebuf);
 
 /** End the sequence started by dbats_glob_keyname_start().
  *  @param[in] handler A dbats_handler created by dbats_open().
  *  @return 0 for success, nonzero for error.
  */
-extern int dbats_glob_keyname_end(dbats_handler *handler);
+extern int dbats_glob_keyname_end(dbats_keytree_iterator *dki);
 
 #if 0
 /** Prepare to iterate over the list of keys ordered by name.
@@ -580,7 +588,8 @@ extern int dbats_walk_keyname_end(dbats_handler *handler);
  *  @param[in] handler A dbats_handler created by dbats_open().
  *  @return 0 for success, nonzero for error.
  */
-extern int dbats_walk_keyid_start(dbats_handler *handler);
+extern int dbats_walk_keyid_start(dbats_handler *handler,
+    dbats_snapshot *snapshot, dbats_keyid_iterator **dkip);
 
 /** Get the next key id and key name in the sequence started by
  *  dbats_walk_keyid_start().
@@ -594,14 +603,14 @@ extern int dbats_walk_keyid_start(dbats_handler *handler);
  *    - DB_NOTFOUND if there are no more keys;
  *    - other nonzero value for error.
  */
-extern int dbats_walk_keyid_next(dbats_handler *handler, uint32_t *key_id_p,
+extern int dbats_walk_keyid_next(dbats_keyid_iterator *dki, uint32_t *key_id_p,
     char *namebuf);
 
 /** End the sequence started by dbats_walk_keyid_start().
  *  @param[in] handler A dbats_handler created by dbats_open().
  *  @return 0 for success, nonzero for error.
  */
-extern int dbats_walk_keyid_end(dbats_handler *handler);
+extern int dbats_walk_keyid_end(dbats_keyid_iterator *dki);
 
 /** Get configuration parameters from a DBATS database.
  *  @param[in] handler A dbats_handler created by dbats_open().

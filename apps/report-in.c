@@ -32,17 +32,19 @@ static int write_data(dbats_handler *handler, int select_flags, uint32_t t,
     struct entry *dat, int n_data)
 {
     int rc;
+    dbats_snapshot *snapshot;
+
 retry:
     dbats_log(LOG_INFO, "select time %u", t);
-    rc = dbats_select_time(handler, t, select_flags);
+    rc = dbats_select_time(handler, &snapshot, t, select_flags);
     if (rc != 0) {
 	dbats_log(LOG_ERROR, "error in dbats_select_time()");
 	return -1;
     }
     for (int i = 0; i < n_data; i++) {
-	rc = dbats_set(handler, dat[i].key_id, &dat[i].value);
+	rc = dbats_set(snapshot, dat[i].key_id, &dat[i].value);
 	if (rc != 0) {
-	    dbats_abort(handler);
+	    dbats_abort_snap(snapshot);
 	    if (rc == DB_LOCK_DEADLOCK) {
 		dbats_log(LOG_WARNING, "deadlock in dbats_set()");
 		goto retry;
@@ -51,9 +53,9 @@ retry:
 	    return -1;
 	}
     }
-    rc = dbats_commit(handler);
+    rc = dbats_commit_snap(snapshot);
     if (rc != 0) {
-	dbats_abort(handler);
+	dbats_abort_snap(snapshot);
 	if (rc == DB_LOCK_DEADLOCK) {
 	    dbats_log(LOG_WARNING, "deadlock in dbats_commit()");
 	    goto retry;
@@ -156,11 +158,12 @@ int main(int argc, char *argv[]) {
 	}
 
 	if (n_keys > 0) {
-	    rc = dbats_bulk_get_key_id(handler, n_keys, (const char * const *)keys, keyids, DBATS_CREATE);
+	    rc = dbats_bulk_get_key_id(handler, NULL, n_keys, (const char * const *)keys, keyids, DBATS_CREATE);
 	}
+	dbats_commit_open(handler); // commit the txn started by dbats_open
 
     } else {
-	dbats_commit(handler); // commit the txn started by dbats_open
+	dbats_commit_open(handler); // commit the txn started by dbats_open
 	uint32_t key_id = 0;
 	while (1) {
 	    int n = scanf("%127s %" SCNval " %" SCNu32 "\n", key, &value, &t);
@@ -179,7 +182,7 @@ int main(int argc, char *argv[]) {
 	    if (!keys[key_id] || strcmp(keys[key_id], key) != 0) {
 		// If input keys are in consistent order, this lookup will be
 		// skipped after the first round.
-		if (dbats_get_key_id(handler, key, &key_id, DBATS_CREATE) != 0)
+		if (dbats_get_key_id(handler, NULL, key, &key_id, DBATS_CREATE) != 0)
 		    return -1;
 		if (keys[key_id]) free(keys[key_id]); // shouldn't happen
 		keys[key_id] = strdup(key);

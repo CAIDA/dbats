@@ -96,7 +96,7 @@ int main(int argc, char *argv[]) {
 
     handler = dbats_open(dbats_path, 1, period, open_flags);
     if (!handler) return -1;
-    dbats_commit(handler);
+    dbats_commit_open(handler);
 
     cfg = dbats_get_config(handler);
 
@@ -113,8 +113,8 @@ int main(int argc, char *argv[]) {
 	    const dbats_bundle_info *bundle =
 		dbats_get_bundle_info(handler, bid);
 	    uint32_t start, end;
-	    dbats_get_start_time(handler, bid, &start);
-	    dbats_get_end_time(handler, bid, &end);
+	    dbats_get_start_time(handler, NULL, bid, &start);
+	    dbats_get_end_time(handler, NULL, bid, &end);
 	    printf("bundle %d:\n", bid);
 	    printf("  function: %s\n", dbats_agg_func_label[bundle->func]);
 	    printf("  steps: %u\n", bundle->steps);
@@ -127,25 +127,27 @@ int main(int argc, char *argv[]) {
 
     if (keyglob) {
 	printf("keys matching \"%s\":\n", keyglob);
-	if (dbats_glob_keyname_start(handler, keyglob) == 0) {
+	dbats_keytree_iterator *dki;
+	if (dbats_glob_keyname_start(handler, NULL, &dki, keyglob) == 0) {
 	    uint32_t keyid;
 	    char keybuf[DBATS_KEYLEN];
-	    while (dbats_glob_keyname_next(handler, &keyid, keybuf) == 0) {
+	    while (dbats_glob_keyname_next(dki, &keyid, keybuf) == 0) {
 		printf("  %10u: %s\n", keyid, keybuf);
 	    }
-	    dbats_glob_keyname_end(handler);
+	    dbats_glob_keyname_end(dki);
 	}
     }
 
     if (opt_keys) {
 	printf("all keys:\n");
-	dbats_walk_keyid_start(handler);
+	dbats_keyid_iterator *dki;
+	dbats_walk_keyid_start(handler, NULL, &dki);
 	uint32_t keyid;
 	char keybuf[DBATS_KEYLEN];
-	while (dbats_walk_keyid_next(handler, &keyid, keybuf) == 0) {
+	while (dbats_walk_keyid_next(dki, &keyid, keybuf) == 0) {
 	    printf("  %10u: %s\n", keyid, keybuf);
 	}
-	dbats_walk_keyid_end(handler);
+	dbats_walk_keyid_end(dki);
     }
 
     dbats_close(handler);
