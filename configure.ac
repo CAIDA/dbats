@@ -1,4 +1,4 @@
-AC_REVISION([$Id: configure.ac,v 1.6 2013/09/19 18:26:56 kkeys Exp $])
+AC_REVISION([$Id: configure.ac,v 1.7 2013/10/03 17:59:45 kkeys Exp $])
 
 AC_INIT(include/dbats.h)
 AC_PREREQ(2.53)
@@ -166,7 +166,7 @@ AC_LINK_IFELSE([AC_LANG_PROGRAM(
     [#include <db.h>],
     [DB *db; db->set_lk_exclusive(db, 1);])],
     [AC_MSG_RESULT([yes]); AC_DEFINE(HAVE_DB_SET_LK_EXCLUSIVE)],
-    [AC_MSG_RESULT([no])])
+    [AC_MSG_RESULT([no]); AC_MSG_WARN([Exclusive locking will not be available.])])
 
 AC_MSG_CHECKING([for DB_TXN->set_priority()])
 AC_LINK_IFELSE([AC_LANG_PROGRAM(
