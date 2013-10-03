@@ -27,8 +27,6 @@
 #define MAX_NUM_FRAGS       16384 // max number of fragments in a tslice
 #define MAX_NUM_BUNDLES        16 // max number of time series bundles
 
-#define TXN_PER_OP 0 // must be 0, because rolling back a dbats_set doesn't reset the in-memory fragments
-
 /*************************************************************************/
 // compile-time assertion (works anywhere a declaration is allowed)
 #define ct_assert(expr, label)  enum { ASSERT_ERROR__##label = 1/(!!(expr)) };
@@ -109,17 +107,6 @@ typedef struct {
 #endif
 const uint32_t KTID_IS_NODE      = chtonl(DBATS_KEY_IS_PREFIX);
 
-// key tree lookup state
-typedef struct {
-    uint32_t id;     // 1 bit flag (0=keyid, 1=nodeid); 31 bit id.  Big endian.
-    char *start;     // start of substr of dh->pattern that matched this node
-    uint32_t gnlen;  // length of glob node in dh->pattern
-    uint32_t anlen;  // length of actual node in key.nodename
-    uint32_t pfxlen; // length of literal prefix of nodename glob
-    keytree_key key; // db key for this node
-    cursor_wrapper cursor;     // db cursor for globbing this node
-} kt_node_t;
-
 
 struct dbats_snapshot {
     dbats_handler *dh;
@@ -158,6 +145,17 @@ struct dbats_handler {
     dbats_bundle_info *bundle; // parameters for each time series bundle
     txn_info_t txn_info;       // transaction info
 };
+
+// key tree lookup state
+typedef struct {
+    uint32_t id;     // 1 bit flag (0=keyid, 1=nodeid); 31 bit id.  Big endian.
+    char *start;     // start of substr of dh->pattern that matched this node
+    uint32_t gnlen;  // length of glob node in dh->pattern
+    uint32_t anlen;  // length of actual node in key.nodename
+    uint32_t pfxlen; // length of literal prefix of nodename glob
+    keytree_key key; // db key for this node
+    cursor_wrapper cursor;     // db cursor for globbing this node
+} kt_node_t;
 
 struct dbats_keytree_iterator {
     dbats_handler *dh;
@@ -1195,7 +1193,7 @@ int dbats_commit_snap(dbats_snapshot *ds)
 {
     int rc = 0;
     if (!ds->txn_info.in_prog) return 0;
-    if (ds->txn_info.cancelled) return DB_LOCK_DEADLOCK;
+    if (ds->txn_info.cancelled) return DB_LOCK_DEADLOCK; // XXX MEMORY LEAK
     dbats_log(LOG_FINE, "dbats_commit_snap %u", ds->tslice[0]->time);
 
     free_isset(ds);
@@ -1538,7 +1536,7 @@ restart:
 	    if (rc == DB_NOTFOUND && bid > 0) break; // no more bundles
 	    goto abort;
 	}
-	dh->cfg.num_bundles = (*dsp)->num_bundles = bid + 1;
+	(*dsp)->num_bundles = bid + 1;
     }
 
     (*dsp)->tslice = ecalloc((*dsp)->num_bundles, sizeof(*(*dsp)->tslice), "ds->tslice");
@@ -1871,8 +1869,7 @@ next_level:
     if (flags & DBATS_GLOB) {
 	// search for a glob match for this level
 	node->pfxlen = strcspn(node->start, "\\?[{*.");
-	rc = raw_cursor_open(dki->dh, dki->dh->dbKeytree,
-	    dki->ds ? &dki->ds->txn_info : &dki->dh->txn_info,
+	rc = raw_cursor_open(dki->dh, dki->dh->dbKeytree, dki->txn_info,
 	    &node->cursor, 0);
 	if (rc != 0) { msg = "cursor"; goto logabort; }
 	node->key.parent = dki->nodes[lvl-1].id;
@@ -2246,16 +2243,8 @@ int dbats_set(dbats_snapshot *ds, uint32_t key_id, const dbats_value *valuep)
     }
 
 retry:
-    if (TXN_PER_OP && !dh->serialize)
-	begin_transaction(dh, ds, "set txn");
-
-    if ((rc = instantiate_frag(ds, 0, frag_id)) != 0) {
-	if (TXN_PER_OP && !dh->serialize) {
-	    abort_transaction(ds->dh, ds); // set txn
-	    if (rc == DB_LOCK_DEADLOCK) goto retry;
-	}
+    if ((rc = instantiate_frag(ds, 0, frag_id)) != 0)
 	return rc;
-    }
 
     uint8_t was_set = vec_test(ds->tslice[0]->is_set[frag_id], offset);
     if (was_set & !dh->cfg.updatable) {
@@ -2276,13 +2265,8 @@ retry:
 		    continue;
 	}
 
-	if ((rc = instantiate_frag(ds, bid, frag_id)) != 0) {
-	    if (TXN_PER_OP && !dh->serialize) {
-		abort_transaction(ds->dh, ds); // set txn
-		if (rc == DB_LOCK_DEADLOCK) goto retry;
-	    }
+	if ((rc = instantiate_frag(ds, bid, frag_id)) != 0)
 	    return rc;
-	}
 
 	uint8_t changed = 0;
 	uint8_t failed = 0;
@@ -2403,8 +2387,6 @@ retry:
 	    vec_set(ds->tslice[bid]->is_set[frag_id], offset);
 	    ds->tslice[bid]->frag_changed[frag_id] = 1;
 	} else if (failed) {
-	    if (TXN_PER_OP && !dh->serialize)
-		abort_transaction(ds->dh, ds); // set txn
 	    return failed;
 	}
     }
@@ -2426,8 +2408,6 @@ retry:
 	"bid=%d frag_id=%u offset=%" PRIu32 " value_len=%u value=%" PRIval,
 	0, frag_id, offset, dh->cfg.entry_size, valuep[0]);
 
-    if (TXN_PER_OP && !dh->serialize)
-	commit_transaction(ds->dh, ds); // set txn
     return 0;
 }
 
@@ -2465,9 +2445,6 @@ int dbats_get(dbats_snapshot *ds, uint32_t key_id,
     uint32_t offset = keyoff(key_id);
 
 retry:
-    if (TXN_PER_OP && !dh->serialize)
-	begin_transaction(dh, ds, "get txn");
-
     if ((rc = instantiate_frag(ds, bid, frag_id)) == 0) {
 	if (!vec_test(tslice->is_set[frag_id], offset)) {
 	    char keyname[DBATS_KEYLEN] = "";
@@ -2475,8 +2452,6 @@ retry:
 	    dbats_log(LOG_WARNING, "Value unset (v): %u %d %s",
 		tslice->time, bid, keyname);
 	    *valuepp = NULL;
-	    if (TXN_PER_OP && !dh->serialize)
-		commit_transaction(dh, ds); // get txn
 	    return DB_NOTFOUND;
 	}
 	if (dh->bundle[bid].func == DBATS_AGG_AVG) {
@@ -2485,11 +2460,8 @@ retry:
 	    if (!avg_buf) {
 		avg_buf = emalloc(dh->cfg.entry_size * dh->cfg.values_per_entry,
 		    "avg_buf");
-		if (!avg_buf) {
-		    if (TXN_PER_OP && !dh->serialize)
-			abort_transaction(dh, ds); // get txn
+		if (!avg_buf)
 		    return errno ? errno : ENOMEM;
-		}
 	    }
 	    for (int i = 0; i < dh->cfg.values_per_entry; i++)
 		avg_buf[i] = dval[i] + 0.5;
@@ -2499,8 +2471,6 @@ retry:
 	}
 	dbats_log(LOG_VERYFINE, "Succesfully read value off=%" PRIu32 " len=%u",
 	    offset, dh->cfg.entry_size);
-	if (TXN_PER_OP && !dh->serialize)
-	    commit_transaction(dh, ds); // get txn
 	return 0;
 
     } else if (rc == DB_NOTFOUND) {
@@ -2509,15 +2479,9 @@ retry:
 	dbats_log(LOG_WARNING, "Value unset (f): %u %d %s",
 	    tslice->time, bid, keyname);
 	*valuepp = NULL;
-	if (TXN_PER_OP && !dh->serialize)
-	    commit_transaction(dh, ds); // get txn
 	return rc;
 
     } else {
-	if (TXN_PER_OP && !dh->serialize) {
-	    abort_transaction(dh, ds); // get txn
-	    if (rc == DB_LOCK_DEADLOCK) goto retry;
-	}
 	return rc;
     }
 }
@@ -2544,9 +2508,6 @@ int dbats_get_double(dbats_snapshot *ds, uint32_t key_id,
     uint32_t offset = keyoff(key_id);
 
 retry:
-    if (TXN_PER_OP && !dh->serialize)
-	begin_transaction(dh, ds, "get txn");
-
     if ((rc = instantiate_frag(ds, bid, frag_id)) == 0) {
 	if (!vec_test(tslice->is_set[frag_id], offset)) {
 	    char keyname[DBATS_KEYLEN] = "";
@@ -2554,15 +2515,11 @@ retry:
 	    dbats_log(LOG_WARNING, "Value unset (v): %u %d %s",
 		tslice->time, bid, keyname);
 	    *valuepp = NULL;
-	    if (TXN_PER_OP && !dh->serialize)
-		commit_transaction(dh, ds); // get txn
 	    return DB_NOTFOUND;
 	}
 	*valuepp = (double*)valueptr(ds, bid, frag_id, offset);
 	dbats_log(LOG_VERYFINE, "Succesfully read value off=%" PRIu32 " len=%u",
 	    offset, dh->cfg.entry_size);
-	if (TXN_PER_OP && !dh->serialize)
-	    commit_transaction(dh, ds); // get txn
 	return 0;
 
     } else if (rc == DB_NOTFOUND) {
@@ -2571,15 +2528,9 @@ retry:
 	dbats_log(LOG_WARNING, "Value unset (f): %u %d %s",
 	    tslice->time, bid, keyname);
 	*valuepp = NULL;
-	if (TXN_PER_OP && !dh->serialize)
-	    commit_transaction(dh, ds); // get txn
 	return rc;
 
     } else {
-	if (TXN_PER_OP && !dh->serialize) {
-	    abort_transaction(dh, ds); // get txn
-	    if (rc == DB_LOCK_DEADLOCK) goto retry;
-	}
 	return rc;
     }
 }
