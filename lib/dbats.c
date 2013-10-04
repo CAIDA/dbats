@@ -1492,15 +1492,15 @@ int dbats_select_time(dbats_handler *dh, dbats_snapshot **dsp,
 
     dbats_log(LOG_FINE, "select_time %u", time_value);
 
-    (*dsp) = ecalloc(1, sizeof(dbats_snapshot), "snapshot");
+    (*dsp) = emalloc(sizeof(dbats_snapshot), "snapshot");
     if (!*dsp) return ENOMEM;
-
-    (*dsp)->dh = dh;
-    (*dsp)->preload = !!(flags & DBATS_PRELOAD);
 
     // (*dsp)->txn_info.txn[0] = current_txn(&dh->txn_info); // make ds txn child of dh txn
 
 restart:
+    memset(*dsp, sizeof(*dsp), 0);
+    (*dsp)->dh = dh;
+    (*dsp)->preload = !!(flags & DBATS_PRELOAD);
     if ((rc = begin_transaction(dh, *dsp, "tslice txn")) != 0)
 	return rc;
     (*dsp)->txn_info.in_prog = 1;
