@@ -173,7 +173,7 @@ int main(int argc, char *argv[]) {
 	    if (t != last_t) {
 		if (n_keys > 0) {
 		    rc = write_data(handler, select_flags, last_t);
-		    if (rc != 0) break;
+		    if (rc != 0) goto done;
 		}
 	    }
 	    last_t = t;
@@ -196,6 +196,7 @@ int main(int argc, char *argv[]) {
 	}
     }
 
+done:
     elapsed = time(NULL) - run_start;
 
     dbats_log(LOG_INFO, "Time elapsed: %u sec", elapsed);
