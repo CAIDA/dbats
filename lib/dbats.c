@@ -1140,6 +1140,8 @@ int dbats_commit_open(dbats_handler *dh)
 
     if (rc == 0)
 	rc = commit_transaction(dh, NULL);
+    else
+	abort_transaction(dh, NULL);
 
     if (rc == 0) {
 	dh->txn_info.in_prog = 0;
@@ -1229,12 +1231,12 @@ end:
 
     if (rc == 0)
 	rc = commit_transaction(ds->dh, ds);
+    else
+	abort_transaction(ds->dh, ds);
 
-    if (rc == 0) {
-	ds->changed = 0;
-	ds->txn_info.in_prog = 0;
-	ds->txn_info.cancelled = 0;
-    }
+    ds->changed = 0;
+    ds->txn_info.in_prog = 0;
+    ds->txn_info.cancelled = 0;
 
 #if 0
     if (ds->dh->cfg.exclusive && ds->dh->is_open && rc == 0)
@@ -1898,8 +1900,17 @@ next_level:
 	memcpy(ktkey->nodename, node->start, node->gnlen+1);
 	uint32_t ktkey_size = KTKEY_SIZE(node->gnlen);
 
+	// In the common case, get will succeed and we won't need to write
+	// to the db, so we can get without a write lock.
 	rc = raw_db_get(dki->dh, dki->ds, dki->dh->dbKeytree, ktkey, ktkey_size,
 	    &node->id, sizeof(node->id), NULL, 0);
+
+	if (rc == DB_NOTFOUND && (flags & DBATS_CREATE)) {
+	    // We will need to write, so we retry with a write lock, in case
+	    // key was created in some parallel not-yet-completed transaction.
+	    rc = raw_db_get(dki->dh, dki->ds, dki->dh->dbKeytree, ktkey, ktkey_size,
+		&node->id, sizeof(node->id), NULL, DB_RMW);
+	}
 
 	if (rc == 0) {
 	    // found it
@@ -1976,7 +1987,7 @@ next_level:
 		    return rc;
 		}
 		node->id = htonl(recno - 1);
-		if (*key_id_p >= MAX_NUM_FRAGS * ENTRIES_PER_FRAG) {
+		if (recno > MAX_NUM_FRAGS * ENTRIES_PER_FRAG) {
 		    dbats_log(LOG_ERROR, "Out of space for key %s", dki->pattern);
 		    return ENOMEM;
 		}
@@ -2242,7 +2253,6 @@ int dbats_set(dbats_snapshot *ds, uint32_t key_id, const dbats_value *valuep)
 	return -1;
     }
 
-retry:
     if ((rc = instantiate_frag(ds, 0, frag_id)) != 0)
 	return rc;
 
@@ -2444,7 +2454,6 @@ int dbats_get(dbats_snapshot *ds, uint32_t key_id,
     uint32_t frag_id = keyfrag(key_id);
     uint32_t offset = keyoff(key_id);
 
-retry:
     if ((rc = instantiate_frag(ds, bid, frag_id)) == 0) {
 	if (!vec_test(tslice->is_set[frag_id], offset)) {
 	    char keyname[DBATS_KEYLEN] = "";
@@ -2507,7 +2516,6 @@ int dbats_get_double(dbats_snapshot *ds, uint32_t key_id,
     uint32_t frag_id = keyfrag(key_id);
     uint32_t offset = keyoff(key_id);
 
-retry:
     if ((rc = instantiate_frag(ds, bid, frag_id)) == 0) {
 	if (!vec_test(tslice->is_set[frag_id], offset)) {
 	    char keyname[DBATS_KEYLEN] = "";
