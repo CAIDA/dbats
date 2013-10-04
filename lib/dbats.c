@@ -1255,15 +1255,6 @@ int dbats_abort_snap(dbats_snapshot *ds)
 
     free_isset(ds);
 
-    for (int bid = 0; bid < ds->num_bundles; bid++) {
-	clear_tslice(ds, bid);
-    }
-
-    for (int bid = 0; bid < ds->num_bundles; bid++) {
-	free(ds->tslice[bid]);
-	ds->tslice[bid] = NULL;
-    }
-
     int rc = abort_transaction(ds->dh, ds);
     free_snapshot(ds);
     return rc;
