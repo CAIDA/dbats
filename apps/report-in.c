@@ -59,7 +59,6 @@ retry:
     }
     rc = dbats_commit_snap(snapshot);
     if (rc != 0) {
-	dbats_abort_snap(snapshot);
 	if (rc == DB_LOCK_DEADLOCK) {
 	    dbats_log(LOG_WARNING, "deadlock in dbats_commit()");
 	    goto retry;
