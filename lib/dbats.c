@@ -1807,12 +1807,11 @@ next_level:
 	node->gnlen = strcspn(node->start, ".");
     if (flags & DBATS_GLOB) {
 	// search for a glob match for this level
-	if (dki->pattern)
-	    node->pfxlen = strcspn(node->start, "\\?[{*.");
 	rc = raw_cursor_open(dki->dh, dki->dh->dbKeytree, dki->txn,
 	    &node->cursor, 0);
 	if (rc != 0) { msg = "cursor"; goto logabort; }
 	node->key.parent = dki->nodes[lvl-1].id;
+	node->pfxlen = dki->pattern ? strcspn(node->start, "\\?[{*.") : 0;
 	memcpy(node->key.nodename, node->start, node->pfxlen);
 	DBT_init_in(dbt_ktkey, &node->key, KTKEY_SIZE(node->pfxlen));
 	dbt_ktkey.ulen = sizeof(keytree_key);
