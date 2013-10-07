@@ -150,6 +150,7 @@ typedef struct {
 struct dbats_keytree_iterator {
     dbats_handler *dh;
     DB_TXN *txn;                        // transaction
+    uint8_t txn_is_mine;                // flag
     char *pattern;                      // pattern
     kt_node_t nodes[KTKEY_MAX_LEVEL+1]; // node stack
     int kt_levels;                      // # of levels in nodes
@@ -688,6 +689,7 @@ dbats_handler *dbats_open(const char *path,
 	rc = CFG_SET(dh, dh->txn, "min_keep_time", min_keep_time);
 	if (rc != 0) goto abort;
 
+	// initialize keytree_seq
 	DB_SEQUENCE *ktseq;
 	rc = db_sequence_create(&ktseq, dh->dbSequence, 0);
 	if (rc != 0) goto abort;
@@ -1976,21 +1978,25 @@ logabort:
 #undef node
 }
 
-static dbats_keytree_iterator *dbats_glob_keyname_alloc(void)
+static inline int dbats_glob_keyname_new(dbats_handler *dh,
+    dbats_keytree_iterator **dkip, DB_TXN *txn)
 {
-    dbats_keytree_iterator *dki;
-    dki = emalloc(sizeof(dbats_keytree_iterator), "iterator");
-    if (!dki) return NULL;
-    dki->pattern = NULL;
-    dki->ktseq = NULL;
-    return dki;
+    *dkip = emalloc(sizeof(dbats_keytree_iterator), "iterator");
+    if (!*dkip) return ENOMEM;
+    (*dkip)->ktseq = NULL;
+    if (!((*dkip)->txn_is_mine = !txn)) {
+	(*dkip)->txn = txn;
+    } else {
+	int rc = begin_transaction(dh, NULL, &(*dkip)->txn, "key txn");
+	if (rc != 0) return rc;
+    }
+    return 0;
 }
 
-static int dbats_glob_keyname_init(dbats_handler *dh, DB_TXN *txn,
+static int dbats_glob_keyname_reset(dbats_handler *dh,
     dbats_keytree_iterator *dki, const char *pattern)
 {
     dki->dh = dh;
-    dki->txn = txn;
 
     dki->nodes[0].key.parent = 0;
     dki->nodes[0].id = chtonl(0) | KTID_IS_NODE;
@@ -2000,7 +2006,7 @@ static int dbats_glob_keyname_init(dbats_handler *dh, DB_TXN *txn,
     dki->nodes[1].start = dki->pattern = strdup(pattern);
     dki->nodes[1].cursor.dbc = NULL;
 
-    // don't init dki->ktseq
+    // don't init dki->txn or dki->ktseq
 
     char *start = dki->pattern;
     while (1) {
@@ -2019,15 +2025,9 @@ static int dbats_glob_keyname_init(dbats_handler *dh, DB_TXN *txn,
 int dbats_glob_keyname_start(dbats_handler *dh, dbats_snapshot *ds,
     dbats_keytree_iterator **dkip, const char *pattern)
 {
-    DB_TXN *txn = ds ? ds->txn : dh->txn;
-    if (!txn) {
-	dbats_log(LOG_ERROR,
-	    "dbats_glob_keyname_start() called outside of transaction");
-	return EINVAL;
-    }
-    *dkip = dbats_glob_keyname_alloc();
-    if (!*dkip) return ENOMEM;
-    return dbats_glob_keyname_init(dh, txn, *dkip, pattern);
+    int rc = dbats_glob_keyname_new(dh, dkip, ds ? ds->txn : dh->txn);
+    if (rc != 0) return rc;
+    return dbats_glob_keyname_reset(dh, *dkip, pattern);
 }
 
 int dbats_glob_keyname_next(dbats_keytree_iterator *dki, uint32_t *key_id_p,
@@ -2036,21 +2036,23 @@ int dbats_glob_keyname_next(dbats_keytree_iterator *dki, uint32_t *key_id_p,
     return glob_keyname_next(dki, key_id_p, namebuf, DBATS_GLOB);
 }
 
-static int dbats_glob_keyname_clear(dbats_keytree_iterator *dki)
+static void dbats_glob_keyname_clear(dbats_keytree_iterator *dki)
 {
     while (dki->lvl)
 	glob_keyname_prev_level(dki);
     if (dki->pattern) free(dki->pattern);
     dki->pattern = NULL;
     // don't close dki->ktseq
-    return 0;
 }
 
 int dbats_glob_keyname_end(dbats_keytree_iterator *dki)
 {
-    int rc = dbats_glob_keyname_clear(dki);
+    int rc = 0;
+    dbats_glob_keyname_clear(dki);
     if (dki->ktseq)
 	dki->ktseq->close(dki->ktseq, 0);
+    if (dki->txn_is_mine)
+	rc = commit_transaction(dki->dh, dki->txn); // key txn
     free(dki);
     return rc;
 }
@@ -2059,16 +2061,13 @@ int dbats_bulk_get_key_id(dbats_handler *dh, dbats_snapshot *ds,
     uint32_t n_keys, const char * const *keys, uint32_t *key_ids, uint32_t flags)
 {
     int rc = 0;
-    DB_TXN *txn = ds ? ds->txn : dh->txn;
-    int my_txn = (txn == NULL);
 
-    if (my_txn)
-	begin_transaction(dh, NULL, &txn, "key txn");
-
-    dbats_keytree_iterator *dki = dbats_glob_keyname_alloc();
+    dbats_keytree_iterator *dki;
+    rc = dbats_glob_keyname_new(dh, &dki, ds ? ds->txn : dh->txn);
+    if (rc != 0) return rc;
 
     for (int i = 0; i < n_keys; i++) {
-	rc = dbats_glob_keyname_init(dh, txn, dki, keys[i]);
+	rc = dbats_glob_keyname_reset(dh, dki, keys[i]);
 	if (rc != 0) break;
 	rc = glob_keyname_next(dki, &key_ids[i], NULL, flags & ~DBATS_GLOB);
 	if (rc != 0) break;
@@ -2079,16 +2078,10 @@ int dbats_bulk_get_key_id(dbats_handler *dh, dbats_snapshot *ds,
 	}
 	dbats_log(LOG_FINEST, "Found key #%u: %s", key_ids[i],
 	    keys[i]);
-	rc = dbats_glob_keyname_clear(dki);
+	dbats_glob_keyname_clear(dki);
     }
 
-    free(dki);
-    if (my_txn) {
-	if (rc == 0)
-	    rc = commit_transaction(dh, txn); // key txn
-	else
-	    abort_transaction(dh, txn); // key txn
-    }
+    dbats_glob_keyname_end(dki);
     return rc;
 }
 
