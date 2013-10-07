@@ -730,7 +730,7 @@ int dbats_aggregate(dbats_handler *dh, int func, int steps)
 	return EPERM;
 
     // We don't need this value, but it locks against other threads/processes
-    // calling dbats_select_time() or dbats_aggregate().
+    // calling dbats_select_snap() or dbats_aggregate().
     uint32_t dummy;
     rc = CFG_GET(dh, dh->txn, "min_keep_time", dummy, DB_RMW);
     if (rc != 0) return rc;
@@ -1150,7 +1150,7 @@ int dbats_commit_snap(dbats_snapshot *ds)
     free_isset(ds);
 
     if (!ds->dh->serialize) {
-	// In dbats_select_time(), we read min_keep_time with DB_READ_COMMITTED;
+	// In dbats_select_snap(), we read min_keep_time with DB_READ_COMMITTED;
 	// it may have changed since then.
 	rc = CFG_GET(ds->dh, ds->txn, "min_keep_time", ds->min_keep_time, DB_RMW);
 	if (rc != 0) {
@@ -1426,7 +1426,7 @@ static void set_priority(dbats_snapshot *ds, uint32_t priority)
 #endif
 }
 
-int dbats_select_time(dbats_handler *dh, dbats_snapshot **dsp,
+int dbats_select_snap(dbats_handler *dh, dbats_snapshot **dsp,
     uint32_t time_value, uint32_t flags)
 {
     int rc;
@@ -1434,7 +1434,7 @@ int dbats_select_time(dbats_handler *dh, dbats_snapshot **dsp,
     uint32_t max_time = 0;
     int tries_limit = 60;
 
-    dbats_log(LOG_FINE, "select_time %u", time_value);
+    dbats_log(LOG_FINE, "select_snap %u", time_value);
 
 restart:
     (*dsp) = emalloc(sizeof(dbats_snapshot), "snapshot");
@@ -1447,17 +1447,17 @@ restart:
     if (rc != 0) return rc;
 
     if (!dh->cfg.readonly) {
-	// DB_RMW will block other writers trying to select_time().
+	// DB_RMW will block other writers trying to select_snap().
 	// DB_READ_COMMITTED won't hold a read lock, so won't block anyone.
 	rc = CFG_GET(dh, (*dsp)->txn, "min_keep_time", (*dsp)->min_keep_time,
 	    dh->serialize ? DB_RMW : DB_READ_COMMITTED);
 	if (rc == DB_LOCK_DEADLOCK) {
 	    if (--tries_limit > 0) goto retry;
-	    dbats_log(LOG_ERROR, "select_time %u: too many deadlocks",
+	    dbats_log(LOG_ERROR, "select_snap %u: too many deadlocks",
 		time_value);
 	}
 	if (rc != 0) goto abort;
-	dbats_log(LOG_FINE, "select_time %u: got %s = %u", time_value,
+	dbats_log(LOG_FINE, "select_snap %u: got %s = %u", time_value,
 	    "min_keep_time", (*dsp)->min_keep_time);
 
 	dbats_get_end_time(dh, (*dsp), 0, &(*dsp)->end_time);
@@ -1485,7 +1485,7 @@ restart:
 
 	if (!dh->cfg.readonly) {
 	    if (t < (*dsp)->min_keep_time) {
-		dbats_log(LOG_ERROR, "select_time %u: illegal attempt to set "
+		dbats_log(LOG_ERROR, "select_snap %u: illegal attempt to set "
 		    "value in bundle %d at time %u before series limit %u",
 		    time_value, bid, t, (*dsp)->min_keep_time);
 		rc = EINVAL;
@@ -1504,7 +1504,7 @@ restart:
 	if (dh->cfg.exclusive) {
 	    if (tslice->time == t) {
 		// keep relevant fragments
-		dbats_log(LOG_FINE, "select_time %u, bid=%d: already loaded",
+		dbats_log(LOG_FINE, "select_snap %u, bid=%d: already loaded",
 		    t, bid);
 	    } else {
 		// free obsolete fragments
@@ -1548,14 +1548,14 @@ restart:
 	    rc = load_frag((*dsp), t, bid, frag_id);
 	    if (rc == DB_LOCK_DEADLOCK) {
 		if (--tries_limit > 0) goto retry;
-		dbats_log(LOG_ERROR, "select_time %u: too many deadlocks",
+		dbats_log(LOG_ERROR, "select_snap %u: too many deadlocks",
 		    time_value);
 	    }
 	    if (rc != 0) goto abort;
 	    if (tslice->frag[frag_id])
 		loaded++;
 	}
-	dbats_log(LOG_FINE, "select_time %u: bid=%d, loaded %u/%u fragments",
+	dbats_log(LOG_FINE, "select_snap %u: bid=%d, loaded %u/%u fragments",
 	    time_value, bid, loaded, tslice->num_frags);
     }
 
@@ -1563,7 +1563,7 @@ restart:
 	rc = instantiate_isset_frags((*dsp), frag_id);
 	if (rc == DB_LOCK_DEADLOCK) {
 	    if (--tries_limit > 0) goto retry;
-	    dbats_log(LOG_ERROR, "select_time %u: too many deadlocks",
+	    dbats_log(LOG_ERROR, "select_snap %u: too many deadlocks",
 		time_value);
 	}
 	if (rc != 0) goto abort;
@@ -2192,7 +2192,7 @@ int dbats_set(dbats_snapshot *ds, uint32_t key_id, const dbats_value *valuep)
     }
 
     if (!ds->tslice || !ds->tslice[0] || !ds->tslice[0]->time) {
-	dbats_log(LOG_ERROR, "dbats_set() without dbats_select_time()");
+	dbats_log(LOG_ERROR, "dbats_set() without dbats_select_snap()");
 	return -1;
     }
 
@@ -2390,7 +2390,7 @@ int dbats_get(dbats_snapshot *ds, uint32_t key_id,
     }
 
     if (!ds->tslice || !ds->tslice[0] || !ds->tslice[0]->time) {
-	dbats_log(LOG_ERROR, "dbats_get() without dbats_select_time()");
+	dbats_log(LOG_ERROR, "dbats_get() without dbats_select_snap()");
 	return -1;
     }
 

@@ -33,9 +33,9 @@ static int write_data(dbats_handler *handler, int select_flags, uint32_t t)
 
 retry:
     dbats_log(LOG_INFO, "select time %u", t);
-    rc = dbats_select_time(handler, &snapshot, t, select_flags);
+    rc = dbats_select_snap(handler, &snapshot, t, select_flags);
     if (rc != 0) {
-	dbats_log(LOG_ERROR, "error in dbats_select_time()");
+	dbats_log(LOG_ERROR, "error in dbats_select_snap()");
 	return -1;
     }
 

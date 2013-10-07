@@ -213,7 +213,7 @@ int main(int argc, char *argv[]) {
 	    int rc;
 	    dbats_snapshot *snapshot;
 
-	    if ((rc = dbats_select_time(handler, &snapshot, t, 0)) != 0) {
+	    if ((rc = dbats_select_snap(handler, &snapshot, t, 0)) != 0) {
 		dbats_log(LOG_INFO, "Unable to find time %u", t);
 		continue;
 	    }

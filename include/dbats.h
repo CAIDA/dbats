@@ -35,7 +35,7 @@
  *    dbats_aggregate().
  *  - dbats_commit_open().
  *  - Loop:
- *    - Select a working snapshot with dbats_select_time().
+ *    - Select a working snapshot with dbats_select_snap().
  *    - Write primary values for multiple keys with dbats_set(), and/or
  *    - read primary and/or aggregate values for multiple keys with dbats_get().
  *    - dbats_commit_snap().
@@ -157,10 +157,10 @@ typedef struct dbats_keytree_iterator dbats_keytree_iterator; ///< Opaque handle
  *  - if the database is newly created, no other processes will be able to
  *    access the database
  *  - multiple threads should not attempt to use the @c dbats_handler concurrently
- *  - dbats_select_time() is not allowed
+ *  - dbats_select_snap() is not allowed
  *  .
  *  After dbats_commit_open(), any number of threads may call
- *  dbats_select_time() on the @c dbats_handler.
+ *  dbats_select_snap() on the @c dbats_handler.
  *
  *  @param[in] dbats_path path of an existing directory containing a DBATS
  *    database or a nonexistant directory in which to create a new DBATS
@@ -246,7 +246,7 @@ extern int dbats_aggregate(dbats_handler *handler, int func, int steps);
 /** Get the earliest timestamp in a time series bundle.
  *  At least one key in the bundle will have a value at the start time.
  *  @param[in] handler A dbats_handler created by dbats_open().
- *  @param[in] snap A dbats_snapshot created by dbats_select_time().
+ *  @param[in] snap A dbats_snapshot created by dbats_select_snap().
  *  @param[in] bid bundle id (0 for the primary bundle).
  *  @param[out] start A pointer to a uint32_t that will be filled in with
  *    the time of the earliest entry in the bundle, or 0 if an error occurred.
@@ -258,7 +258,7 @@ extern int dbats_get_start_time(dbats_handler *handler, dbats_snapshot *snap, in
 /** Get the latest timestamp in a time series bundle.
  *  At least one key in the bundle will have a value at the end time.
  *  @param[in] handler A dbats_handler created by dbats_open().
- *  @param[in] snap A dbats_snapshot created by dbats_select_time().
+ *  @param[in] snap A dbats_snapshot created by dbats_select_snap().
  *  @param[in] bid bundle id (0 for the primary bundle).
  *  @param[out] end A pointer to a uint32_t that will be filled in with
  *    the time of the latest entry in the bundle, or 0 if an error occurred.
@@ -269,7 +269,7 @@ extern int dbats_get_end_time(dbats_handler *handler, dbats_snapshot *snap, int 
 
 /** Congfiure the number of data points to keep for each time series of a
  *  bundle.
- *  When a transaction started by dbats_select_time() is committed, any data
+ *  When a transaction started by dbats_select_snap() is committed, any data
  *  points that are <code>keep</code> periods or more older than the latest
  *  point ever set (for any key) will be deleted.
  *  Once a point is deleted for being outside the limit, it can not be set
@@ -355,16 +355,16 @@ extern uint32_t dbats_normalize_time(const dbats_handler *handler,
  *    - DB_LOCK_DEADLOCK if the operation was cancelled to resolve a deadlock;
  *    - other nonzero value for other errors.
  */
-extern int dbats_select_time(dbats_handler *handler, dbats_snapshot **snapp,
+extern int dbats_select_snap(dbats_handler *handler, dbats_snapshot **snapp,
     uint32_t time_value, uint32_t flags);
 
-/** Commit the transaction started by dbats_select_time().  This will flush
+/** Commit the transaction started by dbats_select_snap().  This will flush
  *  any pending writes to the database and release any associated database
  *  locks and other resources.
  *  Any data points that fall outside the limit set by dbats_series_limit()
  *  will be deleted.
  *  After calling this function, the snapshot is no longer valid.
- *  @param[in] snap A dbats_snapshot created by dbats_select_time().
+ *  @param[in] snap A dbats_snapshot created by dbats_select_snap().
  *  @return
  *    - 0 for success;
  *    - DB_LOCK_DEADLOCK if the operation was cancelled to resolve a deadlock;
@@ -372,11 +372,11 @@ extern int dbats_select_time(dbats_handler *handler, dbats_snapshot **snapp,
  */
 extern int dbats_commit_snap(dbats_snapshot *snap);
 
-/** Abort a transaction begun by dbats_select_time(), undoing all changes made
+/** Abort a transaction begun by dbats_select_snap(), undoing all changes made
  *  during the transaction and releasing any associated database locks and
  *  other resources.  After calling this function, the snapshot is no longer
  *  valid.
- *  @param[in] snap A dbats_snapshot created by dbats_select_time().
+ *  @param[in] snap A dbats_snapshot created by dbats_select_snap().
  *  @return 0 for success, nonzero for error.
  */
 extern int dbats_abort_snap(dbats_snapshot *snap);
@@ -386,7 +386,7 @@ extern int dbats_abort_snap(dbats_snapshot *snap);
  *  When getting or creating multiple keys, it is faster to do it with
  *  dbats_bulk_get_key_id().
  *  @param[in] handler A dbats_handler created by dbats_open().
- *  @param[in] snap A dbats_snapshot created by dbats_select_time().
+ *  @param[in] snap A dbats_snapshot created by dbats_select_snap().
  *  @param[in] key the name of the key.
  *  @param[out] key_id_p a pointer to a uint32_t where the id for key will be
  *    written.
@@ -401,7 +401,7 @@ extern int dbats_get_key_id(dbats_handler *handler, dbats_snapshot *snap,
 /** Get the ids of a large number of new or existing keys.
  *  The keys must already exist unless the DBATS_CREATE flag is given.
  *  @param[in] handler A dbats_handler created by dbats_open().
- *  @param[in] snap A dbats_snapshot created by dbats_select_time().
+ *  @param[in] snap A dbats_snapshot created by dbats_select_snap().
  *  @param[in] n_keys the number of keys
  *  @param[in] keys an array of key names
  *  @param[out] key_ids an array of uint32_t where the ids for
@@ -417,7 +417,7 @@ extern int dbats_bulk_get_key_id(dbats_handler *handler, dbats_snapshot *snap,
 
 /** Get the name of an existing key.
  *  @param[in] handler A dbats_handler created by dbats_open().
- *  @param[in] snap A dbats_snapshot created by dbats_select_time().
+ *  @param[in] snap A dbats_snapshot created by dbats_select_snap().
  *  @param[in] key_id the id of the key.
  *  @param[out] namebuf a pointer to an array of at least DBATS_KEYLEN
  *    characters where the key's name will be written.
@@ -436,8 +436,8 @@ extern int dbats_get_key_name(dbats_handler *handler, dbats_snapshot *snap,
  *  there is a non-negligible probability of losing data due to deadlock in
  *  dbats_set() or dbats_commit_snap().  You are advised to hold on to a copy
  *  of your original data until dbats_commit_snap() succeeds, so that you can
- *  repeat dbats_select_time() and dbats_set() if needed.
- *  @param[in] snap A dbats_snapshot created by dbats_select_time().
+ *  repeat dbats_select_snap() and dbats_set() if needed.
+ *  @param[in] snap A dbats_snapshot created by dbats_select_snap().
  *  @param[in] key_id the id of the key.
  *  @param[in] valuep a pointer to an array of values_per_entry dbats_value
  *    to be written to the database.
@@ -456,12 +456,12 @@ extern int dbats_set(dbats_snapshot *snap, uint32_t key_id,
     const dbats_value *valuep);
 
 /** Write a value to the primary time series for the specified key and the
- *  time selected by dbats_select_time().
+ *  time selected by dbats_select_snap().
  *  Equivalent to @ref dbats_get_key_id (handler, key, &key_id, flags)
  *  followed by @ref dbats_set (handler, key_id, valuep).
  *  Note that dbats_set() is much faster than dbats_set_by_key() if you know
  *  the key_id already.
- *  @param[in] snap A dbats_snapshot created by dbats_select_time().
+ *  @param[in] snap A dbats_snapshot created by dbats_select_snap().
  *  @param[in] key the name of the key.
  *  @param[in] valuep a pointer to an array of values_per_entry dbats_values
  *    to be written to the database.
@@ -480,8 +480,8 @@ extern int dbats_set_by_key (dbats_snapshot *snap, const char *key,
     const dbats_value *valuep, int flags);
 
 /** Read an entry (array of dbats_value) from the database for the specified
- *  bundle id and key and the time selected by dbats_select_time().
- *  @param[in] snap A dbats_snapshot created by dbats_select_time().
+ *  bundle id and key and the time selected by dbats_select_snap().
+ *  @param[in] snap A dbats_snapshot created by dbats_select_snap().
  *  @param[in] key_id the id of the key.
  *  @param[out] valuepp the address of a dbats_value*; after the call,
  *    *valuepp will point to an array of values_per_entry dbats_values
@@ -497,9 +497,9 @@ extern int dbats_get(dbats_snapshot *snap, uint32_t key_id,
     const dbats_value **valuepp, int bid);
 
 /** Read an array of double values from the database for the specified bundle
- *  id and key and the time selected by dbats_select_time().
+ *  id and key and the time selected by dbats_select_snap().
  *  This function can be applied only to DBATS_AGG_AVG values.
- *  @param[in] snap A dbats_snapshot created by dbats_select_time().
+ *  @param[in] snap A dbats_snapshot created by dbats_select_snap().
  *  @param[in] key_id the id of the key.
  *  @param[out] valuepp the address of a double*; after the call,
  *    *valuepp will point to an array of values_per_entry double values
@@ -515,11 +515,11 @@ extern int dbats_get_double(dbats_snapshot *snap, uint32_t key_id,
     const double **valuepp, int bid);
 
 /** Read an array of dbats_values from the database for the specified bundle
- *  id and key and the time selected by dbats_select_time().
+ *  id and key and the time selected by dbats_select_snap().
  *  Equivalent to dbats_get_key_id() followed by dbats_get().
  *  Note that dbats_get() is significantly faster if you already
  *  know the key_id.
- *  @param[in] snap A dbats_snapshot created by dbats_select_time().
+ *  @param[in] snap A dbats_snapshot created by dbats_select_snap().
  *  @param[in] key the name of the key.
  *  @param[out] valuepp the address of a dbats_value*; after the call,
  *    *valuepp will point to an array of values_per_entry dbats_values
@@ -584,7 +584,7 @@ extern int dbats_num_keys(dbats_handler *handler, uint32_t *num_keys);
  *  dbats_glob_keyname_end().
  *
  *  @param[in] handler A dbats_handler created by dbats_open().
- *  @param[in] snap A dbats_snapshot created by dbats_select_time().
+ *  @param[in] snap A dbats_snapshot created by dbats_select_snap().
  *  @param[out] dkip the address of a dbats_keytree_iterator*; after the call,
  *    *dkip will contain a pointer that must be passed to
  *    subsequent calls of dbats_glob_keyname_next() and
@@ -644,7 +644,7 @@ extern int dbats_glob_keyname_end(dbats_keytree_iterator *dki);
  *  \endcode
  *
  *  @param[in] handler A dbats_handler created by dbats_open().
- *  @param[in] snap A dbats_snapshot created by dbats_select_time().
+ *  @param[in] snap A dbats_snapshot created by dbats_select_snap().
  *  @param[out] dkip the address of a dbats_keyid_iterator*; after the call,
  *    *dkip will contain a pointer that must be passed to
  *    subsequent calls of dbats_walk_keyid_next() and dbats_walk_keyid_end().
