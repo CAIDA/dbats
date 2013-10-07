@@ -162,6 +162,9 @@ typedef struct dbats_keytree_iterator dbats_keytree_iterator; ///< Opaque handle
  *  After dbats_commit_open(), any number of threads may call
  *  dbats_select_snap() on the @c dbats_handler.
  *
+ *  @param[out] handlerp the address of a dbats_handler*; after the call,
+ *    *handlerp will contain a pointer that must be passed to subsequent calls
+ *    on this database.
  *  @param[in] dbats_path path of an existing directory containing a DBATS
  *    database or a nonexistant directory in which to create a new DBATS
  *    database.
@@ -180,11 +183,18 @@ typedef struct dbats_keytree_iterator dbats_keytree_iterator; ///< Opaque handle
  *    -	DBATS_UPDATABLE - allow updates to existing values
  *    - DBATS_MULTIWRITE - allow multiple snapshots (in different processes or
  *      threads) to be written simultaneously instead of taking turns.
- *  @return On success, returns a pointer to an opaque dbats_handler that
- *  must be passed to all subsequent calls on this database.  On failure,
- *  returns NULL.
+ *  @return
+ *    - 0 for success;
+ *    - EINVAL if a parameter was invalid;
+ *    - ENOMEM if out of memory;
+ *    - ENOENT if the directory specified by @c dbats_path does not exist and
+ *      @c flags did not contain DBATS_CREATE;
+ *    - DB_VERSION_MISMATCH if the version of the BDB library or DBATS library
+ *      is not compatible with that used to create the database;
+ *    - other nonzero value for other errors.
  */
-extern dbats_handler *dbats_open(const char *dbats_path,
+extern int dbats_open(dbats_handler **handlerp,
+    const char *dbats_path,
     uint16_t values_per_entry,
     uint32_t period,
     uint32_t flags);
@@ -325,7 +335,7 @@ extern int dbats_best_bundle(dbats_handler *handler, uint32_t func, uint32_t sta
 extern uint32_t dbats_normalize_time(const dbats_handler *handler,
     int bid, uint32_t *t);
 
-/** Create a "snapshot", i.e. a working copy of a fixed point in time that
+/** Create a "snapshot", that is, a working copy of a fixed point in time that
  *  can be manipulated with dbats_get(), dbats_set(), etc.
  *  All operations on this snapshot take place within a transaction; that is,
  *  they will not be visible to other processes/threads until they are

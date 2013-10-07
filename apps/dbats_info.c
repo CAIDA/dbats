@@ -95,8 +95,8 @@ int main(int argc, char *argv[]) {
 	help();
     dbats_path = argv[0];
 
-    handler = dbats_open(dbats_path, 1, period, open_flags);
-    if (!handler) return -1;
+    if (dbats_open(&handler, dbats_path, 1, period, open_flags) != 0)
+	return -1;
     dbats_commit_open(handler);
 
     cfg = dbats_get_config(handler);

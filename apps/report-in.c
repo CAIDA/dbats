@@ -129,8 +129,8 @@ int main(int argc, char *argv[]) {
 
     run_start = time(NULL);
     dbats_log(LOG_INFO, "report-in: open");
-    handler = dbats_open(dbats_path, 1, period, open_flags);
-    if (!handler) return -1;
+    if (dbats_open(&handler, dbats_path, 1, period, open_flags) != 0)
+	return -1;
 
     const dbats_config *cfg = dbats_get_config(handler);
     if (cfg->num_bundles == 1) {

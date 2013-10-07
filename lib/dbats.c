@@ -501,7 +501,8 @@ static int write_bundle_info(dbats_handler *dh, dbats_snapshot *ds, int bid)
 // because there must be only one DB_ENV per environment per process when
 // using DB_REGISTER.
 // http://docs.oracle.com/cd/E17076_02/html/programmer_reference/transapp_app.html
-dbats_handler *dbats_open(const char *path,
+int dbats_open(dbats_handler **dhp,
+    const char *path,
     uint16_t values_per_entry,
     uint32_t period,
     uint32_t flags)
@@ -510,8 +511,7 @@ dbats_handler *dbats_open(const char *path,
 
     if (!HAVE_DB_SET_LK_EXCLUSIVE && (flags & DBATS_EXCLUSIVE)) {
 	dbats_log(LOG_ERROR, "Exclusive open is not supported in this version of BDB.");
-	errno = EINVAL;
-	return NULL;
+	return EINVAL;
     }
 
     int rc;
@@ -521,7 +521,7 @@ dbats_handler *dbats_open(const char *path,
     int is_new = 0;
 
     dbats_handler *dh = ecalloc(1, sizeof(dbats_handler), "dh");
-    if (!dh) return NULL;
+    if (!dh) return ENOMEM;
     dh->cfg.readonly = !!(flags & DBATS_READONLY);
     dh->cfg.updatable = !!(flags & DBATS_UPDATABLE);
     dh->cfg.compress = !(flags & DBATS_UNCOMPRESSED);
@@ -534,7 +534,7 @@ dbats_handler *dbats_open(const char *path,
     if ((rc = db_env_create(&dh->dbenv, 0)) != 0) {
 	dbats_log(LOG_ERROR, "Error creating DB env: %s",
 	    db_strerror(rc));
-	return NULL;
+	return rc;
     }
 
     dh->dbenv->set_errpfx(dh->dbenv, dh->path);
@@ -547,14 +547,14 @@ dbats_handler *dbats_open(const char *path,
     if ((flags & DBATS_NO_TXN) && (flags & DBATS_EXCLUSIVE)) {
 	dbats_log(LOG_ERROR,
 	    "DBATS_EXCLUSIVE and DBATS_NO_TXN are not compatible");
-	return NULL;
+	return EINVAL;
     }
 
     if (flags & DBATS_CREATE) {
 	if (dh->cfg.readonly) {
 	    dbats_log(LOG_ERROR,
 		"DBATS_CREATE and DBATS_READONLY are not compatible");
-	    return NULL;
+	    return EINVAL;
 	} else if (mkdir(path, 0777) == 0) {
 	    // new database dir
 	    is_new = 1;
@@ -572,12 +572,12 @@ dbats_handler *dbats_open(const char *path,
 		if (errno != ENOENT) {
 		    dbats_log(LOG_ERROR, "Error checking %s: %s",
 			filename, strerror(errno));
-		    return NULL;
+		    return errno;
 		}
 		if (--tries_limit <= 0) {
 		    dbats_log(LOG_ERROR, "Retry limit exceeded waiting for %s",
 			filename);
-		    return NULL;
+		    return errno;
 		}
 		sleep(1);
 	    }
@@ -585,7 +585,7 @@ dbats_handler *dbats_open(const char *path,
 	    // new database dir failed
 	    dbats_log(LOG_ERROR, "Error creating %s: %s",
 		path, strerror(errno));
-	    return NULL;
+	    return errno;
 	}
     }
 
@@ -596,7 +596,7 @@ dbats_handler *dbats_open(const char *path,
 	if (!file) {
 	    dbats_log(LOG_ERROR, "Error opening %s: %s",
 		filename, strerror(errno));
-	    return NULL;
+	    return errno;
 	}
 
 	// XXX These should be based on max expected number of metric keys?
@@ -612,7 +612,7 @@ dbats_handler *dbats_open(const char *path,
 
     if ((rc = dh->dbenv->open(dh->dbenv, path, dbflags, mode)) != 0) {
 	dbats_log(LOG_ERROR, "Error opening DB %s: %s", path, db_strerror(rc));
-	return NULL;
+	return rc;
     }
 
 #if defined(DB_LOG_AUTO_REMOVE)
@@ -623,10 +623,11 @@ dbats_handler *dbats_open(const char *path,
 # error "no DB_LOG_AUTO_REMOVE option"
 #endif
 
-    if (begin_transaction(dh, NULL, &dh->txn, "open txn") != 0) goto abort;
+    if ((rc = begin_transaction(dh, NULL, &dh->txn, "open txn")) != 0)
+	goto abort;
 
 #define open_db(db,name,type,use_txn) raw_db_open(dh, &dh->db, name, type, flags, mode, use_txn)
-    if (open_db(dbMeta,    "meta",    DB_BTREE, 1) != 0) goto abort;
+    if ((rc = open_db(dbMeta,    "meta",    DB_BTREE, 1)) != 0) goto abort;
 
     dh->cfg.entry_size = sizeof(dbats_value); // for db_get_buf_len
 
@@ -634,11 +635,11 @@ dbats_handler *dbats_open(const char *path,
     do { \
 	if (is_new) { \
 	    dh->cfg.field = (defaultval); \
-	    if (CFG_SET(dh, dh->txn, key, dh->cfg.field) != 0) \
+	    if ((rc = CFG_SET(dh, dh->txn, key, dh->cfg.field)) != 0) \
 		goto abort; \
 	} else { \
 	    int writelock = !dh->cfg.readonly; \
-	    if (CFG_GET(dh, dh->txn, key, dh->cfg.field, writelock ? DB_RMW : 0) != 0) {\
+	    if ((rc = CFG_GET(dh, dh->txn, key, dh->cfg.field, writelock ? DB_RMW : 0)) != 0) {\
 		dbats_log(LOG_ERROR, "%s: missing config: %s", path, key); \
 		goto abort; \
 	    } \
@@ -653,24 +654,24 @@ dbats_handler *dbats_open(const char *path,
     if (dh->cfg.version > DBATS_DB_VERSION) {
 	dbats_log(LOG_ERROR, "database version %d > library version %d",
 	    dh->cfg.version, DBATS_DB_VERSION);
-	return NULL;
+	return DB_VERSION_MISMATCH;
     }
     if (dh->cfg.version < 6) {
 	dbats_log(LOG_ERROR, "obsolete database version %d", dh->cfg.version);
-	return NULL;
+	return DB_VERSION_MISMATCH;
     }
 
-    if (open_db(dbBundle,  "bundle",  DB_BTREE, 1) != 0) goto abort;
-    if (open_db(dbKeytree, "keytree", DB_BTREE, 1) != 0) goto abort;
-    if (open_db(dbKeyid,   "keyid",   DB_RECNO, 1) != 0) goto abort;
-    if (open_db(dbData,    "data",    DB_BTREE, 1) != 0) goto abort;
-    if (open_db(dbIsSet,   "is_set",  DB_BTREE, 1) != 0) goto abort;
-    if (open_db(dbSequence,"sequence",DB_BTREE, 1) != 0) goto abort;
+    if ((rc = open_db(dbBundle,  "bundle",  DB_BTREE, 1) != 0)) goto abort;
+    if ((rc = open_db(dbKeytree, "keytree", DB_BTREE, 1) != 0)) goto abort;
+    if ((rc = open_db(dbKeyid,   "keyid",   DB_RECNO, 1) != 0)) goto abort;
+    if ((rc = open_db(dbData,    "data",    DB_BTREE, 1) != 0)) goto abort;
+    if ((rc = open_db(dbIsSet,   "is_set",  DB_BTREE, 1) != 0)) goto abort;
+    if ((rc = open_db(dbSequence,"sequence",DB_BTREE, 1) != 0)) goto abort;
 #undef open_db
 #undef initcfg
 
     dh->bundle = emalloc(MAX_NUM_BUNDLES * sizeof(*dh->bundle), "dh->bundle");
-    if (!dh->bundle) goto abort;
+    if (!dh->bundle) { rc = ENOMEM; goto abort; }
 
     dh->cfg.entry_size = dh->cfg.values_per_entry * sizeof(dbats_value);
 
@@ -715,11 +716,12 @@ dbats_handler *dbats_open(const char *path,
     }
 
     dh->is_open = 1;
-    return dh;
+    *dhp = dh;
+    return 0;
 
 abort:
     dbats_abort_open(dh);
-    return NULL;
+    return rc;
 }
 
 int dbats_aggregate(dbats_handler *dh, int func, int steps)

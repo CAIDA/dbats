@@ -50,8 +50,8 @@ int main(int argc, char *argv[]) {
     int keep = atoi(argv[2]);
 
     dbats_log(LOG_INFO, "%s: open", progname);
-    handler = dbats_open(dbats_path, 1, period, open_flags);
-    if (!handler) return -1;
+    if (dbats_open(&handler, dbats_path, 1, period, open_flags) != 0)
+	return -1;
 
     int rc = dbats_series_limit(handler, series_id, keep);
 
