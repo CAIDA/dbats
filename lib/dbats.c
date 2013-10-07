@@ -1763,16 +1763,19 @@ glob_result:
 	{
 	    // found match with correct parent and nodename prefix
 	    node->anlen = dbt_ktkey.size - KTKEY_SIZE(0);
-	    char terminator = node->start[node->gnlen];
-	    node->start[node->gnlen] = '\0';
 	    node->key.nodename[node->anlen] = '\0';
-	    int ismatch = glob_match(node->start, node->key.nodename);
-	    node->start[node->gnlen] = terminator;
-	    if (!ismatch) {
-		dbats_log(LOG_FINEST, "Glob skip %s %x at level %d: %.*s",
-		    (node->id & KTID_IS_NODE) ? "node" : "leaf",
-		    ntohl(node->id), lvl, node->anlen+1, node->key.nodename);
-		goto next_glob;
+	    if (dki->pattern) {
+		char terminator = node->start[node->gnlen];
+		node->start[node->gnlen] = '\0';
+		int ismatch = glob_match(node->start, node->key.nodename);
+		node->start[node->gnlen] = terminator;
+		if (!ismatch) {
+		    dbats_log(LOG_FINEST, "Glob skip %s %x at level %d: %.*s",
+			(node->id & KTID_IS_NODE) ? "node" : "leaf",
+			ntohl(node->id), lvl, node->anlen+1,
+			node->key.nodename);
+		    goto next_glob;
+		}
 	    }
 	    node->key.nodename[node->anlen] =
 		(node->id & KTID_IS_NODE) ? '.' : '\0';
@@ -1798,10 +1801,12 @@ glob_result:
     }
 
 next_level:
-    node->gnlen = strcspn(node->start, ".");
+    if (dki->pattern)
+	node->gnlen = strcspn(node->start, ".");
     if (flags & DBATS_GLOB) {
 	// search for a glob match for this level
-	node->pfxlen = strcspn(node->start, "\\?[{*.");
+	if (dki->pattern)
+	    node->pfxlen = strcspn(node->start, "\\?[{*.");
 	rc = raw_cursor_open(dki->dh, dki->dh->dbKeytree, dki->txn,
 	    &node->cursor, 0);
 	if (rc != 0) { msg = "cursor"; goto logabort; }
@@ -1933,24 +1938,34 @@ next_level:
     }
 
 found:
-    if (node->start[node->gnlen] == '.') {
-	if (!(node->id & KTID_IS_NODE)) {
-	    // expecting node, found leaf
-	    if (!(flags & DBATS_GLOB)) {
-		dbats_log(LOG_ERROR, "Found leaf at level %d (%.*s) in key %s",
-		    lvl, node->gnlen, node->start, dki->pattern);
-		return ENOTDIR;
+    if (dki->pattern) {
+	if (node->start[node->gnlen] == '.') {
+	    if (!(node->id & KTID_IS_NODE)) {
+		// expecting node, found leaf
+		if (!(flags & DBATS_GLOB)) {
+		    dbats_log(LOG_ERROR, "Found leaf at level %d (%.*s) in key %s",
+			lvl, node->gnlen, node->start, dki->pattern);
+		    return ENOTDIR;
+		}
+		while (lvl > 0 && !node->cursor.dbc) {
+		    glob_keyname_prev_level(dki);
+		}
+		goto next_key;
 	    }
-	    while (lvl > 0 && !node->cursor.dbc) {
-		glob_keyname_prev_level(dki);
-	    }
-	    goto next_key;
+	    // go to next level
+	    ++lvl;
+	    node->start = dki->nodes[lvl-1].start + dki->nodes[lvl-1].gnlen + 1;
+	    node->cursor.dbc = NULL;
+	    goto next_level;
 	}
-	// go to next level
-	++lvl;
-	node->start = dki->nodes[lvl-1].start + dki->nodes[lvl-1].gnlen + 1;
-	node->cursor.dbc = NULL;
-	goto next_level;
+
+    } else {
+	if (node->id & KTID_IS_NODE) {
+	    // We're doing a leaf walk, but this is a node.  Go to next level.
+	    ++lvl;
+	    node->cursor.dbc = NULL;
+	    goto next_level;
+	}
     }
 
     // generate result
@@ -2003,20 +2018,22 @@ static int dbats_glob_keyname_reset(dbats_handler *dh,
     dki->kt_levels = 0;
 
     dki->lvl = 1;
-    dki->nodes[1].start = dki->pattern = strdup(pattern);
+    dki->nodes[1].start = dki->pattern = pattern ? strdup(pattern) : NULL;
     dki->nodes[1].cursor.dbc = NULL;
 
     // don't init dki->txn or dki->ktseq
 
-    char *start = dki->pattern;
-    while (1) {
-	char *end = strchr(start, '.');
-	if (end) *end = '\0';
-	if (!glob_validate(start))
-	    return EINVAL;
-	if (!end) break;
-	*end = '.';
-	start = end + 1;
+    if (dki->pattern) {
+	char *start = dki->pattern;
+	while (1) {
+	    char *end = strchr(start, '.');
+	    if (end) *end = '\0';
+	    if (!glob_validate(start))
+		return EINVAL;
+	    if (!end) break;
+	    *end = '.';
+	    start = end + 1;
+	}
     }
 
     return 0;
