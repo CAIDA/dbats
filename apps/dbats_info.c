@@ -13,8 +13,9 @@ static void help(void) {
     fprintf(stderr, "-x          obtain exclusive lock on db\n");
     fprintf(stderr, "-t          don't use transactions (fast, but unsafe)\n");
     fprintf(stderr, "-s          print summary statistics\n");
-    fprintf(stderr, "-k          print list of keys in db\n");
+    fprintf(stderr, "-k          print list of all keys in db, ordered by id\n");
     fprintf(stderr, "-K{pattern} print list of keys in db matching {pattern}\n");
+    fprintf(stderr, "-K ''       print list of all keys in db, ordered by name\n");
     fprintf(stderr, "-a          print all information (-s -k)\n");
     exit(-1);
 }
@@ -126,7 +127,12 @@ int main(int argc, char *argv[]) {
     }
 
     if (keyglob) {
-	printf("keys matching \"%s\":\n", keyglob);
+	if (!*keyglob) {
+	    keyglob = NULL;
+	    printf("all keys (by name):\n");
+	} else {
+	    printf("keys matching \"%s\":\n", keyglob);
+	}
 	dbats_keytree_iterator *dki;
 	if (dbats_glob_keyname_start(handler, NULL, &dki, keyglob) == 0) {
 	    uint32_t keyid;
@@ -139,7 +145,7 @@ int main(int argc, char *argv[]) {
     }
 
     if (opt_keys) {
-	printf("all keys:\n");
+	printf("all keys (by id):\n");
 	dbats_keyid_iterator *dki;
 	dbats_walk_keyid_start(handler, NULL, &dki);
 	uint32_t keyid;
