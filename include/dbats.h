@@ -178,8 +178,8 @@ typedef struct dbats_keytree_iterator dbats_keytree_iterator; ///< Opaque handle
  *    -	DBATS_EXCLUSIVE - do not allow any other process to access the database
  *    -	DBATS_NO_TXN - do not use transactions (fast but unsafe)
  *    -	DBATS_UPDATABLE - allow updates to existing values
- *    - DBATS_MULTIWRITE - allow multiple snapshots (in the same or different
- *      process or thread) to be written simultaneously instead of taking turns.
+ *    - DBATS_MULTIWRITE - allow multiple snapshots (in different processes or
+ *      threads) to be written simultaneously instead of taking turns.
  *  @return On success, returns a pointer to an opaque dbats_handler that
  *  must be passed to all subsequent calls on this database.  On failure,
  *  returns NULL.
@@ -188,6 +188,28 @@ extern dbats_handler *dbats_open(const char *dbats_path,
     uint16_t values_per_entry,
     uint32_t period,
     uint32_t flags);
+
+/** Commit the transaction started by dbats_open().  This will flush any pending
+ *  writes to the database and release any associated database locks and
+ *  other resources.
+ *  If the database was created in this transaction, no other processes will
+ *  be able to access the database until dbats_commit_open() is called.
+ *  @param[in] handler A dbats_handler created by dbats_open().
+ *  @return
+ *    - 0 for success;
+ *    - DB_LOCK_DEADLOCK if the operation was cancelled to resolve a deadlock;
+ *    - other nonzero value for other errors.
+ */
+extern int dbats_commit_open(dbats_handler *handler);
+
+/** Abort a transaction begun by dbats_open(),
+ *  undoing all changes made during the transaction and
+ *  releasing any associated database locks and other resources.  After calling
+ *  this function, the dbats_handler is no longer valid.
+ *  @param[in] handler A dbats_handler created by dbats_open().
+ *  @return 0 for success, nonzero for error.
+ */
+extern int dbats_abort_open(dbats_handler *handler);
 
 /** Close a database opened by dbats_open().
  *  All snapshots must be committed or aborted before calling dbats_close().
@@ -297,7 +319,7 @@ extern int dbats_best_bundle(dbats_handler *handler, uint32_t func, uint32_t sta
  *  @param[in,out] t a unix time value (seconds since 1970-01-01 00:00:00
  *    UTC, without leap seconds).  Value will be rounded down to the nearest
  *    multiple of the data period, counting from 00:00 on the first Sunday of
- *    1970.
+ *    1970, UTC.
  *  @return the rounded time value (*t)
  */
 extern uint32_t dbats_normalize_time(const dbats_handler *handler,
@@ -316,7 +338,7 @@ extern uint32_t dbats_normalize_time(const dbats_handler *handler,
  *  database was not opened with DBATS_MULTIWRITE.
  *  If a deadlock occurs within this function, it will automatically retry, up
  *  to a limit; if this limit is reached, this function will return
- *  DB_LOCK_DEADLOCK without beginning a transaction (so dbats_abort_open() is
+ *  DB_LOCK_DEADLOCK without beginning a transaction (so dbats_abort_snap() is
  *  not needed).
  *  @param[in] handler A dbats_handler created by dbats_open().
  *  @param[out] snapp the address of a dbats_snapshot*; after the call, *snapp
@@ -336,19 +358,6 @@ extern uint32_t dbats_normalize_time(const dbats_handler *handler,
 extern int dbats_select_time(dbats_handler *handler, dbats_snapshot **snapp,
     uint32_t time_value, uint32_t flags);
 
-/** Commit the transaction started by dbats_open().  This will flush any pending
- *  writes to the database and release any associated database locks and
- *  other resources.
- *  If the database was created in this transaction, no other processes will
- *  be able to access the database until dbats_commit_open() is called.
- *  @param[in] handler A dbats_handler created by dbats_open().
- *  @return
- *    - 0 for success;
- *    - DB_LOCK_DEADLOCK if the operation was cancelled to resolve a deadlock;
- *    - other nonzero value for other errors.
- */
-extern int dbats_commit_open(dbats_handler *handler);
-
 /** Commit the transaction started by dbats_select_time().  This will flush
  *  any pending writes to the database and release any associated database
  *  locks and other resources.
@@ -362,15 +371,6 @@ extern int dbats_commit_open(dbats_handler *handler);
  *    - other nonzero value for other errors.
  */
 extern int dbats_commit_snap(dbats_snapshot *snap);
-
-/** Abort a transaction begun by dbats_open(),
- *  undoing all changes made during the transaction and
- *  releasing any associated database locks and other resources.  After calling
- *  this function, the dbats_handler is no longer valid.
- *  @param[in] handler A dbats_handler created by dbats_open().
- *  @return 0 for success, nonzero for error.
- */
-extern int dbats_abort_open(dbats_handler *handler);
 
 /** Abort a transaction begun by dbats_select_time(), undoing all changes made
  *  during the transaction and releasing any associated database locks and
@@ -544,11 +544,13 @@ extern int dbats_num_keys(dbats_handler *handler, uint32_t *num_keys);
 
 /** Prepare to iterate over the list of keys that match pattern, ordered by
  *  name.
+ *  If pattern is NULL, all keys will be iterated over.
+ *  Otherwise, only keys matching pattern will be iterated over.
  *  The pattern is similar to shell filename globbing, except that
  *  hierarchical components are separated by '.' instead of '/'.
- *    - * matches any zero or more characters
- *    - ? matches any one character
- *    - [...] matches any one character in the character class
+ *    - * matches any zero or more characters (except '.')
+ *    - ? matches any one character (except '.')
+ *    - [...] matches any one character in the character class (except '.')
  *      - A leading '^' negates the character class
  *      - Two characters separated by '-' describe the range of ASCII
  *        characters between the first and second characters, inclusive
@@ -567,7 +569,7 @@ extern int dbats_num_keys(dbats_handler *handler, uint32_t *num_keys);
  *  uint32_t keyid;
  *  char name[DBATS_KEYLEN];
  *  ...
- *  rc = dbats_glob_keyname_start(handler, snap, &dki, "*.*.uniq_{src,dst}_ip");
+ *  rc = dbats_glob_keyname_start(handler, snap, &dki, "*.*.uniq_*_ip");
  *  if (rc != 0) goto error_handling;
  *  while (dbats_glob_keyname_next(dki, &keyid, name) == 0) {
  *      // do something with keyid and/or name
