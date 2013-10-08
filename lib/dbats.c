@@ -323,7 +323,9 @@ static void log_db_op(int level, const char *fname, int line, dbats_handler *dh,
     const char *label, const void *key, uint32_t key_len, const char *msg)
 {
     char keybuf[DBATS_KEYLEN] = "";
-    if (db == dh->dbData || db == dh->dbIsSet) {
+    if (!key) {
+	// don't log key
+    } else if (db == dh->dbData || db == dh->dbIsSet) {
 	fragkey_t *fragkey = (fragkey_t*)key;
 	sprintf(keybuf, "bid=%d t=%u frag=%u",
 	    ntohl(fragkey->bid), ntohl(fragkey->time), ntohl(fragkey->frag_id));
@@ -458,7 +460,9 @@ static int (raw_cursor_get)(const char *fname, int line,
 	    (flags & DB_READ_COMMITTED) ? "t" :
 	    "r";
 	sprintf(label, "cursor_get(%s,%s)", opstr, lockstr);
-	log_db_op(LOG_FINEST, fname, line, cw->dh, cw->db, label, key->data, key->size, "");
+	void *logdata = (op == DB_NEXT || op == DB_PREV || op == DB_FIRST ||
+	    op == DB_LAST) ? NULL : key->data;
+	log_db_op(LOG_FINEST, fname, line, cw->dh, cw->db, label, logdata, key->size, "");
     }
     int rc = cw->dbc->get(cw->dbc, key, data, flags);
     if (rc != 0)
@@ -1218,6 +1222,12 @@ int dbats_close(dbats_handler *dh)
 	return EINVAL;
     dh->is_open = 0;
 
+    if (dh->txn) {
+	dbats_log(LOG_WARNING, "aborting uncommitted dbats_open()");
+	abort_transaction(dh, dh->txn);
+	dh->txn = NULL;
+    }
+
     if (dh->bundle) free(dh->bundle);
 
     // BDB v4 requires explicit close of each db
@@ -1437,6 +1447,11 @@ int dbats_select_snap(dbats_handler *dh, dbats_snapshot **dsp,
     int tries_limit = 60;
 
     dbats_log(LOG_FINE, "select_snap %u", time_value);
+    if (dh->txn) {
+	dbats_log(LOG_ERROR,
+	    "dbats_select_snap() is not allowed before dbats_commit_open()");
+	return EINPROGRESS;
+    }
 
 restart:
     (*dsp) = emalloc(sizeof(dbats_snapshot), "snapshot");
