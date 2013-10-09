@@ -1842,11 +1842,10 @@ glob_result:
 		    goto next_glob;
 		}
 	    }
-	    node->key.nodename[node->anlen] =
-		(node->id & KTID_IS_NODE) ? '.' : '\0';
-	    dbats_log(LOG_FINEST, "Globbed %s %x at level %d: %.*s",
+	    node->key.nodename[node->anlen] = '\0';
+	    dbats_log(LOG_FINEST, "Globbed %s %x at level %d: %s",
 		(node->id & KTID_IS_NODE) ? "node" : "leaf",
-		ntohl(node->id), lvl, node->anlen+1, node->key.nodename);
+		ntohl(node->id), lvl, node->key.nodename);
 	    goto found;
 
 	} else if (rc == 0 || rc == DB_NOTFOUND) {
@@ -2036,8 +2035,8 @@ found:
     if (keynamebuf) {
 	int offset = 0;
 	for (int i = 1; i <= lvl; i++) {
-	    offset += sprintf(keynamebuf + offset, "%.*s",
-		dki->nodes[i].anlen + 1, dki->nodes[i].key.nodename);
+	    offset += sprintf(keynamebuf + offset, "%s%s",
+		(i > 1 ? "." : ""), dki->nodes[i].key.nodename);
 	}
     }
     *key_id_p = ntohl(node->id);
