@@ -76,7 +76,7 @@
 
 /* ************************************************** */
 
-#define DBATS_DB_VERSION     7   ///< Version of db format written by this API
+#define DBATS_DB_VERSION     8   ///< Version of db format written by this API
 
 #define DBATS_KEYLEN         128 ///< max length of key name
 #define DBATS_KEY_IS_PREFIX  0x80000000
