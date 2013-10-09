@@ -125,11 +125,11 @@ struct dbats_handler {
     uint8_t is_open;
     uint8_t serialize;         // allow only one writer at a time
     DB_ENV *dbenv;             // DB environment
-    DB *dbMeta;                // config parameters
+    DB *dbConfig;              // config parameters
     DB *dbBundle;              // bundle parameters
     DB *dbKeytree;             // {level, parent, nodename} -> node id or key id
     DB *dbKeyid;               // recno -> key name (note: keyid == recno - 1)
-    DB *dbData;                // {bid, time, frag_id} -> value fragment
+    DB *dbValues;              // {bid, time, frag_id} -> value fragment
     DB *dbIsSet;               // {bid, time, frag_id} -> is_set fragment
     DB *dbSequence;            // BDB sequences
     dbats_bundle_info *bundle; // parameters for each time series bundle
@@ -311,8 +311,8 @@ static int raw_db_open(dbats_handler *dh, DB **dbp, const char *name,
     rc = (*dbp)->open(*dbp, use_txn ? dh->txn : NULL, name, NULL,
 	dbtype, dbflags, mode);
     if (rc != 0) {
-	dbats_log(LOG_ERROR, "Error opening DB %s/%s (mode=%o): %s",
-	    dh->path, name, mode, db_strerror(rc));
+	dbats_log(LOG_ERROR, "Error opening DB %s in %s (mode=%o): %s",
+	    name, dh->path, mode, db_strerror(rc));
 	(*dbp)->close(*dbp, 0);
 	return rc;
     }
@@ -325,7 +325,7 @@ static void log_db_op(int level, const char *fname, int line, dbats_handler *dh,
     char keybuf[DBATS_KEYLEN] = "";
     if (!key) {
 	// don't log key
-    } else if (db == dh->dbData || db == dh->dbIsSet) {
+    } else if (db == dh->dbValues || db == dh->dbIsSet) {
 	fragkey_t *fragkey = (fragkey_t*)key;
 	sprintf(keybuf, "bid=%d t=%u frag=%u",
 	    ntohl(fragkey->bid), ntohl(fragkey->time), ntohl(fragkey->frag_id));
@@ -335,7 +335,7 @@ static void log_db_op(int level, const char *fname, int line, dbats_handler *dh,
 	keytree_key* ktkey = (keytree_key*)key;
 	sprintf(keybuf, "parent=%x name=\"%.*s\"",
 	    ntohl(ktkey->parent), key_len - KTKEY_SIZE(0), ktkey->nodename);
-    } else if (db == dh->dbMeta) {
+    } else if (db == dh->dbConfig) {
 	sprintf(keybuf, "\"%.*s\"", key_len, (char*)key);
     } else if (db == dh->dbKeyid) {
 	sprintf(keybuf, "#%u", *(db_recno_t*)key);
@@ -472,10 +472,10 @@ static int (raw_cursor_get)(const char *fname, int line,
 }
 
 #define CFG_SET(dh, txn, key, val) \
-    raw_db_set(dh, dh->dbMeta, txn, key, strlen(key), &val, sizeof(val), 0)
+    raw_db_set(dh, dh->dbConfig, txn, key, strlen(key), &val, sizeof(val), 0)
 
 #define CFG_GET(dh, txn, key, val, flags) \
-    raw_db_get(dh, dh->dbMeta, txn, key, strlen(key), &val, sizeof(val), NULL, flags)
+    raw_db_get(dh, dh->dbConfig, txn, key, strlen(key), &val, sizeof(val), NULL, flags)
 
 /*************************************************************************/
 
@@ -535,6 +535,9 @@ int dbats_open(dbats_handler **dhp,
     dh->serialize = !(flags & DBATS_MULTIWRITE);
     dh->path = path;
 
+    if (!dh->cfg.readonly)
+	dbflags = DB_REGISTER | DB_RECOVER;
+
     if ((rc = db_env_create(&dh->dbenv, 0)) != 0) {
 	dbats_log(LOG_ERROR, "Error creating DB env: %s",
 	    db_strerror(rc));
@@ -566,12 +569,12 @@ int dbats_open(dbats_handler **dhp,
 	} else if (errno == EEXIST) {
 	    // existing database dir
 	    flags &= ~DBATS_CREATE;
-	    // Wait for $path/meta to exist to avoid race condition with
+	    // Wait for "config" database to exist to avoid race condition with
 	    // another process creating a dbats environment.
 	    char filename[PATH_MAX];
 	    struct stat statbuf;
 	    int tries_limit = 30;
-	    sprintf(filename, "%s/meta", path);
+	    sprintf(filename, "%s/dbdata/config", path);
 	    while (stat(filename, &statbuf) != 0) {
 		if (errno != ENOENT) {
 		    dbats_log(LOG_ERROR, "Error checking %s: %s",
@@ -595,6 +598,34 @@ int dbats_open(dbats_handler **dhp,
 
     if (is_new) {
 	char filename[PATH_MAX];
+
+	sprintf(filename, "%s/dbdata", path);
+	if (mkdir(filename, 0777) != 0) {
+	    dbats_log(LOG_ERROR, "Error creating %s: %s",
+		filename, strerror(errno));
+	    return errno;
+	}
+
+	sprintf(filename, "%s/dblog", path);
+	if (mkdir(filename, 0777) != 0) {
+	    dbats_log(LOG_ERROR, "Error creating %s: %s",
+		filename, strerror(errno));
+	    return errno;
+	}
+
+	sprintf(filename, "%s/dbmeta", path);
+	if (mkdir(filename, 0777) != 0) {
+	    dbats_log(LOG_ERROR, "Error creating %s: %s",
+		filename, strerror(errno));
+	    return errno;
+	}
+	rc = dh->dbenv->set_metadata_dir(dh->dbenv, filename);
+	if (rc != 0) {
+	    dbats_log(LOG_ERROR, "set_metadata_dir %s: %s",
+		filename, db_strerror(rc));
+	    return rc;
+	}
+
 	sprintf(filename, "%s/DB_CONFIG", path);
 	FILE *file = fopen(filename, "w");
 	if (!file) {
@@ -602,6 +633,11 @@ int dbats_open(dbats_handler **dhp,
 		filename, strerror(errno));
 	    return errno;
 	}
+
+	fprintf(file, "add_data_dir dbdata\n"); // where to find data
+	fprintf(file, "set_create_dir dbdata\n"); // where to create data
+	fprintf(file, "set_lg_dir dblog\n");
+	fprintf(file, "set_metadata_dir dbmeta\n");
 
 	// XXX These should be based on max expected number of metric keys?
 	// 40000 is enough to insert at least 2000000 metric keys.
@@ -619,6 +655,18 @@ int dbats_open(dbats_handler **dhp,
 	return rc;
     }
 
+    const char *dirname;
+    const char **dirnames;
+    dh->dbenv->get_data_dirs(dh->dbenv, &dirnames);
+    for ( ; *dirnames; dirnames++)
+	dbats_log(LOG_CONFIG, "data dir: %s", *dirnames);
+    dh->dbenv->get_create_dir(dh->dbenv, &dirname);
+    dbats_log(LOG_CONFIG, "create-data dir: %s", dirname);
+    dh->dbenv->get_lg_dir(dh->dbenv, &dirname);
+    dbats_log(LOG_CONFIG, "lg dir: %s", dirname);
+    dh->dbenv->get_metadata_dir(dh->dbenv, &dirname);
+    dbats_log(LOG_CONFIG, "metadata dir: %s", dirname);
+
 #if defined(DB_LOG_AUTO_REMOVE)
     dh->dbenv->log_set_config(dh->dbenv, DB_LOG_AUTO_REMOVE, 1);
 #elif defined(DB_LOG_AUTOREMOVE)
@@ -631,7 +679,7 @@ int dbats_open(dbats_handler **dhp,
 	goto abort;
 
 #define open_db(db,name,type,use_txn) raw_db_open(dh, &dh->db, name, type, flags, mode, use_txn)
-    if ((rc = open_db(dbMeta,    "meta",    DB_BTREE, 1)) != 0) goto abort;
+    if ((rc = open_db(dbConfig, "config", DB_BTREE, 1)) != 0) goto abort;
 
     dh->cfg.entry_size = sizeof(dbats_value); // for db_get_buf_len
 
@@ -660,7 +708,7 @@ int dbats_open(dbats_handler **dhp,
 	    dh->cfg.version, DBATS_DB_VERSION);
 	return DB_VERSION_MISMATCH;
     }
-    if (dh->cfg.version < 6) {
+    if (dh->cfg.version < 8) {
 	dbats_log(LOG_ERROR, "obsolete database version %d", dh->cfg.version);
 	return DB_VERSION_MISMATCH;
     }
@@ -668,7 +716,7 @@ int dbats_open(dbats_handler **dhp,
     if ((rc = open_db(dbBundle,  "bundle",  DB_BTREE, 1) != 0)) goto abort;
     if ((rc = open_db(dbKeytree, "keytree", DB_BTREE, 1) != 0)) goto abort;
     if ((rc = open_db(dbKeyid,   "keyid",   DB_RECNO, 1) != 0)) goto abort;
-    if ((rc = open_db(dbData,    "data",    DB_BTREE, 1) != 0)) goto abort;
+    if ((rc = open_db(dbValues,  "values",  DB_BTREE, 1) != 0)) goto abort;
     if ((rc = open_db(dbIsSet,   "is_set",  DB_BTREE, 1) != 0)) goto abort;
     if ((rc = open_db(dbSequence,"sequence",DB_BTREE, 1) != 0)) goto abort;
 #undef open_db
@@ -782,7 +830,7 @@ int dbats_get_start_time(dbats_handler *dh, dbats_snapshot *ds, int bid, uint32_
 
     *start = 0;
     DB_TXN *txn = ds ? ds->txn : dh->txn;
-    rc = raw_cursor_open(dh, dh->dbData, txn, &cw, 0);
+    rc = raw_cursor_open(dh, dh->dbValues, txn, &cw, 0);
     if (rc != 0) {
 	dbats_log(LOG_ERROR, "dbats_get_start_time %d: cursor: %s", bid, db_strerror(rc));
 	return rc;
@@ -811,7 +859,7 @@ int dbats_get_end_time(dbats_handler *dh, dbats_snapshot *ds, int bid, uint32_t 
 
     *end = 0;
     DB_TXN *txn = ds ? ds->txn : dh->txn;
-    rc = raw_cursor_open(dh, dh->dbData, txn, &cw, 0);
+    rc = raw_cursor_open(dh, dh->dbValues, txn, &cw, 0);
     if (rc != 0) {
 	dbats_log(LOG_ERROR, "dbats_get_end_time %d: cursor: %s", bid, db_strerror(rc));
 	return rc;
@@ -946,7 +994,7 @@ static int truncate_bundle(dbats_handler *dh, dbats_snapshot *ds, int bid)
     DB_TXN *txn;
     rc = begin_transaction(dh, parent, &txn, "truncate txn");
     if (rc != 0) return rc;
-    rc = delete_frags(dh, txn, dh->dbData, bid, 0, new_start);
+    rc = delete_frags(dh, txn, dh->dbValues, bid, 0, new_start);
     if (rc != 0) goto abort;
     rc = delete_frags(dh, txn, dh->dbIsSet, bid, 0, new_start);
     if (rc != 0) goto abort;
@@ -1055,13 +1103,13 @@ static int flush_tslice(dbats_snapshot *ds, int bid)
 		dbats_log(LOG_VERYFINE, "Frag %d compression: %zu -> %zu "
 		    "(%.1f %%)", f, frag_size, compress_len,
 		    compress_len*100.0/frag_size);
-		rc = raw_db_set(ds->dh, ds->dh->dbData, ds->txn, &dbkey, sizeof(dbkey),
+		rc = raw_db_set(ds->dh, ds->dh->dbValues, ds->txn, &dbkey, sizeof(dbkey),
 		    buf, compress_len + 1, 0);
 		if (rc != 0) return rc;
 	    } else {
 		ds->tslice[bid]->frag[f]->compressed = 0;
 		dbats_log(LOG_VERYFINE, "Frag %d write: %zu", f, frag_size);
-		rc = raw_db_set(ds->dh, ds->dh->dbData, ds->txn, &dbkey, sizeof(dbkey),
+		rc = raw_db_set(ds->dh, ds->dh->dbValues, ds->txn, &dbkey, sizeof(dbkey),
 		    ds->tslice[bid]->frag[f], frag_size, 0);
 		if (rc != 0) return rc;
 	    }
@@ -1231,11 +1279,11 @@ int dbats_close(dbats_handler *dh)
     if (dh->bundle) free(dh->bundle);
 
     // BDB v4 requires explicit close of each db
-    dh->dbMeta->close(dh->dbMeta, 0);
+    dh->dbConfig->close(dh->dbConfig, 0);
     dh->dbBundle->close(dh->dbBundle, 0);
     dh->dbKeytree->close(dh->dbKeytree, 0);
     dh->dbKeyid->close(dh->dbKeyid, 0);
-    dh->dbData->close(dh->dbData, 0);
+    dh->dbValues->close(dh->dbValues, 0);
     dh->dbIsSet->close(dh->dbIsSet, 0);
     dh->dbSequence->close(dh->dbSequence, 0);
 
@@ -1315,7 +1363,7 @@ static int load_frag(dbats_snapshot *ds, uint32_t t, int bid,
     }
 
     uint32_t value_len;
-    rc = raw_db_get(ds->dh, ds->dh->dbData, ds->txn, &dbkey, sizeof(dbkey),
+    rc = raw_db_get(ds->dh, ds->dh->dbValues, ds->txn, &dbkey, sizeof(dbkey),
 	ds->db_get_buf, ds->db_get_buf_len, &value_len, flags);
     if (rc != 0) {
 	if (rc == DB_NOTFOUND) return 0; // no match
@@ -2625,16 +2673,16 @@ const dbats_bundle_info *dbats_get_bundle_info(dbats_handler *dh, int bid)
 void dbats_stat_print(const dbats_handler *dh) {
     int rc;
     
-    if ((rc = dh->dbMeta->stat_print(dh->dbMeta, DB_FAST_STAT)) != 0)
-	dbats_log(LOG_ERROR, "dumping Meta stats: %s", db_strerror(rc));
+    if ((rc = dh->dbConfig->stat_print(dh->dbConfig, DB_FAST_STAT)) != 0)
+	dbats_log(LOG_ERROR, "dumping Config stats: %s", db_strerror(rc));
     if ((rc = dh->dbBundle->stat_print(dh->dbBundle, DB_FAST_STAT)) != 0)
 	dbats_log(LOG_ERROR, "dumping Bundle stats: %s", db_strerror(rc));
     if ((rc = dh->dbKeytree->stat_print(dh->dbKeytree, DB_FAST_STAT)) != 0)
 	dbats_log(LOG_ERROR, "dumping Keytree stats: %s", db_strerror(rc));
     if ((rc = dh->dbKeyid->stat_print(dh->dbKeyid, DB_FAST_STAT)) != 0)
 	dbats_log(LOG_ERROR, "dumping Keyid stats: %s", db_strerror(rc));
-    if ((rc = dh->dbData->stat_print(dh->dbData, DB_FAST_STAT)) != 0)
-	dbats_log(LOG_ERROR, "dumping Data stats: %s", db_strerror(rc));
+    if ((rc = dh->dbValues->stat_print(dh->dbValues, DB_FAST_STAT)) != 0)
+	dbats_log(LOG_ERROR, "dumping Values stats: %s", db_strerror(rc));
     if ((rc = dh->dbIsSet->stat_print(dh->dbIsSet, DB_FAST_STAT)) != 0)
 	dbats_log(LOG_ERROR, "dumping IsSet stats: %s", db_strerror(rc));
     if ((rc = dh->dbSequence->stat_print(dh->dbSequence, DB_FAST_STAT)) != 0)
