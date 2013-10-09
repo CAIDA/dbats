@@ -21,8 +21,6 @@ int main(int argc, char *argv[]) {
     int open_flags = 0;
     progname = argv[0];
 
-    dbats_log_level = LOG_INFO;
-
     int c;
     while ((c = getopt(argc, argv, "v:xt")) != -1) {
 	switch (c) {
@@ -49,7 +47,7 @@ int main(int argc, char *argv[]) {
     int series_id = atoi(argv[1]);
     int keep = atoi(argv[2]);
 
-    dbats_log(LOG_INFO, "%s: open", progname);
+    dbats_log(DBATS_LOG_INFO, "%s: open", progname);
     if (dbats_open(&handler, dbats_path, 1, period, open_flags) != 0)
 	return -1;
 

@@ -53,8 +53,6 @@ int main(int argc, char *argv[]) {
     int rc = 0;
     const dbats_config *cfg;
 
-    dbats_log_level = LOG_INFO;
-
     int c;
     while ((c = getopt(argc, argv, "v:xtaskK:")) != -1) {
 	switch (c) {

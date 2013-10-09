@@ -127,11 +127,11 @@ int main(int argc, char *argv[]) {
 
     dbats_path = argv[0];
 
-    dbats_log(LOG_INFO, "begin=%"PRId32 " end=%"PRId32, opt_begin, opt_end);
+    dbats_log(DBATS_LOG_INFO, "begin=%"PRId32 " end=%"PRId32, opt_begin, opt_end);
     if (opt_end < opt_begin)
 	help();
 
-    dbats_log(LOG_INFO, "Opening %s", dbats_path);
+    dbats_log(DBATS_LOG_INFO, "Opening %s", dbats_path);
 
     if (dbats_open(&handler, dbats_path, 0, 0, open_flags) != 0)
 	return(-1);
@@ -156,7 +156,7 @@ int main(int argc, char *argv[]) {
     if (end == 0) {
 	dbats_get_end_time(handler, NULL, 0, &end);
 	if (end == 0) {
-	    dbats_log(LOG_INFO, "No data");
+	    dbats_log(DBATS_LOG_INFO, "No data");
 	    exit(0);
 	}
     }
@@ -214,7 +214,7 @@ int main(int argc, char *argv[]) {
 	    dbats_snapshot *snapshot;
 
 	    if ((rc = dbats_select_snap(handler, &snapshot, t, 0)) != 0) {
-		dbats_log(LOG_INFO, "Unable to find time %u", t);
+		dbats_log(DBATS_LOG_INFO, "Unable to find time %u", t);
 		continue;
 	    }
 
@@ -278,10 +278,10 @@ int main(int argc, char *argv[]) {
 
     elapsed = time(NULL) - run_start;
 
-    dbats_log(LOG_INFO, "Time elapsed: %u sec", elapsed);
-    dbats_log(LOG_INFO, "Closing %s", dbats_path);
+    dbats_log(DBATS_LOG_INFO, "Time elapsed: %u sec", elapsed);
+    dbats_log(DBATS_LOG_INFO, "Closing %s", dbats_path);
     if (dbats_close(handler) != 0)
 	return -1;
-    dbats_log(LOG_INFO, "Done");
+    dbats_log(DBATS_LOG_INFO, "Done");
     return 0;
 }

@@ -32,15 +32,15 @@ static int write_data(dbats_handler *handler, int select_flags, uint32_t t)
     dbats_snapshot *snapshot;
 
 retry:
-    dbats_log(LOG_INFO, "select time %u", t);
+    dbats_log(DBATS_LOG_INFO, "select time %u", t);
     rc = dbats_select_snap(handler, &snapshot, t, select_flags);
     if (rc != 0) {
-	dbats_log(LOG_ERROR, "error in dbats_select_snap()");
+	dbats_log(DBATS_LOG_ERR, "error in dbats_select_snap()");
 	return -1;
     }
 
     if (n_unknown_keys > 0) {
-	dbats_log(LOG_INFO, "dbats_bulk_get_key_id: %d unknown keys", n_unknown_keys);
+	dbats_log(DBATS_LOG_INFO, "dbats_bulk_get_key_id: %d unknown keys", n_unknown_keys);
 	rc = dbats_bulk_get_key_id(handler, snapshot, n_keys, (const char * const *)keys, keyids, DBATS_CREATE);
 	n_unknown_keys = 0;
     }
@@ -50,20 +50,20 @@ retry:
 	if (rc != 0) {
 	    dbats_abort_snap(snapshot);
 	    if (rc == DB_LOCK_DEADLOCK) {
-		dbats_log(LOG_WARNING, "deadlock in dbats_set()");
+		dbats_log(DBATS_LOG_WARN, "deadlock in dbats_set()");
 		goto retry;
 	    }
-	    dbats_log(LOG_ERROR, "error in dbats_set(): %s", db_strerror(rc));
+	    dbats_log(DBATS_LOG_ERR, "error in dbats_set(): %s", db_strerror(rc));
 	    return -1;
 	}
     }
     rc = dbats_commit_snap(snapshot);
     if (rc != 0) {
 	if (rc == DB_LOCK_DEADLOCK) {
-	    dbats_log(LOG_WARNING, "deadlock in dbats_commit()");
+	    dbats_log(DBATS_LOG_WARN, "deadlock in dbats_commit()");
 	    goto retry;
 	}
-	dbats_log(LOG_ERROR, "error in dbats_commit(): %s", db_strerror(rc));
+	dbats_log(DBATS_LOG_ERR, "error in dbats_commit(): %s", db_strerror(rc));
 	return -1;
     }
     n_keys = 0;
@@ -81,7 +81,7 @@ int main(int argc, char *argv[]) {
     uint32_t run_start, elapsed;
     int rc = 0;
 
-    dbats_log_level = LOG_INFO;
+    dbats_log_level = DBATS_LOG_INFO;
 
     uint32_t last_t = 0;
     uint32_t t;
@@ -128,13 +128,13 @@ int main(int argc, char *argv[]) {
     dbats_path = argv[0];
 
     run_start = time(NULL);
-    dbats_log(LOG_INFO, "report-in: open");
+    dbats_log(DBATS_LOG_INFO, "report-in: open");
     if (dbats_open(&handler, dbats_path, 1, period, open_flags) != 0)
 	return -1;
 
     const dbats_config *cfg = dbats_get_config(handler);
     if (cfg->num_bundles == 1) {
-	dbats_log(LOG_INFO, "report-in: config aggs");
+	dbats_log(DBATS_LOG_INFO, "report-in: config aggs");
 	if (dbats_aggregate(handler, DBATS_AGG_MIN, 10) != 0)
 	    return -1;
 	if (dbats_aggregate(handler, DBATS_AGG_MAX, 10) != 0)
@@ -199,10 +199,10 @@ int main(int argc, char *argv[]) {
 done:
     elapsed = time(NULL) - run_start;
 
-    dbats_log(LOG_INFO, "Time elapsed: %u sec", elapsed);
-    dbats_log(LOG_INFO, "Closing %s", dbats_path);
+    dbats_log(DBATS_LOG_INFO, "Time elapsed: %u sec", elapsed);
+    dbats_log(DBATS_LOG_INFO, "Closing %s", dbats_path);
     if (dbats_close(handler) != 0)
 	return -1;
-    dbats_log(LOG_INFO, "Done");
+    dbats_log(DBATS_LOG_INFO, "Done");
     return rc;
 }

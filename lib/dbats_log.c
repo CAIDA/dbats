@@ -22,7 +22,7 @@
 #include <unistd.h> // getpid()
 #include "dbats_log.h"
 
-int dbats_log_level = LOG_INFO;
+int dbats_log_level = DBATS_LOG_INFO;
 FILE *dbats_log_file = NULL;
 
 void dbats_log_func(int level, const char *file, int line, const char *fmt, ...)
@@ -37,13 +37,13 @@ void dbats_log_func(int level, const char *file, int line, const char *fmt, ...)
 	char msgbuf[2048];
 	char datebuf[32];
 	const char *prefix =
-	    (level <= LOG_ERROR)    ? "ERROR: "    :
-	    (level <= LOG_WARNING)  ? "WARNING: "  :
-	    (level <= LOG_INFO)     ? "INFO: "     :
-	    (level <= LOG_CONFIG)   ? "CONFIG: "   :
-	    (level <= LOG_FINE)     ? "FINE: "     :
-	    (level <= LOG_VERYFINE) ? "VERYFINE: " :
-	    (level <= LOG_FINEST)   ? "FINEST: "   :
+	    (level <= DBATS_LOG_ERR)    ? "ERROR: "    :
+	    (level <= DBATS_LOG_WARN)   ? "WARNING: "  :
+	    (level <= DBATS_LOG_INFO)   ? "INFO: "     :
+	    (level <= DBATS_LOG_CONFIG) ? "CONFIG: "   :
+	    (level <= DBATS_LOG_FINE)   ? "FINE: "     :
+	    (level <= DBATS_LOG_VFINE)  ? "VERYFINE: " :
+	    (level <= DBATS_LOG_FINEST) ? "FINEST: "   :
 	    "";
 
 	va_start(va_ap, fmt);
