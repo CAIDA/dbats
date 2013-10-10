@@ -1,4 +1,4 @@
-AC_REVISION([$Id: configure.ac,v 1.7 2013/10/03 17:59:45 kkeys Exp $])
+AC_REVISION([$Id: configure.ac,v 1.8 2013/10/10 22:12:55 kkeys Exp $])
 
 AC_INIT(include/dbats.h)
 AC_PREREQ(2.53)
@@ -57,6 +57,8 @@ AC_PROG_CC
 if test "$GCC" = "yes"; then
     CC="$CC -std=gnu99"
 fi
+
+AC_CHECK_PROGS(APXS, apxs2 apxs)
 
 
 AC_CHECK_HEADERS(db.h)
