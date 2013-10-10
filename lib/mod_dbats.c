@@ -58,26 +58,11 @@ static void args_to_table(request_rec *r, apr_table_t **tablep)
     }
 }
 
-static int req_handler(request_rec *r)
+static int metrics_find(request_rec *r)
 {
-    if (!r->handler || strcmp(r->handler, "dbats-handler") != 0)
-	return DECLINED;
-
     int result = OK;
     ap_log_rerror(APLOG_MARK, APLOG_NOTICE, 0, r, "mod_dbats: req_handler pid=%u", getpid());
     //dbats_log_level = 99;
-
-    ap_log_perror(APLOG_MARK, APLOG_NOTICE, 0, r->pool, "# the_request: %s", r->the_request);
-    ap_log_perror(APLOG_MARK, APLOG_NOTICE, 0, r->pool, "# hostname: %s", r->hostname);
-    ap_log_perror(APLOG_MARK, APLOG_NOTICE, 0, r->pool, "# status_line: %s", r->status_line);
-    ap_log_perror(APLOG_MARK, APLOG_NOTICE, 0, r->pool, "# method: %s", r->method);
-    ap_log_perror(APLOG_MARK, APLOG_NOTICE, 0, r->pool, "# content_encoding: %s", r->content_encoding);
-    ap_log_perror(APLOG_MARK, APLOG_NOTICE, 0, r->pool, "# unparsed_uri: %s", r->unparsed_uri);
-    ap_log_perror(APLOG_MARK, APLOG_NOTICE, 0, r->pool, "# uri: %s", r->uri);
-    ap_log_perror(APLOG_MARK, APLOG_NOTICE, 0, r->pool, "# filename: %s", r->filename);
-    ap_log_perror(APLOG_MARK, APLOG_NOTICE, 0, r->pool, "# canonical_filename: %s", r->canonical_filename);
-    ap_log_perror(APLOG_MARK, APLOG_NOTICE, 0, r->pool, "# path_info: %s", r->path_info);
-    ap_log_perror(APLOG_MARK, APLOG_NOTICE, 0, r->pool, "# args: %s", r->args);
 
     mod_dbats_config *cfg = (mod_dbats_config*)ap_get_module_config(r->per_dir_config, &dbats_module);
 
@@ -96,6 +81,12 @@ static int req_handler(request_rec *r)
     const char *query = apr_table_get(GET, "query");
     const char *format = apr_table_get(GET, "format");
     const char *logLevel = apr_table_get(GET, "logLevel");
+
+#if 1
+    ap_log_rerror(APLOG_MARK, APLOG_NOTICE, 0, r, "# query: %s", query);
+    ap_log_rerror(APLOG_MARK, APLOG_NOTICE, 0, r, "# format: %s", format);
+    ap_log_rerror(APLOG_MARK, APLOG_NOTICE, 0, r, "# logLevel: %s", logLevel);
+#endif
 
     dbats_keytree_iterator *dki;
     uint32_t keyid;
@@ -116,21 +107,6 @@ static int req_handler(request_rec *r)
 	ap_rprintf(r, "</head>\n");
 	ap_rprintf(r, "<body>\n");
 	ap_rprintf(r, "<h1>DBATS key query</h1>\n");
-#if 0
-	ap_rprintf(r, "<ul>\n");
-	ap_rprintf(r, "<li>request method: %s\n", r->method);
-	ap_rprintf(r, "<li>path: %s\n", cfg->path);
-	ap_rprintf(r, "<li>raw args: %s\n",
-	    r->args ? ap_escape_html(r->pool, r->args) : "(none)");
-	ap_rprintf(r, "<li>query: %s\n",
-	    query ? ap_escape_html(r->pool, query) : "(none)");
-	ap_rprintf(r, "<li>format: %s\n",
-	    format ? ap_escape_html(r->pool, format) : "(none)");
-	ap_rprintf(r, "<li>logLevel: %s\n",
-	    logLevel ? ap_escape_html(r->pool, logLevel) : "(none)");
-	ap_rprintf(r, "</ul>\n");
-	ap_rprintf(r, "Matching keys:\n");
-#endif
 	ap_rprintf(r, "<ul>\n");
 	while ((rc = dbats_glob_keyname_next(dki, &keyid, name)) == 0) {
 	    ap_rprintf(r, "<li>%s\n", ap_escape_html(r->pool, name));
@@ -141,14 +117,6 @@ static int req_handler(request_rec *r)
 
     } else { // default to json
 	ap_set_content_type(r, "application/json");
-#if 0
-	ap_rprintf(r, "# request method: %s\n", r->method);
-	ap_rprintf(r, "# path: %s\n", cfg->path);
-	ap_rprintf(r, "# raw args: %s\n", r->args ? r->args : "(none)");
-	ap_rprintf(r, "# query: %s\n", query ? query : "(none)");
-	ap_rprintf(r, "# format: %s\n", format ? format : "(none)");
-	ap_rprintf(r, "# logLevel: %s\n", logLevel ? logLevel : "(none)");
-#endif
 	int n = 0;
 	ap_rprintf(r, "[");
 	while ((rc = dbats_glob_keyname_next(dki, &keyid, name)) == 0) {
@@ -177,6 +145,36 @@ static int req_handler(request_rec *r)
     dbats_close(cfg->dh);
 
     return result;
+}
+
+static int ends_with(const char *s, const char *w)
+{
+    size_t sl = strlen(s);
+    size_t wl = strlen(w);
+    if (wl > sl) return 0;
+    return strcmp(s + sl - wl, w) == 0;
+}
+
+static int req_handler(request_rec *r)
+{
+    if (!r->handler || strcmp(r->handler, "dbats-handler") != 0)
+	return DECLINED;
+
+    ap_log_rerror(APLOG_MARK, APLOG_NOTICE, 0, r, "# the_request: %s", r->the_request);
+    ap_log_rerror(APLOG_MARK, APLOG_NOTICE, 0, r, "# hostname: %s", r->hostname);
+    ap_log_rerror(APLOG_MARK, APLOG_NOTICE, 0, r, "# status_line: %s", r->status_line);
+    ap_log_rerror(APLOG_MARK, APLOG_NOTICE, 0, r, "# method: %s", r->method);
+    ap_log_rerror(APLOG_MARK, APLOG_NOTICE, 0, r, "# content_encoding: %s", r->content_encoding);
+    ap_log_rerror(APLOG_MARK, APLOG_NOTICE, 0, r, "# unparsed_uri: %s", r->unparsed_uri);
+    ap_log_rerror(APLOG_MARK, APLOG_NOTICE, 0, r, "# uri: %s", r->uri);
+    ap_log_rerror(APLOG_MARK, APLOG_NOTICE, 0, r, "# filename: %s", r->filename);
+    ap_log_rerror(APLOG_MARK, APLOG_NOTICE, 0, r, "# canonical_filename: %s", r->canonical_filename);
+    ap_log_rerror(APLOG_MARK, APLOG_NOTICE, 0, r, "# path_info: %s", r->path_info);
+    ap_log_rerror(APLOG_MARK, APLOG_NOTICE, 0, r, "# args: %s", r->args);
+
+    if (ends_with(r->uri, "/metrics/find/"))
+	return metrics_find(r);
+    return HTTP_NOT_FOUND;
 }
 
 static void *create_dir_conf(apr_pool_t *pool, char *context)
