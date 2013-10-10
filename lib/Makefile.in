@@ -4,10 +4,12 @@ CC           = @CC@
 CPPFLAGS     = @CPPFLAGS@ -I../include
 CFLAGS       = @CFLAGS@ $(PROF) $(CPPFLAGS) # -fPIC
 LDFLAGS      = @LDFLAGS@ $(PROF)
+LDLIBS       = -ldbats @LIBS@
+APXS         = @APXS@
 
 DBATS_LIB   = libdbats.a
 
-TARGETS     = $(DBATS_LIB)
+TARGETS     = $(DBATS_LIB) mod_dbats.la
 
 all: $(TARGETS)
 
@@ -18,6 +20,12 @@ dbats_log.o: dbats_log.c ../include/dbats_log.h Makefile
 $(DBATS_LIB): dbats.o dbats_log.o quicklz.o
 	ar rs $@ $?
 	ranlib $@
+
+mod_dbats.la: mod_dbats.c
+	env LD_RUN_PATH=/usr/local/pkg/bdb/lib $(APXS) -c $(CPPFLAGS) -L. $(LDFLAGS) $(LDLIBS) mod_dbats.c
+
+install: mod_dbats.la
+	$(APXS) -a -i mod_dbats.la
 
 clean:
 	/bin/rm -f $(TARGETS) *.o *~
