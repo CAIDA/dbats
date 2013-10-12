@@ -2,3 +2,7 @@ Makefile
 *.o
 config.h
 libdbats.a
+mod_dbats.slo
+mod_dbats.lo
+mod_dbats.la
+.libs
