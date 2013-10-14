@@ -306,6 +306,18 @@ extern int dbats_get_end_time(dbats_handler *handler, dbats_snapshot *snap, int 
  */
 extern int dbats_series_limit(dbats_handler *handler, int bid, int keep);
 
+/** Store arbitrary user-defined data on a dbats_handler.
+ *  @param[in] handler A dbats_handler created by dbats_open().
+ *  @param[in] a pointer to store on dbats_handler.
+ */
+extern void dbats_set_userdata(dbats_handler *dh, void *data);
+
+/** Retreive user-defined data from a dbats_handler.
+ *  @param[in] handler A dbats_handler created by dbats_open().
+ *  @return the pointer stored by dbats_set_userdata().
+ */
+extern void *dbats_get_userdata(dbats_handler *dh);
+
 /** Find a bundle covering a time range.
  *  Find the bundle that best covers the time range starting at
  *  <code>start</code>.
