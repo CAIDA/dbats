@@ -93,7 +93,7 @@ int main(int argc, char *argv[]) {
 	help();
     dbats_path = argv[0];
 
-    if (dbats_open(&handler, dbats_path, 1, period, open_flags) != 0)
+    if (dbats_open(&handler, dbats_path, 1, period, open_flags, 0) != 0)
 	return -1;
     dbats_commit_open(handler);
 

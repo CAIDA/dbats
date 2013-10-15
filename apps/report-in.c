@@ -129,7 +129,7 @@ int main(int argc, char *argv[]) {
 
     run_start = time(NULL);
     dbats_log(DBATS_LOG_INFO, "report-in: open");
-    if (dbats_open(&handler, dbats_path, 1, period, open_flags) != 0)
+    if (dbats_open(&handler, dbats_path, 1, period, open_flags, 0644) != 0)
 	return -1;
 
     const dbats_config *cfg = dbats_get_config(handler);

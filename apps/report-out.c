@@ -133,7 +133,7 @@ int main(int argc, char *argv[]) {
 
     dbats_log(DBATS_LOG_INFO, "Opening %s", dbats_path);
 
-    if (dbats_open(&handler, dbats_path, 0, 0, open_flags) != 0)
+    if (dbats_open(&handler, dbats_path, 0, 0, open_flags, 0) != 0)
 	return(-1);
 
     const dbats_config *cfg = dbats_get_config(handler);
