@@ -34,6 +34,8 @@
 #define ct_assert(expr, label)  enum { ASSERT_ERROR__##label = 1/(!!(expr)) };
 
 ct_assert((sizeof(double) <= sizeof(dbats_value)), dbats_value_is_smaller_than_double)
+ct_assert((sizeof(double) == sizeof(uint64_t)), double_is_not_64_bits)
+typedef union { double d; uint64_t i; } dbl_i64;
 
 /*************************************************************************/
 
@@ -91,11 +93,28 @@ typedef struct {
 } keytree_key;
 #define KTKEY_SIZE(nodenamelen) (sizeof(uint32_t) + nodenamelen)
 
+#define cswap32(x) ( \
+    (((x)&0x000000FF)<<24) | \
+    (((x)&0x0000FF00)<<8) | \
+    (((x)&0x00FF0000)>>8) | \
+    (((x)&0xFF000000)>>24))
+
+#define cswap64(x) ( \
+    (((x)&0x00000000000000FF)<<56) | \
+    (((x)&0x000000000000FF00)<<40) | \
+    (((x)&0x0000000000FF0000)<<24) | \
+    (((x)&0x00000000FF000000)<<8) | \
+    (((x)&0x000000FF00000000)>>8) | \
+    (((x)&0x0000FF0000000000)>>24) | \
+    (((x)&0x00FF000000000000)>>40) | \
+    (((x)&0xFF00000000000000)>>56))
+
 #ifdef WORDS_BIGENDIAN
 #define chtonl(x) (x)
 #else
-#define chtonl(x) ((((x)&0xFF)<<24) | (((x)&0xFF00)<<8) | (((x)&0xFF0000)>>8) | (((x)&0xFF000000)>>24))
+#define chtonl(x) cswap32(x)
 #endif
+
 const uint32_t KTID_IS_NODE      = chtonl(DBATS_KEY_IS_PREFIX);
 
 
@@ -118,12 +137,14 @@ struct dbats_snapshot {
     uint8_t changed;           // has changes that need to be written to db?
     size_t db_get_buf_len;
     uint16_t num_bundles;      // Number of time series bundles
+    dbats_value *valbuf;       // buffer for holding modified value
 };
 
 struct dbats_handler {
     dbats_config cfg;
     const char *path;          // path of BDB environment directory
     uint8_t is_open;
+    uint8_t swapped;           // db was created with opposite byte order?
     uint8_t serialize;         // allow only one writer at a time
     DB_ENV *dbenv;             // DB environment
     DB *dbConfig;              // config parameters
@@ -766,6 +787,10 @@ int dbats_open(dbats_handler **dhp,
 
     dh->cfg.entry_size = dh->cfg.values_per_entry * sizeof(dbats_value);
 
+    int swapped;
+    dh->dbValues->get_byteswapped(dh->dbValues, &swapped);
+    dh->swapped = swapped;
+
     if (is_new) {
 	// initialize metadata for time series bundles
 	memset(&dh->bundle[0], 0, sizeof(dbats_bundle_info));
@@ -1231,6 +1256,8 @@ static void free_snapshot(dbats_snapshot *ds)
 	free(ds->state_compress);
     if (ds->db_get_buf)
 	free(ds->db_get_buf);
+    if (ds->valbuf)
+	free(ds->valbuf);
 
     ds->dh = NULL;
     free(ds);
@@ -2489,6 +2516,17 @@ int dbats_set_by_key(dbats_snapshot *ds, const char *key,
 
 /*************************************************************************/
 
+static inline int alloc_valbuf(dbats_snapshot *ds)
+{
+    if (!ds->valbuf) {
+	ds->valbuf = emalloc(ds->dh->cfg.entry_size * ds->dh->cfg.values_per_entry,
+	    "valbuf");
+	if (!ds->valbuf)
+	    return errno ? errno : ENOMEM;
+    }
+    return 0;
+}
+
 int dbats_get(dbats_snapshot *ds, uint32_t key_id,
     const dbats_value **valuepp, int bid)
 {
@@ -2519,19 +2557,27 @@ int dbats_get(dbats_snapshot *ds, uint32_t key_id,
 	    return DB_NOTFOUND;
 	}
 	if (dh->bundle[bid].func == DBATS_AGG_AVG) {
-	    double *dval = (double*)valueptr(ds, bid, frag_id, offset);
-	    static dbats_value *avg_buf = NULL;
-	    if (!avg_buf) {
-		avg_buf = emalloc(dh->cfg.entry_size * dh->cfg.values_per_entry,
-		    "avg_buf");
-		if (!avg_buf)
-		    return errno ? errno : ENOMEM;
+	    dbl_i64 *dip = (dbl_i64*)valueptr(ds, bid, frag_id, offset);
+	    if ((rc = alloc_valbuf(ds)) != 0) return rc;
+	    if (dh->swapped) {
+		dbl_i64 di;
+		for (int i = 0; i < dh->cfg.values_per_entry; i++) {
+		    di.i = cswap64(dip[i].i);
+		    ds->valbuf[i] = di.d + 0.5;
+		}
+	    } else {
+		for (int i = 0; i < dh->cfg.values_per_entry; i++)
+		    ds->valbuf[i] = dip[i].d + 0.5;
 	    }
-	    for (int i = 0; i < dh->cfg.values_per_entry; i++)
-		avg_buf[i] = dval[i] + 0.5;
-	    *valuepp = avg_buf;
+	    *valuepp = ds->valbuf;
 	} else {
 	    *valuepp = valueptr(ds, bid, frag_id, offset);
+	    if (dh->swapped) {
+		if ((rc = alloc_valbuf(ds)) != 0) return rc;
+		for (int i = 0; i < dh->cfg.values_per_entry; i++)
+		    ds->valbuf[i] = cswap64((*valuepp)[i]);
+		*valuepp = ds->valbuf;
+	    }
 	}
 	dbats_log(DBATS_LOG_VFINE, "Succesfully read value off=%" PRIu32 " len=%u",
 	    offset, dh->cfg.entry_size);
