@@ -14,6 +14,8 @@
 #include <string.h>
 #include <limits.h>
 #include <sys/types.h>
+#include <sys/stat.h>
+#include <fcntl.h>
 #include <db.h>
 #include <assert.h>
 #include <arpa/inet.h> // htonl() etc
@@ -513,7 +515,8 @@ int dbats_open(dbats_handler **dhp,
     const char *path,
     uint16_t values_per_entry,
     uint32_t period,
-    uint32_t flags)
+    uint32_t flags,
+    int mode)
 {
     dbats_log(DBATS_LOG_CONFIG, "db_version: '%s'", db_version(0,0,0));
 
@@ -524,9 +527,7 @@ int dbats_open(dbats_handler **dhp,
     }
 
     int rc;
-    int mode = 00666;
-    uint32_t dbflags = DB_THREAD | DB_INIT_MPOOL | DB_INIT_LOCK | DB_INIT_LOG |
-	DB_INIT_TXN | DB_REGISTER | DB_RECOVER | DB_CREATE;
+    uint32_t dbflags = DB_THREAD | DB_INIT_MPOOL | DB_INIT_LOCK | DB_INIT_LOG | DB_INIT_TXN;
     int is_new = 0;
 
     dbats_handler *dh = ecalloc(1, sizeof(dbats_handler), "dh");
@@ -539,6 +540,10 @@ int dbats_open(dbats_handler **dhp,
     dh->cfg.values_per_entry = 1;
     dh->serialize = !(flags & DBATS_MULTIWRITE);
     dh->path = path;
+
+    if (!dh->cfg.readonly) {
+	dbflags |= DB_REGISTER | DB_RECOVER | DB_CREATE;
+    }
 
     if ((rc = db_env_create(&dh->dbenv, 0)) != 0) {
 	dbats_log(DBATS_LOG_ERR, "Error creating DB env: %s",
@@ -655,6 +660,38 @@ int dbats_open(dbats_handler **dhp,
     if ((rc = dh->dbenv->open(dh->dbenv, path, dbflags, mode)) != 0) {
 	dbats_log(DBATS_LOG_ERR, "Error opening DB %s: %s", path, db_strerror(rc));
 	return rc;
+    }
+
+    if (is_new) {
+	// If we want other users to be able to read the db, we have to give
+	// them write permission on the environment's "__db.###" shared memory
+	// region files.
+	char filename[PATH_MAX];
+	int fd;
+	struct stat statbuf;
+	for (int i = 1; ; i++) {
+	    sprintf(filename, "%s/__db.%03d", path, i);
+	    fd = open(filename, 0, 0);
+	    if (fd < 0) {
+		if (errno == ENOENT) break;
+		dbats_log(DBATS_LOG_ERR, "Error opening %s: %s", filename, strerror(errno));
+		continue;
+	    }
+	    if (fstat(fd, &statbuf) < 0) {
+		dbats_log(DBATS_LOG_ERR, "fstat %s: %s", filename, strerror(errno));
+		continue;
+	    }
+	    mode_t newmode = statbuf.st_mode;
+	    if (newmode & S_IRUSR) newmode |= S_IWUSR;
+	    if (newmode & S_IRGRP) newmode |= S_IWGRP;
+	    if (newmode & S_IROTH) newmode |= S_IWOTH;
+	    if (newmode == statbuf.st_mode) continue; // no change
+	    dbats_log(DBATS_LOG_INFO, "%s mode %03o -> %03o", filename, statbuf.st_mode, newmode);
+	    if (fchmod(fd, newmode) < 0) {
+		dbats_log(DBATS_LOG_ERR, "fchmod %s: %s", filename, strerror(errno));
+		continue;
+	    }
+	}
     }
 
     const char *dirname;
