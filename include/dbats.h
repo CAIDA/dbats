@@ -183,6 +183,8 @@ typedef struct dbats_keytree_iterator dbats_keytree_iterator; ///< Opaque handle
  *    -	DBATS_UPDATABLE - allow updates to existing values
  *    - DBATS_MULTIWRITE - allow multiple snapshots (in different processes or
  *      threads) to be written simultaneously instead of taking turns.
+ *  @param[in] mode permissions for files created by this function (as defined
+ *    by open(2)) and modified by the process's umask.
  *  @return
  *    - 0 for success;
  *    - EINVAL if a parameter was invalid;
@@ -197,7 +199,8 @@ extern int dbats_open(dbats_handler **handlerp,
     const char *dbats_path,
     uint16_t values_per_entry,
     uint32_t period,
-    uint32_t flags);
+    uint32_t flags,
+    int mode);
 
 /** Commit the transaction started by dbats_open().  This will flush any pending
  *  writes to the database and release any associated database locks and
@@ -308,15 +311,15 @@ extern int dbats_series_limit(dbats_handler *handler, int bid, int keep);
 
 /** Store arbitrary user-defined data on a dbats_handler.
  *  @param[in] handler A dbats_handler created by dbats_open().
- *  @param[in] a pointer to store on dbats_handler.
+ *  @param[in] data a pointer to store on dbats_handler.
  */
-extern void dbats_set_userdata(dbats_handler *dh, void *data);
+extern void dbats_set_userdata(dbats_handler *handler, void *data);
 
 /** Retreive user-defined data from a dbats_handler.
  *  @param[in] handler A dbats_handler created by dbats_open().
  *  @return the pointer stored by dbats_set_userdata().
  */
-extern void *dbats_get_userdata(dbats_handler *dh);
+extern void *dbats_get_userdata(dbats_handler *handler);
 
 /** Find a bundle covering a time range.
  *  Find the bundle that best covers the time range starting at
