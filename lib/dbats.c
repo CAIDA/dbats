@@ -1386,10 +1386,10 @@ uint32_t dbats_normalize_time(const dbats_handler *dh, int bid, uint32_t *t)
 static int load_isset(dbats_snapshot *ds, fragkey_t *dbkey, uint8_t **dest,
     uint32_t flags)
 {
-    static uint8_t *buf = NULL; // can recycle memory across calls
+    uint8_t *buf = NULL;
     int rc;
 
-    if (!buf && !(buf = emalloc(vec_size(ENTRIES_PER_FRAG), "is_set")))
+    if (!(buf = emalloc(vec_size(ENTRIES_PER_FRAG), "is_set")))
 	return errno ? errno : ENOMEM; // error
 
     rc = raw_db_get(ds->dh->dbIsSet, ds->txn, dbkey, sizeof(*dbkey),
@@ -1399,9 +1399,8 @@ static int load_isset(dbats_snapshot *ds, fragkey_t *dbkey, uint8_t **dest,
 	if (ntohl(dbkey->time) == ds->tslice[ntohl(dbkey->bid)]->time) {
 	    memset(buf, 0, vec_size(ENTRIES_PER_FRAG));
 	    *dest = buf;
-	    buf = NULL;
 	} else {
-	    // return nothing, and keep buf for the next call
+	    free(buf);
 	    *dest = NULL;
 	}
 	return rc; // no match
@@ -1411,7 +1410,6 @@ static int load_isset(dbats_snapshot *ds, fragkey_t *dbkey, uint8_t **dest,
     }
 
     *dest = buf;
-    buf = NULL;
 
     if (ntohl(dbkey->bid) == 0 && ds->active_last_data < ntohl(dbkey->time))
 	ds->active_last_data = ntohl(dbkey->time);
