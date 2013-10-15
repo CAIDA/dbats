@@ -72,42 +72,57 @@ static void args_to_table(request_rec *r, apr_table_t **tablep)
 	name[nlen] = '\0';
 	ap_unescape_url(name);
 	apr_table_addn(*tablep, name, value);
+	ap_log_perror(APLOG_MARK, APLOG_NOTICE, 0, r->pool, "query param: %s=%s", name, value);
     }
 }
 
-static int metrics_find(request_rec *r)
+typedef struct {
+    dbats_handler *dh;
+} mod_dbats_reqstate;
+
+static int init_request(request_rec *r)
 {
-    int result = OK;
-    int rc;
+    mod_dbats_reqstate *reqstate = apr_pcalloc(r->pool, sizeof(*reqstate));
+    ap_set_module_config(r->request_config, &dbats_module, reqstate);
 
     mod_dbats_dir_config *cfg = (mod_dbats_dir_config*)ap_get_module_config(r->per_dir_config, &dbats_module);
     ap_log_rerror(APLOG_MARK, APLOG_NOTICE, 0, r, "dir_cfg: %08x, n=%d, context=%s, path=%s", (unsigned)cfg, ++cfg->n, cfg->context, cfg->path);
 
     apr_thread_mutex_lock(procstate.mutex);
-    dbats_handler *dh = (dbats_handler*)apr_hash_get(procstate.dht, cfg->path, APR_HASH_KEY_STRING);
-    if (dh) {
+    reqstate->dh = (dbats_handler*)apr_hash_get(procstate.dht, cfg->path, APR_HASH_KEY_STRING);
+    if (reqstate->dh) {
 	apr_thread_mutex_unlock(procstate.mutex);
     } else {
 	ap_log_rerror(APLOG_MARK, APLOG_NOTICE, 0, r, "######## mod_dbats: dbats_open %s", cfg->path);
-	rc = dbats_open(&dh, cfg->path, 1, 60, DBATS_READONLY);
+	int rc = dbats_open(&reqstate->dh, cfg->path, 1, 60, DBATS_READONLY, 0);
 	if (rc != 0) {
 	    ap_log_rerror(APLOG_MARK, APLOG_NOTICE, 0, r, "mod_dbats: dbats_open: %s", db_strerror(rc));
 	    apr_thread_mutex_unlock(procstate.mutex);
 	    return HTTP_INTERNAL_SERVER_ERROR;
 	}
 	ap_log_rerror(APLOG_MARK, APLOG_NOTICE, 0, r, "mod_dbats: dbats_open: ok");
-	apr_hash_set(procstate.dht, cfg->path, APR_HASH_KEY_STRING, dh);
-	apr_pool_cleanup_register(procstate.pool, dh, mod_dbats_close, NULL);
+	apr_hash_set(procstate.dht, cfg->path, APR_HASH_KEY_STRING, reqstate->dh);
+	apr_pool_cleanup_register(procstate.pool, reqstate->dh, mod_dbats_close, NULL);
 	apr_thread_mutex_unlock(procstate.mutex);
-	dbats_commit_open(dh);
+	dbats_commit_open(reqstate->dh);
 	ap_log_rerror(APLOG_MARK, APLOG_NOTICE, 0, r, "mod_dbats: dbats_commit_open: ok");
     }
+    return OK;
+}
+
+static int metrics_find(request_rec *r)
+{
+    mod_dbats_reqstate *reqstate = (mod_dbats_reqstate*)
+	ap_get_module_config(r->request_config, &dbats_module);
+
+    int result = OK;
+    int rc;
 
     apr_table_t *GET;
     args_to_table(r, &GET);
     const char *query = apr_table_get(GET, "query");
     const char *format = apr_table_get(GET, "format");
-    const char *logLevel = apr_table_get(GET, "logLevel");
+    //const char *logLevel = apr_table_get(GET, "logLevel");
 
     ap_log_rerror(APLOG_MARK, APLOG_NOTICE, 0, r, "# query: %s", query);
 
@@ -115,7 +130,7 @@ static int metrics_find(request_rec *r)
     uint32_t keyid;
     char name[DBATS_KEYLEN];
 
-    rc = dbats_glob_keyname_start(dh, NULL, &dki, query);
+    rc = dbats_glob_keyname_start(reqstate->dh, NULL, &dki, query);
     if (rc != 0) {
 	ap_log_rerror(APLOG_MARK, APLOG_NOTICE, 0, r, "mod_dbats: dbats_glob_keyname_start: %s", db_strerror(rc));
 	return HTTP_INTERNAL_SERVER_ERROR;
@@ -169,6 +184,191 @@ static int metrics_find(request_rec *r)
     return result;
 }
 
+static int render(request_rec *r)
+{
+    mod_dbats_reqstate *reqstate = (mod_dbats_reqstate*)
+	ap_get_module_config(r->request_config, &dbats_module);
+
+    int result = OK;
+    int rc;
+    int bid = 0;
+
+    apr_table_t *GET;
+    args_to_table(r, &GET);
+    const char *target = apr_table_get(GET, "target");
+    const char *str_from = apr_table_get(GET, "from");
+    const char *str_until = apr_table_get(GET, "until");
+    const char *format = apr_table_get(GET, "format");
+    //const char *logLevel = apr_table_get(GET, "logLevel");
+
+    char *end;
+    uint32_t from = strtol(str_from, &end, 10);
+    if (!*str_from || *end) return HTTP_BAD_REQUEST;
+    uint32_t until = strtol(str_until, &end, 10);
+    if (!*str_until || *end) return HTTP_BAD_REQUEST;
+
+    ap_log_rerror(APLOG_MARK, APLOG_NOTICE, 0, r, "# target: %s", target);
+    ap_log_rerror(APLOG_MARK, APLOG_NOTICE, 0, r, "# from:   %" PRIu32, from);
+    ap_log_rerror(APLOG_MARK, APLOG_NOTICE, 0, r, "# until:  %" PRIu32, until);
+
+    dbats_normalize_time(reqstate->dh, bid, &from);
+    dbats_normalize_time(reqstate->dh, bid, &until);
+
+    uint32_t starttime, endtime;
+    rc = dbats_get_start_time(reqstate->dh, NULL, bid, &starttime);
+    rc = dbats_get_end_time(reqstate->dh, NULL, bid, &endtime);
+    if (rc == 0) {
+	if (from < starttime) from = starttime;
+	if (until > endtime) until = endtime;
+    } else if (rc == DB_NOTFOUND) {
+	from = until = 0;
+    } else {
+	return HTTP_INTERNAL_SERVER_ERROR;
+    }
+
+    const dbats_bundle_info *bundle = dbats_get_bundle_info(reqstate->dh, bid);
+    int nsamples = (until < from) ? 0 : (until - from) / bundle->period + 1;
+
+    typedef struct {
+	const char *key;
+	uint32_t keyid;
+	dbats_value *data;
+	uint8_t *isset;
+    } chunk_t;
+
+    // get keys
+    dbats_keytree_iterator *dki;
+    char key[DBATS_KEYLEN];
+    uint32_t keyid;
+    int nkeys = 0;
+
+    rc = dbats_glob_keyname_start(reqstate->dh, NULL, &dki, target);
+    if (rc != 0) {
+	ap_log_rerror(APLOG_MARK, APLOG_NOTICE, 0, r, "mod_dbats: dbats_glob_keyname_start: %s", db_strerror(rc));
+	return HTTP_INTERNAL_SERVER_ERROR;
+    }
+    while ((rc = dbats_glob_keyname_next(dki, &keyid, NULL)) == 0) {
+	nkeys++;
+    }
+    if (rc != DB_NOTFOUND) {
+	ap_log_rerror(APLOG_MARK, APLOG_NOTICE, 0, r,
+	    "mod_dbats: dbats_glob_keyname_next: %s", db_strerror(rc));
+	result = HTTP_INTERNAL_SERVER_ERROR;
+    }
+    dbats_glob_keyname_end(dki);
+    if (result != OK) return result;
+
+    chunk_t *chunks = NULL;
+    if (nkeys > 0) {
+	chunks = apr_palloc(r->pool, nkeys * sizeof(chunk_t));
+	nkeys = 0;
+	rc = dbats_glob_keyname_start(reqstate->dh, NULL, &dki, target);
+	if (rc != 0) {
+	    ap_log_rerror(APLOG_MARK, APLOG_NOTICE, 0, r,
+		"mod_dbats: dbats_glob_keyname_start: %s", db_strerror(rc));
+	    return HTTP_INTERNAL_SERVER_ERROR;
+	}
+	while ((rc = dbats_glob_keyname_next(dki, &chunks[nkeys].keyid, key)) == 0) {
+	    chunks[nkeys].key = apr_pstrdup(r->pool, key);
+	    chunks[nkeys].isset = apr_palloc(r->pool, nsamples * sizeof(uint8_t));
+	    chunks[nkeys].data = apr_palloc(r->pool, nsamples * sizeof(dbats_value));
+	    ap_log_rerror(APLOG_MARK, APLOG_NOTICE, 0, r, "mod_dbats: key %u %s",
+		chunks[nkeys].keyid, chunks[nkeys].key);
+	    nkeys++;
+	}
+	if (rc != DB_NOTFOUND) {
+	    ap_log_rerror(APLOG_MARK, APLOG_NOTICE, 0, r,
+		"mod_dbats: dbats_glob_keyname_next: %s", db_strerror(rc));
+	    result = HTTP_INTERNAL_SERVER_ERROR;
+	}
+	dbats_glob_keyname_end(dki);
+	if (result != OK) return result;
+    }
+
+    // get data
+    uint32_t t = from;
+    dbats_snapshot *snap;
+    int i;
+    for (i = 0; i < nsamples; i++) {
+	rc = dbats_select_snap(reqstate->dh, &snap, t, 0);
+	if (rc != 0)
+	    return HTTP_INTERNAL_SERVER_ERROR;
+	int c;
+	for (c = 0; c < nkeys; c++) {
+	    const dbats_value *p;
+	    rc = dbats_get(snap, chunks[c].keyid, &p, bid);
+	    if (rc == DB_NOTFOUND) {
+		chunks[c].isset[i] = 0;
+	    } else if (rc == 0) {
+		chunks[c].isset[i] = 1;
+		chunks[c].data[i] = p[0];
+	    } else {
+		dbats_abort_snap(snap);
+		return HTTP_INTERNAL_SERVER_ERROR;
+	    }
+	}
+	t += bundle->period;
+	dbats_commit_snap(snap);
+    }
+
+    // print data
+    if (format && strcmp(format, "html") == 0) {
+	ap_set_content_type(r, "text/html");
+	ap_rprintf(r, "<!DOCTYPE html>\n");
+	ap_rprintf(r, "<html>\n");
+	ap_rprintf(r, "<head>\n");
+	ap_rprintf(r, "<title>DBATS data query</title>\n");
+	ap_rprintf(r, "</head>\n");
+	ap_rprintf(r, "<body>\n");
+	ap_rprintf(r, "<h1>DBATS data query</h1>\n");
+	int c;
+	t = from;
+	ap_rprintf(r, "<table>\n<tr><th></th>\n");
+	for (i = 0; i < nsamples; i++) {
+	    ap_rprintf(r, "<th>%u</th>\n", t);
+	    t += bundle->period;
+	}
+	ap_rprintf(r, "</tr>\n");
+	for (c = 0; c < nkeys; c++) {
+	    ap_rprintf(r, "<tr><th>%s</th>\n", ap_escape_html(r->pool, chunks[c].key));
+	    for (i = 0; i < nsamples; i++) {
+		if (chunks[c].isset[i]) {
+		    ap_rprintf(r, "<td>%" PRIval "</td>\n", chunks[c].data[i]);
+		}
+	    }
+	    ap_rprintf(r, "</tr>\n");
+	}
+	ap_rprintf(r, "</table>\n");
+	ap_rprintf(r, "</body>\n");
+	ap_rprintf(r, "</html>\n");
+
+    } else { // default to json
+	ap_set_content_type(r, "application/json");
+	int n = 0;
+
+	ap_rprintf(r, "[");
+	int c;
+	for (c = 0; c < nkeys; c++) {
+	    ap_rprintf(r, "%s{\"target\": \"%s\", \"datapoints\": [",
+		n>0 ? ", " : "", ap_escape_quotes(r->pool, chunks[c].key));
+	    t = from;
+	    int first = 1;
+	    for (i = 0; i < nsamples; i++) {
+		if (chunks[c].isset[i]) {
+		    ap_rprintf(r, "%s[%" PRIval ", %u]", first ? "" : ", ", chunks[c].data[i], t);
+		    first = 0;
+		}
+		t += bundle->period;
+	    }
+	    ap_rprintf(r, "]}");
+	    n++;
+	}
+	ap_rprintf(r, "]\n");
+    }
+
+    return result;
+}
+
 static int ends_with(const char *s, const char *w)
 {
     size_t sl = strlen(s);
@@ -190,10 +390,16 @@ static int req_handler(request_rec *r)
     ap_log_rerror(APLOG_MARK, APLOG_NOTICE, 0, r, "# path_info: %s", r->path_info);
     ap_log_rerror(APLOG_MARK, APLOG_NOTICE, 0, r, "# args: %s", r->args);
 
-    if (ends_with(r->uri, "/metrics/find/"))
+    int rc = init_request(r);
+    if (rc != OK) return rc;
+
+    if (ends_with(r->uri, "/metrics/find/")) {
 	return metrics_find(r);
-    else
+    } else if (ends_with(r->uri, "/render/")) {
+	return render(r);
+    } else {
 	return HTTP_NOT_FOUND;
+    }
 }
 
 static void *create_dir_conf(apr_pool_t *pool, char *context)
