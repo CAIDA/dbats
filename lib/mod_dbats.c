@@ -196,6 +196,45 @@ static int metrics_find(request_rec *r)
     return result;
 }
 
+static int metrics_index(request_rec *r)
+{
+    mod_dbats_reqstate *reqstate = (mod_dbats_reqstate*)
+	ap_get_module_config(r->request_config, &dbats_module);
+
+    int result = OK;
+    int rc;
+
+    dbats_keytree_iterator *dki;
+    uint32_t keyid;
+    char name[DBATS_KEYLEN];
+
+    rc = dbats_glob_keyname_start(reqstate->dh, NULL, &dki, NULL);
+    if (rc != 0) {
+	ap_log_rerror(APLOG_MARK, APLOG_NOTICE, 0, r, "mod_dbats: dbats_glob_keyname_start: %s", db_strerror(rc));
+	return HTTP_INTERNAL_SERVER_ERROR;
+    }
+
+    ap_set_content_type(r, "application/json");
+    int n = 0;
+    ap_rprintf(r, "[");
+    while ((rc = dbats_glob_keyname_next(dki, &keyid, name)) == 0) {
+	ap_rprintf(r, "%s\n    \"%s\"",
+	    n ? "," : "", ap_escape_quotes(r->pool, name));
+	n++;
+    }
+    ap_rprintf(r, "\n]\n");
+
+    if (rc != DB_NOTFOUND) {
+	ap_log_rerror(APLOG_MARK, APLOG_NOTICE, 0, r,
+	    "mod_dbats: dbats_glob_keyname_next: %s", db_strerror(rc));
+	result = HTTP_INTERNAL_SERVER_ERROR;
+    }
+
+    dbats_glob_keyname_end(dki);
+
+    return result;
+}
+
 static int render(request_rec *r)
 {
     mod_dbats_reqstate *reqstate = (mod_dbats_reqstate*)
@@ -231,7 +270,8 @@ static int render(request_rec *r)
 
     uint32_t starttime, endtime;
     rc = dbats_get_start_time(reqstate->dh, NULL, bid, &starttime);
-    rc = dbats_get_end_time(reqstate->dh, NULL, bid, &endtime);
+    if (rc == 0)
+	rc = dbats_get_end_time(reqstate->dh, NULL, bid, &endtime);
     if (rc == 0) {
 	if (from < starttime) from = starttime;
 	if (until > endtime) until = endtime;
@@ -397,6 +437,8 @@ static int req_handler(request_rec *r)
 
     if (ends_with(r->uri, "/metrics/find/")) {
 	return metrics_find(r);
+    } else if (ends_with(r->uri, "/metrics/index.json")) {
+	return metrics_index(r);
     } else if (ends_with(r->uri, "/render/")) {
 	return render(r);
     } else {
