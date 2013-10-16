@@ -135,6 +135,7 @@ struct dbats_snapshot {
     uint8_t *db_get_buf;       // buffer for data fragment
     uint8_t preload;           // load frags when tslice is selected
     uint8_t changed;           // has changes that need to be written to db?
+    uint8_t readonly;
     size_t db_get_buf_len;
     uint16_t num_bundles;      // Number of time series bundles
     dbats_value *valbuf;       // buffer for holding modified value
@@ -1423,7 +1424,7 @@ static int load_frag(dbats_snapshot *ds, uint32_t t, int bid,
     // load fragment
     fragkey_t dbkey = { htonl(bid), htonl(t), htonl(frag_id) };
     int rc;
-    uint32_t flags = ds->dh->cfg.readonly ? 0 : DB_RMW;
+    uint32_t flags = ds->readonly ? 0 : DB_RMW;
 
     assert(!ds->tslice[bid]->is_set[frag_id]);
     rc = load_isset(ds, &dbkey, &ds->tslice[bid]->is_set[frag_id], flags);
@@ -1489,7 +1490,7 @@ static int load_frag(dbats_snapshot *ds, uint32_t t, int bid,
 // Instantiate ds->is_set[*][frag_id]
 static int instantiate_isset_frags(dbats_snapshot *ds, int fid)
 {
-    if (ds->dh->cfg.readonly)
+    if (ds->readonly)
 	return 0; // ds->is_set is never needed in readonly mode
 
     int tn = (ds->active_end - ds->active_start) / ds->dh->bundle[0].period + 1;
@@ -1583,10 +1584,11 @@ restart:
     memset(*dsp, 0, sizeof(**dsp));
     (*dsp)->dh = dh;
     (*dsp)->preload = !!(flags & DBATS_PRELOAD);
+    (*dsp)->readonly = dh->cfg.readonly || !!(flags & DBATS_READONLY);
     rc = begin_transaction(dh, dh->txn, &(*dsp)->txn, "snapshot txn");
     if (rc != 0) return rc;
 
-    if (!dh->cfg.readonly) {
+    if (!(*dsp)->readonly) {
 	// DB_RMW will block other writers trying to select_snap().
 	// DB_READ_COMMITTED won't hold a read lock, so won't block anyone.
 	rc = CFG_GET(dh, (*dsp)->txn, "min_keep_time", (*dsp)->min_keep_time,
@@ -1623,7 +1625,7 @@ restart:
 
 	dbats_normalize_time(dh, bid, &t);
 
-	if (!dh->cfg.readonly) {
+	if (!(*dsp)->readonly) {
 	    if (t < (*dsp)->min_keep_time) {
 		dbats_log(DBATS_LOG_ERR, "select_snap %u: illegal attempt to set "
 		    "value in bundle %d at time %u before series limit %u",
@@ -1665,7 +1667,7 @@ restart:
     (*dsp)->active_start = min_time;
     (*dsp)->active_end = max_time;
 
-    if (!dh->cfg.readonly) {
+    if (!(*dsp)->readonly) {
 	// Make priority depend on time, so a writer of realtime data always
 	// beats a writer of historical data.
 	set_priority((*dsp), (*dsp)->tslice[0]->time / dh->bundle[0].period);
@@ -2266,7 +2268,7 @@ static int instantiate_frag_func(dbats_snapshot *ds, int bid, uint32_t frag_id)
     int rc;
     dbats_tslice *tslice = ds->tslice[bid];
 
-    if (!ds->preload || ds->dh->cfg.readonly) {
+    if (!ds->preload || ds->readonly) {
 	// Try to load the fragment.
 	rc = load_frag(ds, tslice->time, bid, frag_id);
 	if (rc != 0) // error
@@ -2276,7 +2278,7 @@ static int instantiate_frag_func(dbats_snapshot *ds, int bid, uint32_t frag_id)
 		rc = instantiate_isset_frags(ds, frag_id);
 	    return rc;
 	}
-	if (ds->dh->cfg.readonly) // didn't find it and can't create it
+	if (ds->readonly) // didn't find it and can't create it
 	    return DB_NOTFOUND; // fragment not found
     }
 
@@ -2322,9 +2324,9 @@ int dbats_set(dbats_snapshot *ds, uint32_t key_id, const dbats_value *valuep)
     uint32_t frag_id = keyfrag(key_id);
     uint32_t offset = keyoff(key_id);
 
-    if (!dh->is_open || dh->cfg.readonly) {
+    if (!dh->is_open || ds->readonly) {
 	dbats_log(DBATS_LOG_ERR, "is_open=%d, readonly=%d",
-	    dh->is_open, dh->cfg.readonly);
+	    dh->is_open, ds->readonly);
 	return EPERM;
     }
 

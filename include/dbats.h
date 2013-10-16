@@ -371,8 +371,11 @@ extern uint32_t dbats_normalize_time(const dbats_handler *handler,
  *  @param[in] time_value the desired time, which will be rounded down by
  *    dbats_normalize_time().
  *  @param[in] flags a bitwise-OR combination of any of the following:
+ *    -	DBATS_READONLY - do not allow writing to this snapshot, even if the db
+ *      was opened for writing (improves performance)
  *    - DBATS_PRELOAD - load data immediately instead of waiting until it's
- *      needed (can reduce the chances of deadlock)
+ *      needed (if you're going to load all the data eventually, this flag can
+ *      reduce the chances of deadlock)
  *  @return
  *    - 0 for success;
  *    - EINVAL if the database was not opened with DBATS_READONLY and the
