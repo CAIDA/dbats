@@ -50,7 +50,7 @@ static void child_init_handler(apr_pool_t *pchild, server_rec *s)
     apr_thread_mutex_create(&procstate.mutex, APR_THREAD_MUTEX_DEFAULT, pchild);
 }
 
-// Parse URL query parameters into a table
+// Parse URL query parameters into a table.  Each entry is a list of values.
 static void args_to_table(request_rec *r, apr_table_t **tablep)
 {
     *tablep = apr_table_make(r->pool, 0);
@@ -71,9 +71,21 @@ static void args_to_table(request_rec *r, apr_table_t **tablep)
 	}
 	name[nlen] = '\0';
 	ap_unescape_url(name);
-	apr_table_addn(*tablep, name, value);
-	ap_log_perror(APLOG_MARK, APLOG_NOTICE, 0, r->pool, "query param: %s=%s", name, value);
+	apr_array_header_t *plist = (apr_array_header_t*)apr_table_get(*tablep, name);
+	if (!plist) {
+	    plist = apr_array_make(r->pool, 1, sizeof(char*));
+	    apr_table_addn(*tablep, name, (void*)plist);
+	}
+	ap_log_perror(APLOG_MARK, APLOG_NOTICE, 0, r->pool, "query param: %s[%d]=%s",
+	    name, plist->nelts, value);
+	APR_ARRAY_PUSH(plist, char*) = value;
     }
+}
+
+static inline char *get_first_param(apr_table_t *queryparams, const char *key)
+{
+    apr_array_header_t *plist = (apr_array_header_t*)apr_table_get(queryparams, key);
+    return plist ? APR_ARRAY_IDX(plist, 0, char*) : NULL;
 }
 
 typedef struct {
@@ -118,11 +130,11 @@ static int metrics_find(request_rec *r)
     int result = OK;
     int rc;
 
-    apr_table_t *GET;
-    args_to_table(r, &GET);
-    const char *query = apr_table_get(GET, "query");
-    const char *format = apr_table_get(GET, "format");
-    //const char *logLevel = apr_table_get(GET, "logLevel");
+    apr_table_t *queryparams;
+    args_to_table(r, &queryparams);
+    const char *query = get_first_param(queryparams, "query");
+    const char *format = get_first_param(queryparams, "format");
+    //const char *logLevel = get_first_param(queryparams, "logLevel");
 
     ap_log_rerror(APLOG_MARK, APLOG_NOTICE, 0, r, "# query: %s", query);
 
@@ -192,14 +204,15 @@ static int render(request_rec *r)
     int result = OK;
     int rc;
     int bid = 0;
+    int i;
 
-    apr_table_t *GET;
-    args_to_table(r, &GET);
-    const char *target = apr_table_get(GET, "target");
-    const char *str_from = apr_table_get(GET, "from");
-    const char *str_until = apr_table_get(GET, "until");
-    const char *format = apr_table_get(GET, "format");
-    //const char *logLevel = apr_table_get(GET, "logLevel");
+    apr_table_t *queryparams;
+    args_to_table(r, &queryparams);
+    apr_array_header_t *targets = (apr_array_header_t*)apr_table_get(queryparams, "target");
+    const char *str_from = get_first_param(queryparams, "from");
+    const char *str_until = get_first_param(queryparams, "until");
+    const char *format = get_first_param(queryparams, "format");
+    //const char *logLevel = get_first_param(queryparams, "logLevel");
 
     char *end;
     uint32_t from = strtol(str_from, &end, 10);
@@ -207,7 +220,9 @@ static int render(request_rec *r)
     uint32_t until = strtol(str_until, &end, 10);
     if (!*str_until || *end) return HTTP_BAD_REQUEST;
 
-    ap_log_rerror(APLOG_MARK, APLOG_NOTICE, 0, r, "# target: %s", target);
+    for (i = 0; i < targets->nelts; i++)
+	ap_log_rerror(APLOG_MARK, APLOG_NOTICE, 0, r, "# target[%d]: %s", i, APR_ARRAY_IDX(targets, i, char*));
+
     ap_log_rerror(APLOG_MARK, APLOG_NOTICE, 0, r, "# from:   %" PRIu32, from);
     ap_log_rerror(APLOG_MARK, APLOG_NOTICE, 0, r, "# until:  %" PRIu32, until);
 
@@ -240,41 +255,24 @@ static int render(request_rec *r)
     dbats_keytree_iterator *dki;
     char key[DBATS_KEYLEN];
     uint32_t keyid;
-    int nkeys = 0;
 
-    rc = dbats_glob_keyname_start(reqstate->dh, NULL, &dki, target);
-    if (rc != 0) {
-	ap_log_rerror(APLOG_MARK, APLOG_NOTICE, 0, r, "mod_dbats: dbats_glob_keyname_start: %s", db_strerror(rc));
-	return HTTP_INTERNAL_SERVER_ERROR;
-    }
-    while ((rc = dbats_glob_keyname_next(dki, &keyid, NULL)) == 0) {
-	nkeys++;
-    }
-    if (rc != DB_NOTFOUND) {
-	ap_log_rerror(APLOG_MARK, APLOG_NOTICE, 0, r,
-	    "mod_dbats: dbats_glob_keyname_next: %s", db_strerror(rc));
-	result = HTTP_INTERNAL_SERVER_ERROR;
-    }
-    dbats_glob_keyname_end(dki);
-    if (result != OK) return result;
-
-    chunk_t *chunks = NULL;
-    if (nkeys > 0) {
-	chunks = apr_palloc(r->pool, nkeys * sizeof(chunk_t));
-	nkeys = 0;
+    apr_array_header_t *chunks = apr_array_make(r->pool, targets->nelts + 3, sizeof(chunk_t));
+    for (i = 0; i < targets->nelts; i++) {
+	const char *target = APR_ARRAY_IDX(targets, i, char*);
 	rc = dbats_glob_keyname_start(reqstate->dh, NULL, &dki, target);
 	if (rc != 0) {
 	    ap_log_rerror(APLOG_MARK, APLOG_NOTICE, 0, r,
 		"mod_dbats: dbats_glob_keyname_start: %s", db_strerror(rc));
 	    return HTTP_INTERNAL_SERVER_ERROR;
 	}
-	while ((rc = dbats_glob_keyname_next(dki, &chunks[nkeys].keyid, key)) == 0) {
-	    chunks[nkeys].key = apr_pstrdup(r->pool, key);
-	    chunks[nkeys].isset = apr_palloc(r->pool, nsamples * sizeof(uint8_t));
-	    chunks[nkeys].data = apr_palloc(r->pool, nsamples * sizeof(dbats_value));
-	    ap_log_rerror(APLOG_MARK, APLOG_NOTICE, 0, r, "mod_dbats: key %u %s",
-		chunks[nkeys].keyid, chunks[nkeys].key);
-	    nkeys++;
+	while ((rc = dbats_glob_keyname_next(dki, &keyid, key)) == 0) {
+	    chunk_t *chunk = (chunk_t*)apr_array_push(chunks);
+	    chunk->keyid = keyid;
+	    chunk->key = apr_pstrdup(r->pool, key);
+	    chunk->isset = apr_palloc(r->pool, nsamples * sizeof(uint8_t));
+	    chunk->data = apr_palloc(r->pool, nsamples * sizeof(dbats_value));
+	    ap_log_rerror(APLOG_MARK, APLOG_NOTICE, 0, r, "mod_dbats: (%d/%d) key #%u %s",
+		chunks->nelts, chunks->nalloc, chunk->keyid, chunk->key);
 	}
 	if (rc != DB_NOTFOUND) {
 	    ap_log_rerror(APLOG_MARK, APLOG_NOTICE, 0, r,
@@ -288,20 +286,22 @@ static int render(request_rec *r)
     // get data
     uint32_t t = from;
     dbats_snapshot *snap;
-    int i;
     for (i = 0; i < nsamples; i++) {
 	rc = dbats_select_snap(reqstate->dh, &snap, t, 0);
 	if (rc != 0)
 	    return HTTP_INTERNAL_SERVER_ERROR;
 	int c;
-	for (c = 0; c < nkeys; c++) {
+	for (c = 0; c < chunks->nelts; c++) {
+	    chunk_t *chunk = &APR_ARRAY_IDX(chunks, c, chunk_t);
 	    const dbats_value *p;
-	    rc = dbats_get(snap, chunks[c].keyid, &p, bid);
+	    ap_log_rerror(APLOG_MARK, APLOG_NOTICE, 0, r, "mod_dbats: dbats_get key #%u %s",
+		chunk->keyid, chunk->key);
+	    rc = dbats_get(snap, chunk->keyid, &p, bid);
 	    if (rc == DB_NOTFOUND) {
-		chunks[c].isset[i] = 0;
+		chunk->isset[i] = 0;
 	    } else if (rc == 0) {
-		chunks[c].isset[i] = 1;
-		chunks[c].data[i] = p[0];
+		chunk->isset[i] = 1;
+		chunk->data[i] = p[0];
 	    } else {
 		dbats_abort_snap(snap);
 		return HTTP_INTERNAL_SERVER_ERROR;
@@ -329,11 +329,12 @@ static int render(request_rec *r)
 	    t += bundle->period;
 	}
 	ap_rprintf(r, "</tr>\n");
-	for (c = 0; c < nkeys; c++) {
-	    ap_rprintf(r, "<tr><th>%s</th>\n", ap_escape_html(r->pool, chunks[c].key));
+	for (c = 0; c < chunks->nelts; c++) {
+	    chunk_t *chunk = &APR_ARRAY_IDX(chunks, c, chunk_t);
+	    ap_rprintf(r, "<tr><th>%s</th>\n", ap_escape_html(r->pool, chunk->key));
 	    for (i = 0; i < nsamples; i++) {
-		if (chunks[c].isset[i]) {
-		    ap_rprintf(r, "<td>%" PRIval "</td>\n", chunks[c].data[i]);
+		if (chunk->isset[i]) {
+		    ap_rprintf(r, "<td>%" PRIval "</td>\n", chunk->data[i]);
 		}
 	    }
 	    ap_rprintf(r, "</tr>\n");
@@ -348,14 +349,15 @@ static int render(request_rec *r)
 
 	ap_rprintf(r, "[");
 	int c;
-	for (c = 0; c < nkeys; c++) {
+	for (c = 0; c < chunks->nelts; c++) {
+	    chunk_t *chunk = &APR_ARRAY_IDX(chunks, c, chunk_t);
 	    ap_rprintf(r, "%s{\"target\": \"%s\", \"datapoints\": [",
-		n>0 ? ", " : "", ap_escape_quotes(r->pool, chunks[c].key));
+		n>0 ? ", " : "", ap_escape_quotes(r->pool, chunk->key));
 	    t = from;
 	    int first = 1;
 	    for (i = 0; i < nsamples; i++) {
-		if (chunks[c].isset[i]) {
-		    ap_rprintf(r, "%s[%" PRIval ", %u]", first ? "" : ", ", chunks[c].data[i], t);
+		if (chunk->isset[i]) {
+		    ap_rprintf(r, "%s[%" PRIval ", %u]", first ? "" : ", ", chunk->data[i], t);
 		    first = 0;
 		}
 		t += bundle->period;
