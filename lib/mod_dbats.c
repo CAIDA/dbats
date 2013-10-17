@@ -213,24 +213,39 @@ static int render(request_rec *r)
     int rc;
     int bid = 0;
     int i;
+    uint32_t from, until, max_points = 0;
+    int nsamples = 0;
+    const dbats_bundle_info *bundle = NULL;
 
     apr_array_header_t *targets = (apr_array_header_t*)apr_table_get(reqstate->queryparams, "target");
     const char *str_from = get_first_param(reqstate->queryparams, "from");
     const char *str_until = get_first_param(reqstate->queryparams, "until");
+    const char *str_max_points = get_first_param(reqstate->queryparams, "maxDataPoints");
     const char *format = get_first_param(reqstate->queryparams, "format");
     //const char *logLevel = get_first_param(reqstate->queryparams, "logLevel");
 
-    char *end;
-    uint32_t from = strtol(str_from, &end, 10);
-    if (!*str_from || *end) return HTTP_BAD_REQUEST;
-    uint32_t until = strtol(str_until, &end, 10);
-    if (!*str_until || *end) return HTTP_BAD_REQUEST;
+    char *p;
+    from = strtol(str_from, &p, 10);
+    if (!*str_from || *p) return HTTP_BAD_REQUEST;
+    until = strtol(str_until, &p, 10);
+    if (!*str_until || *p) return HTTP_BAD_REQUEST;
+    if (str_max_points) {
+	max_points = strtol(str_max_points, &p, 10);
+	if (!*str_max_points || *p) return HTTP_BAD_REQUEST;
+    }
 
     for (i = 0; i < targets->nelts; i++)
 	ap_log_rerror(APLOG_MARK, APLOG_NOTICE, 0, r, "# target[%d]: %s", i, APR_ARRAY_IDX(targets, i, char*));
 
     ap_log_rerror(APLOG_MARK, APLOG_NOTICE, 0, r, "# from:   %" PRIu32, from);
     ap_log_rerror(APLOG_MARK, APLOG_NOTICE, 0, r, "# until:  %" PRIu32, until);
+    ap_log_rerror(APLOG_MARK, APLOG_NOTICE, 0, r, "# max_points: %" PRIu32, max_points);
+
+    if (max_points > 0) {
+	bid = dbats_best_bundle(reqstate->dh, DBATS_AGG_SUM, from, until, max_points);
+	if (bid < 0)
+	    return HTTP_NOT_FOUND; // XXX ?
+    }
 
     dbats_normalize_time(reqstate->dh, bid, &from);
     dbats_normalize_time(reqstate->dh, bid, &until);
@@ -248,8 +263,8 @@ static int render(request_rec *r)
 	return HTTP_INTERNAL_SERVER_ERROR;
     }
 
-    const dbats_bundle_info *bundle = dbats_get_bundle_info(reqstate->dh, bid);
-    int nsamples = (until < from) ? 0 : (until - from) / bundle->period + 1;
+    bundle = dbats_get_bundle_info(reqstate->dh, bid);
+    nsamples = (until < from) ? 0 : (until - from) / bundle->period + 1;
 
     typedef struct {
 	const char *key;
