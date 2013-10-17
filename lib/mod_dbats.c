@@ -382,7 +382,7 @@ static int ends_with(const char *s, const char *w)
 {
     size_t sl = strlen(s);
     size_t wl = strlen(w);
-    if (wl != sl) return 0;
+    if (wl > sl) return 0;
     return strcmp(s + sl - wl, w) == 0;
 }
 
