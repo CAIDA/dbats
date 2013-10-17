@@ -7,9 +7,18 @@ LDFLAGS      = @LDFLAGS@ $(PROF)
 LDLIBS       = -ldbats @LIBS@
 APXS         = @APXS@
 
-DBATS_LIB   = libdbats.a
+TARGETS     = libdbats.a mod_dbats.la
 
-TARGETS     = $(DBATS_LIB) mod_dbats.la
+APXS_DEBUG= \
+	-Wc,-Wall \
+	-Wc,-Wshadow \
+	-Wc,-Wpointer-arith \
+	-Wc,-Wcast-align \
+	-Wc,-Wstrict-prototypes \
+	-Wc,-Wmissing-prototypes \
+	-Wc,-Wwrite-strings \
+	-Wc,-Winline \
+	-Wc,-Waggregate-return
 
 all: $(TARGETS)
 
@@ -17,12 +26,14 @@ dbats.o: dbats.c ../include/dbats.h ../include/dbats_log.h Makefile
 
 dbats_log.o: dbats_log.c ../include/dbats_log.h Makefile
 
-$(DBATS_LIB): dbats.o dbats_log.o quicklz.o
+libdbats.a: dbats.o dbats_log.o quicklz.o
 	ar rs $@ $?
 	ranlib $@
 
-mod_dbats.la: mod_dbats.c
-	env LD_RUN_PATH=/usr/local/pkg/bdb/lib $(APXS) -c $(CPPFLAGS) -L. $(LDFLAGS) $(LDLIBS) mod_dbats.c
+mod_dbats.la: mod_dbats.c libdbats.a
+	env LD_RUN_PATH=/usr/local/pkg/bdb/lib $(APXS) -c \
+	    $(APXS_DEBUG) \
+	    $(CPPFLAGS) -L. $(LDFLAGS) $(LDLIBS) mod_dbats.c
 
 install: mod_dbats.la
 	$(APXS) -a -i mod_dbats.la
