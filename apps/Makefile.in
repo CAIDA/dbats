@@ -6,7 +6,7 @@ CFLAGS       = @CFLAGS@ $(PROF) $(CPPFLAGS) # -fPIC
 LDFLAGS      = -L../lib @LDFLAGS@ $(PROF)
 LDLIBS      = -ldbats @LIBS@
 
-TARGETS     = report-in report-out dbats_series_limit dbats_info
+TARGETS     = report-in report-out dbats_series_limit dbats_info dbats_best_bundle
 
 all: $(TARGETS)
 
@@ -23,6 +23,8 @@ dbats_series_limit.o: dbats_series_limit.c ../include/dbats.h ../include/dbats_l
 
 dbats_info.o: dbats_info.c ../include/dbats.h ../include/dbats_log.h Makefile
 
+dbats_best_bundle.o: dbats_best_bundle.c ../include/dbats.h ../include/dbats_log.h Makefile
+
 report-in: report-in.o $(DBATS_LIB) Makefile
 	$(CC) $(CFLAGS) $(LDFLAGS) report-in.o $(LDLIBS) -o $@
 
@@ -34,3 +36,6 @@ dbats_series_limit: dbats_series_limit.o $(DBATS_LIB) Makefile
 
 dbats_info: dbats_info.o $(DBATS_LIB) Makefile
 	$(CC) $(CFLAGS) $(LDFLAGS) dbats_info.o $(LDLIBS) -o $@
+
+dbats_best_bundle: dbats_best_bundle.o $(DBATS_LIB) Makefile
+	$(CC) $(CFLAGS) $(LDFLAGS) dbats_best_bundle.o $(LDLIBS) -o $@
