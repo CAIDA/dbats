@@ -89,38 +89,9 @@ static inline char *get_first_param(apr_table_t *queryparams, const char *key)
 }
 
 typedef struct {
+    apr_table_t *queryparams;
     dbats_handler *dh;
 } mod_dbats_reqstate;
-
-static int init_request(request_rec *r)
-{
-    mod_dbats_reqstate *reqstate = apr_pcalloc(r->pool, sizeof(*reqstate));
-    ap_set_module_config(r->request_config, &dbats_module, reqstate);
-
-    mod_dbats_dir_config *cfg = (mod_dbats_dir_config*)ap_get_module_config(r->per_dir_config, &dbats_module);
-    ap_log_rerror(APLOG_MARK, APLOG_NOTICE, 0, r, "dir_cfg: %08x, n=%d, context=%s, path=%s", (unsigned)cfg, ++cfg->n, cfg->context, cfg->path);
-
-    apr_thread_mutex_lock(procstate.mutex);
-    reqstate->dh = (dbats_handler*)apr_hash_get(procstate.dht, cfg->path, APR_HASH_KEY_STRING);
-    if (reqstate->dh) {
-	apr_thread_mutex_unlock(procstate.mutex);
-    } else {
-	ap_log_rerror(APLOG_MARK, APLOG_NOTICE, 0, r, "######## mod_dbats: dbats_open %s", cfg->path);
-	int rc = dbats_open(&reqstate->dh, cfg->path, 1, 60, DBATS_READONLY, 0);
-	if (rc != 0) {
-	    ap_log_rerror(APLOG_MARK, APLOG_NOTICE, 0, r, "mod_dbats: dbats_open: %s", db_strerror(rc));
-	    apr_thread_mutex_unlock(procstate.mutex);
-	    return HTTP_INTERNAL_SERVER_ERROR;
-	}
-	ap_log_rerror(APLOG_MARK, APLOG_NOTICE, 0, r, "mod_dbats: dbats_open: ok");
-	apr_hash_set(procstate.dht, cfg->path, APR_HASH_KEY_STRING, reqstate->dh);
-	apr_pool_cleanup_register(procstate.pool, reqstate->dh, mod_dbats_close, NULL);
-	apr_thread_mutex_unlock(procstate.mutex);
-	dbats_commit_open(reqstate->dh);
-	ap_log_rerror(APLOG_MARK, APLOG_NOTICE, 0, r, "mod_dbats: dbats_commit_open: ok");
-    }
-    return OK;
-}
 
 static int metrics_find(request_rec *r)
 {
@@ -130,11 +101,9 @@ static int metrics_find(request_rec *r)
     int result = OK;
     int rc;
 
-    apr_table_t *queryparams;
-    args_to_table(r, &queryparams);
-    const char *query = get_first_param(queryparams, "query");
-    const char *format = get_first_param(queryparams, "format");
-    //const char *logLevel = get_first_param(queryparams, "logLevel");
+    const char *query = get_first_param(reqstate->queryparams, "query");
+    const char *format = get_first_param(reqstate->queryparams, "format");
+    //const char *logLevel = get_first_param(reqstate->queryparams, "logLevel");
 
     ap_log_rerror(APLOG_MARK, APLOG_NOTICE, 0, r, "# query: %s", query);
 
@@ -245,13 +214,11 @@ static int render(request_rec *r)
     int bid = 0;
     int i;
 
-    apr_table_t *queryparams;
-    args_to_table(r, &queryparams);
-    apr_array_header_t *targets = (apr_array_header_t*)apr_table_get(queryparams, "target");
-    const char *str_from = get_first_param(queryparams, "from");
-    const char *str_until = get_first_param(queryparams, "until");
-    const char *format = get_first_param(queryparams, "format");
-    //const char *logLevel = get_first_param(queryparams, "logLevel");
+    apr_array_header_t *targets = (apr_array_header_t*)apr_table_get(reqstate->queryparams, "target");
+    const char *str_from = get_first_param(reqstate->queryparams, "from");
+    const char *str_until = get_first_param(reqstate->queryparams, "until");
+    const char *format = get_first_param(reqstate->queryparams, "format");
+    //const char *logLevel = get_first_param(reqstate->queryparams, "logLevel");
 
     char *end;
     uint32_t from = strtol(str_from, &end, 10);
@@ -415,7 +382,7 @@ static int ends_with(const char *s, const char *w)
 {
     size_t sl = strlen(s);
     size_t wl = strlen(w);
-    if (wl > sl) return 0;
+    if (wl != sl) return 0;
     return strcmp(s + sl - wl, w) == 0;
 }
 
@@ -432,9 +399,39 @@ static int req_handler(request_rec *r)
     ap_log_rerror(APLOG_MARK, APLOG_NOTICE, 0, r, "# path_info: %s", r->path_info);
     ap_log_rerror(APLOG_MARK, APLOG_NOTICE, 0, r, "# args: %s", r->args);
 
-    int rc = init_request(r);
-    if (rc != OK) return rc;
+    // get config
+    mod_dbats_dir_config *cfg = (mod_dbats_dir_config*)ap_get_module_config(r->per_dir_config, &dbats_module);
+    ap_log_rerror(APLOG_MARK, APLOG_NOTICE, 0, r, "dir_cfg: %08x, n=%d, context=%s, path=%s", (unsigned)cfg, ++cfg->n, cfg->context, cfg->path);
 
+    // create request state
+    mod_dbats_reqstate *reqstate = apr_pcalloc(r->pool, sizeof(*reqstate));
+    ap_set_module_config(r->request_config, &dbats_module, reqstate);
+
+    // parse query parameters
+    args_to_table(r, &reqstate->queryparams);
+
+    // get dbats_handler for cfg->path
+    apr_thread_mutex_lock(procstate.mutex);
+    reqstate->dh = (dbats_handler*)apr_hash_get(procstate.dht, cfg->path, APR_HASH_KEY_STRING);
+    if (reqstate->dh) {
+	apr_thread_mutex_unlock(procstate.mutex);
+    } else {
+	ap_log_rerror(APLOG_MARK, APLOG_NOTICE, 0, r, "######## mod_dbats: dbats_open %s", cfg->path);
+	int rc = dbats_open(&reqstate->dh, cfg->path, 1, 60, DBATS_READONLY, 0);
+	if (rc != 0) {
+	    ap_log_rerror(APLOG_MARK, APLOG_NOTICE, 0, r, "mod_dbats: dbats_open: %s", db_strerror(rc));
+	    apr_thread_mutex_unlock(procstate.mutex);
+	    return HTTP_INTERNAL_SERVER_ERROR;
+	}
+	ap_log_rerror(APLOG_MARK, APLOG_NOTICE, 0, r, "mod_dbats: dbats_open: ok");
+	apr_hash_set(procstate.dht, cfg->path, APR_HASH_KEY_STRING, reqstate->dh);
+	apr_pool_cleanup_register(procstate.pool, reqstate->dh, mod_dbats_close, NULL);
+	apr_thread_mutex_unlock(procstate.mutex);
+	dbats_commit_open(reqstate->dh);
+	ap_log_rerror(APLOG_MARK, APLOG_NOTICE, 0, r, "mod_dbats: dbats_commit_open: ok");
+    }
+
+    // dispatch request
     if (ends_with(r->uri, "/metrics/find/")) {
 	return metrics_find(r);
     } else if (ends_with(r->uri, "/metrics/index.json")) {
