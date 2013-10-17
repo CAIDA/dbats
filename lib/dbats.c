@@ -959,19 +959,29 @@ int dbats_get_end_time(dbats_handler *dh, dbats_snapshot *ds, int bid, uint32_t 
     return rc;
 }
 
-int dbats_best_bundle(dbats_handler *dh, uint32_t func, uint32_t start)
+int dbats_best_bundle(dbats_handler *dh, uint32_t func, uint32_t start, uint32_t end, int max_points)
 {
-    int best_bid = 0;
-    uint32_t best_start;
-    dbats_get_start_time(dh, NULL, 0, &best_start);
-    uint32_t best_bounded_start = max(best_start, start);
+    int best_bid = -1;
+    uint32_t max_end;
+    uint32_t best_bounded_start = UINT32_MAX;
 
-    for (int bid = 1; bid < dh->cfg.num_bundles; bid++) {
-	if (dh->bundle[bid].func != func) continue;
+    dbats_get_end_time(dh, NULL, 0, &max_end);
+    if (end > max_end) end = max_end;
+
+    for (int bid = 0; bid < dh->cfg.num_bundles; bid++) {
+	if (bid != 0 && dh->bundle[bid].func != func) continue;
 	uint32_t this_start;
 	dbats_get_start_time(dh, NULL, bid, &this_start);
 	uint32_t this_bounded_start = max(this_start, start);
 	if (this_bounded_start < best_bounded_start) {
+	    if (max_points > 0) {
+		uint32_t nstart = this_bounded_start;
+		dbats_normalize_time(dh, bid, &nstart);
+		uint32_t nend = end;
+		dbats_normalize_time(dh, bid, &nend);
+		if ((nend - nstart) / dh->bundle[bid].period + 1 > max_points)
+		    continue;
+	    }
 	    best_bid = bid;
 	    best_bounded_start = this_bounded_start;
 	}
