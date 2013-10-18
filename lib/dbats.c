@@ -33,9 +33,8 @@
 // compile-time assertion (works anywhere a declaration is allowed)
 #define ct_assert(expr, label)  enum { ASSERT_ERROR__##label = 1/(!!(expr)) };
 
-ct_assert((sizeof(double) <= sizeof(dbats_value)), dbats_value_is_smaller_than_double)
 ct_assert((sizeof(double) == sizeof(uint64_t)), double_is_not_64_bits)
-typedef union { double d; uint64_t i; } dbl_i64;
+
 
 /*************************************************************************/
 
@@ -961,32 +960,48 @@ int dbats_get_end_time(dbats_handler *dh, dbats_snapshot *ds, int bid, uint32_t 
 
 int dbats_best_bundle(dbats_handler *dh, uint32_t func, uint32_t start, uint32_t end, int max_points)
 {
-    int best_bid = -1;
+    typedef struct {
+	int bid;
+	uint32_t start;    // start time of overlap between request and bundle
+	uint32_t npoints;  // # of points in bundle within time range
+    } info;
+
+    info best = { -1, UINT32_MAX, UINT32_MAX };
+    info current;
     uint32_t max_end;
-    uint32_t best_bounded_start = UINT32_MAX;
 
     dbats_get_end_time(dh, NULL, 0, &max_end);
     if (end > max_end) end = max_end;
 
     for (int bid = 0; bid < dh->cfg.num_bundles; bid++) {
 	if (bid != 0 && dh->bundle[bid].func != func) continue;
-	uint32_t this_start;
-	dbats_get_start_time(dh, NULL, bid, &this_start);
-	uint32_t this_bounded_start = max(this_start, start);
-	if (this_bounded_start < best_bounded_start) {
-	    if (max_points > 0) {
-		uint32_t nstart = this_bounded_start;
-		dbats_normalize_time(dh, bid, &nstart);
-		uint32_t nend = end;
-		dbats_normalize_time(dh, bid, &nend);
-		if ((nend - nstart) / dh->bundle[bid].period + 1 > max_points)
-		    continue;
-	    }
-	    best_bid = bid;
-	    best_bounded_start = this_bounded_start;
+	current.bid = bid;
+	dbats_get_start_time(dh, NULL, bid, &current.start);
+	current.start = max(current.start, start);
+
+	{
+	    uint32_t nstart = current.start;
+	    dbats_normalize_time(dh, bid, &nstart);
+	    uint32_t nend = end;
+	    dbats_normalize_time(dh, bid, &nend);
+	    current.npoints = (nend - nstart) / dh->bundle[bid].period + 1;
+	}
+
+	if (current.start != best.start) {
+	    // pick the one that better covers the time range
+	    if (current.start < best.start) best = current;
+	    continue;
+	}
+
+	if (max_points > 0 && (best.npoints > max_points || current.npoints > max_points)) {
+	    // one or both have too many points; pick the one with fewer points
+	    if (current.npoints < best.npoints) best = current;
+	} else {
+	    // neither has too many points; pick the one with more points
+	    if (current.npoints > best.npoints) best = current;
 	}
     }
-    return best_bid;
+    return best.bid;
 }
 
 // "DELETE FROM db WHERE db.bid = bid AND db.time >= start AND db.time < end"
@@ -2326,8 +2341,8 @@ static inline int instantiate_frag(dbats_snapshot *ds, int bid, uint32_t frag_id
 
 int dbats_set(dbats_snapshot *ds, uint32_t key_id, const dbats_value *valuep)
 {
-    dbats_log(DBATS_LOG_VFINE, "dbats_set %u #%u = %" PRIval,
-	ds->tslice[0]->time, key_id, valuep[0]); // XXX
+    dbats_log(DBATS_LOG_VFINE, "dbats_set %u #%u = %" PRIu64,
+	ds->tslice[0]->time, key_id, valuep[0].u64); // XXX
     int rc;
     dbats_handler *dh = ds->dh;
 
@@ -2391,44 +2406,43 @@ int dbats_set(dbats_snapshot *ds, uint32_t key_id, const dbats_value *valuep)
 	    }
 	}
 
-	dbats_log(DBATS_LOG_FINEST, "agg %d: aggval=%" PRIval " n=%d",
-	    bid, aggval[0], n); // XXX
+	dbats_log(DBATS_LOG_FINEST, "agg %d: aggval=%" PRIu64 " n=%d",
+	    bid, aggval[0].u64, n); // XXX
 
 	for (int i = 0; i < dh->cfg.values_per_entry; i++) {
-	    if (was_set && valuep[i] == oldvaluep[i]) {
+	    if (was_set && valuep[i].u64 == oldvaluep[i].u64) {
 		continue; // value did not change; no need to change agg value
 	    }
 	    switch (dh->bundle[bid].func) {
 	    case DBATS_AGG_MIN:
-		if (n == 1 || valuep[i] <= aggval[i]) {
+		if (n == 1 || valuep[i].u64 <= aggval[i].u64) {
 		    aggval[i] = valuep[i];
 		    changed = 1;
-		} else if (was_set && oldvaluep[i] == aggval[i]) {
+		} else if (was_set && oldvaluep[i].u64 == aggval[i].u64) {
 		    // XXX TODO: Find the min value among all the steps.
 		    failed = ENOSYS; // XXX
 		}
 		break;
 	    case DBATS_AGG_MAX:
-		if (n == 1 || valuep[i] >= aggval[i]) {
+		if (n == 1 || valuep[i].u64 >= aggval[i].u64) {
 		    aggval[i] = valuep[i];
 		    changed = 1;
-		} else if (was_set && oldvaluep[i] == aggval[i]) {
+		} else if (was_set && oldvaluep[i].u64 == aggval[i].u64) {
 		    // XXX TODO: Find the max value among all the steps.
 		    failed = ENOSYS; // XXX
 		}
 		break;
 	    case DBATS_AGG_AVG:
 		{
-		    double *daggval = ((double*)&aggval[i]);
 		    if (n == 1) {
-			*daggval = valuep[i];
+			aggval[i].d = valuep[i].u64;
 			changed = 1;
 		    } else {
-			double old_daggval = *daggval;
+			double old_daggval = aggval[i].d;
 			if (was_set)
-			    *daggval -= (oldvaluep[i] - *daggval) / n;
-			*daggval += (valuep[i] - *daggval) / n;
-			changed = (*daggval != old_daggval);
+			    aggval[i].d -= (oldvaluep[i].u64 - aggval[i].d) / n;
+			aggval[i].d += (valuep[i].u64 - aggval[i].d) / n;
+			changed = (aggval[i].d != old_daggval);
 		    }
 		}
 		break;
@@ -2460,10 +2474,10 @@ int dbats_set(dbats_snapshot *ds, uint32_t key_id, const dbats_value *valuep)
 		if (n == 1) {
 		    aggval[i] = valuep[i];
 		    changed = 1;
-		} else if (was_set || valuep[i] != 0) {
+		} else if (was_set || valuep[i].u64 != 0) {
 		    if (was_set)
-			aggval[i] -= oldvaluep[i];
-		    aggval[i] += valuep[i];
+			aggval[i].u64 -= oldvaluep[i].u64;
+		    aggval[i].u64 += valuep[i].u64;
 		    changed = 1;
 		}
 		break;
@@ -2475,9 +2489,9 @@ int dbats_set(dbats_snapshot *ds, uint32_t key_id, const dbats_value *valuep)
 	    if (level <= dbats_log_level) { 
 		char aggbuf[64];
 		if (dh->bundle[bid].func == DBATS_AGG_AVG)
-		    sprintf(aggbuf, "%f", ((double*)aggval)[0]);
+		    sprintf(aggbuf, "%f", aggval[0].d);
 		else
-		    sprintf(aggbuf, "%" PRIval, aggval[0]);
+		    sprintf(aggbuf, "%" PRIu64, aggval[0].u64);
 		dbats_log(level, "%s set value bid=%d frag_id=%u "
 		    "offset=%" PRIu32 " value_len=%u aggval=%s",
 		    failed ? "Failed to" : "Successfully",
@@ -2507,8 +2521,8 @@ int dbats_set(dbats_snapshot *ds, uint32_t key_id, const dbats_value *valuep)
     ds->tslice[0]->frag_changed[frag_id] = 1;
 
     dbats_log(DBATS_LOG_VFINE, "Succesfully set value "
-	"bid=%d frag_id=%u offset=%" PRIu32 " value_len=%u value=%" PRIval,
-	0, frag_id, offset, dh->cfg.entry_size, valuep[0]);
+	"bid=%d frag_id=%u offset=%" PRIu32 " value_len=%u value=%" PRIu64,
+	0, frag_id, offset, dh->cfg.entry_size, valuep[0].u64);
 
     return 0;
 }
@@ -2566,77 +2580,19 @@ int dbats_get(dbats_snapshot *ds, uint32_t key_id,
 	    *valuepp = NULL;
 	    return DB_NOTFOUND;
 	}
-	if (dh->bundle[bid].func == DBATS_AGG_AVG) {
-	    dbl_i64 *dip = (dbl_i64*)valueptr(ds, bid, frag_id, offset);
+	*valuepp = valueptr(ds, bid, frag_id, offset);
+	if (dh->swapped || dh->bundle[bid].func == DBATS_AGG_AVG) {
 	    if ((rc = alloc_valbuf(ds)) != 0) return rc;
-	    if (dh->swapped) {
-		dbl_i64 di;
-		for (int i = 0; i < dh->cfg.values_per_entry; i++) {
-		    di.i = cswap64(dip[i].i);
-		    ds->valbuf[i] = di.d + 0.5;
-		}
-	    } else {
-		for (int i = 0; i < dh->cfg.values_per_entry; i++)
-		    ds->valbuf[i] = dip[i].d + 0.5;
-	    }
+	}
+	if (dh->swapped) {
+	    for (int i = 0; i < dh->cfg.values_per_entry; i++)
+		ds->valbuf[i].u64 = cswap64((*valuepp)[i].u64);
 	    *valuepp = ds->valbuf;
-	} else {
-	    *valuepp = valueptr(ds, bid, frag_id, offset);
-	    if (dh->swapped) {
-		if ((rc = alloc_valbuf(ds)) != 0) return rc;
-		for (int i = 0; i < dh->cfg.values_per_entry; i++)
-		    ds->valbuf[i] = cswap64((*valuepp)[i]);
-		*valuepp = ds->valbuf;
-	    }
+	} else if (dh->bundle[bid].func == DBATS_AGG_AVG) {
+	    for (int i = 0; i < dh->cfg.values_per_entry; i++)
+		ds->valbuf[i] = (*valuepp)[i];
+	    *valuepp = ds->valbuf;
 	}
-	dbats_log(DBATS_LOG_VFINE, "Succesfully read value off=%" PRIu32 " len=%u",
-	    offset, dh->cfg.entry_size);
-	return 0;
-
-    } else if (rc == DB_NOTFOUND) {
-	char keyname[DBATS_KEYLEN] = "";
-	dbats_get_key_name(dh, ds, key_id, keyname);
-	dbats_log(DBATS_LOG_WARN, "Value unset (f): %u %d %s",
-	    tslice->time, bid, keyname);
-	*valuepp = NULL;
-	return rc;
-
-    } else {
-	return rc;
-    }
-}
-
-int dbats_get_double(dbats_snapshot *ds, uint32_t key_id,
-    const double **valuepp, int bid)
-{
-    int rc;
-    dbats_tslice *tslice = ds->tslice[bid];
-    dbats_handler *dh = ds->dh;
-
-    if (!dh->is_open) {
-	*valuepp = NULL;
-	return -1;
-    }
-
-    if (dh->bundle[bid].func != DBATS_AGG_AVG) {
-	dbats_log(DBATS_LOG_ERR, "Aggregation %d is not a double", bid);
-	*valuepp = NULL;
-	return -1;
-    }
-
-    uint32_t frag_id = keyfrag(key_id);
-    uint32_t offset = keyoff(key_id);
-
-    if ((rc = instantiate_frag(ds, bid, frag_id)) == 0) {
-	if (!vec_test(tslice->is_set[frag_id], offset)) {
-	    char keyname[DBATS_KEYLEN] = "";
-	    dbats_get_key_name(dh, ds, key_id, keyname);
-	    dbats_log(DBATS_LOG_WARN, "Value unset (v): %u %d %s",
-		tslice->time, bid, keyname);
-	    *valuepp = NULL;
-	    return DB_NOTFOUND;
-	}
-	*valuepp = (double*)valueptr(ds, bid, frag_id, offset);
 	dbats_log(DBATS_LOG_VFINE, "Succesfully read value off=%" PRIu32 " len=%u",
 	    offset, dh->cfg.entry_size);
 	return 0;

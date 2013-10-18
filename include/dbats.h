@@ -99,7 +99,7 @@
 #define DBATS_AGG_NONE   0 ///< primary bundle, not an aggregate
 #define DBATS_AGG_MIN    1 ///< minimum
 #define DBATS_AGG_MAX    2 ///< maximum
-#define DBATS_AGG_AVG    3 ///< average. Values can be fetched as dbats_value or double.
+#define DBATS_AGG_AVG    3 ///< average. Values will be double.
 #define DBATS_AGG_LAST   4 ///< last
 #define DBATS_AGG_SUM    5 ///< sum
 ///@}
@@ -132,9 +132,11 @@ typedef struct {
     uint32_t period;           ///< Primary sample period in seconds (C)
 } dbats_config;
 
-typedef uint64_t dbats_value;  ///< A value stored in a DBATS database.
-#define PRIval PRIu64          ///< printf() conversion specifier for dbats_value
-#define SCNval SCNu64          ///< scanf() conversion specifier for dbats_value
+/// A value stored in a DBATS database.
+typedef union {
+    uint64_t u64;  ///< 64-bit unsigned integer
+    double d;      ///< double (for DBATS_AGG_AVG)
+} dbats_value;
 
 typedef struct dbats_handler dbats_handler; ///< Opaque handle for a DBATS db
 typedef struct dbats_snapshot dbats_snapshot; ///< Opaque handle for a DBATS snapshot
@@ -234,8 +236,8 @@ extern int dbats_close(dbats_handler *handler);
 /** Defines an aggregate.
  *  Should be called after opening a database with dbats_open() but before
  *  dbats_commit_open(), and before any other process has written
- *  data to the database.  Values for DBATS_AGG_AVG are stored as double; all
- *  other aggregates are stored as @ref dbats_value.
+ *  data to the database.  Values for DBATS_AGG_AVG are stored as
+ *  @c dbats_value.d; all other aggregates are stored as @c dbats_value.u64.
  *
  *  For example, given a primary data bundle with a period of 60s (1 minute),
  *  <code>dbats_aggregate(handler, DBATS_AGG_MAX, 120)</code> will define an
@@ -326,20 +328,24 @@ extern void *dbats_get_userdata(dbats_handler *handler);
  *  <code>start</code>.
  *  Only the primary bundle (0) and bundles with aggregation function
  *  <code>func</code> are considered.
- *  If @c max_points > 0, then bundles that contain more than @c max_points
- *  data values between @c start and @c end are disqualified.
- *  A bundle that starts at or before <code>start</code>
- *  is better than one that doesn't; if two bundles both start after
- *  <code>start</code>, the one that starts earlier is better.
- *  In the event of a tie, the bundle with higher resolution (shorter period)
- *  is better.
+ *  - A bundle that starts at or before <code>start</code>
+ *    is better than one that doesn't; if two bundles both start after
+ *    <code>start</code>, the one that starts earlier is better.
+ *  - In the event of a tie above, if either bundle has more than @c max_points
+ *    points, the bundle with fewer points is better.
+ *  - In the event of a tie above, if neither bundle has more than @c max_points
+ *    points, the bundle with more points is better.
+ *
+ *  Note that it is possible for the selected bundle to have more than @c
+ *  max_points points if there is no other bundle that covers as much of the
+ *  time range.
  *  @param[in] handler A dbats_handler created by dbats_open().
  *  @param[in] func aggregation function
  *  @param[in] start beginning of the time range
  *  @param[in] end end of the time range
- *  @param[in] max_points maximum number of data points allowed
- *  @return the bundle id of the best bundle, or -1 if no bundle meets the
- *    criteria
+ *  @param[in] max_points maximum number of data points wanted.  If @c
+ *    max_points is 0, it is treated as infinite.
+ *  @return the bundle id of the best bundle
  */
 extern int dbats_best_bundle(dbats_handler *handler, uint32_t func,
     uint32_t start, uint32_t end, int max_points);
@@ -474,7 +480,8 @@ extern int dbats_get_key_name(dbats_handler *handler, dbats_snapshot *snap,
  *  @param[in] snap A dbats_snapshot created by dbats_select_snap().
  *  @param[in] key_id the id of the key.
  *  @param[in] valuep a pointer to an array of values_per_entry dbats_value
- *    to be written to the database.
+ *    to be written to the database.  Each dbats_value.u64 should contain a
+ *    value.
  *  @return
  *    - 0 for success;
  *    - EPERM if the handler is not open or was opened with DBATS_READONLY;
@@ -529,24 +536,6 @@ extern int dbats_set_by_key (dbats_snapshot *snap, const char *key,
  */
 extern int dbats_get(dbats_snapshot *snap, uint32_t key_id,
     const dbats_value **valuepp, int bid);
-
-/** Read an array of double values from the database for the specified bundle
- *  id and key and the time selected by dbats_select_snap().
- *  This function can be applied only to DBATS_AGG_AVG values.
- *  @param[in] snap A dbats_snapshot created by dbats_select_snap().
- *  @param[in] key_id the id of the key.
- *  @param[out] valuepp the address of a double*; after the call,
- *    *valuepp will point to an array of values_per_entry double values
- *    read from the database.
- *  @param[in] bid bundle id
- *  @return
- *    - 0 for success;
- *    - DB_NOTFOUND if the key does not exist;
- *    - DB_LOCK_DEADLOCK if the operation was cancelled to resolve a deadlock;
- *    - other nonzero value for other errors.
- */
-extern int dbats_get_double(dbats_snapshot *snap, uint32_t key_id,
-    const double **valuepp, int bid);
 
 /** Read an array of dbats_values from the database for the specified bundle
  *  id and key and the time selected by dbats_select_snap().

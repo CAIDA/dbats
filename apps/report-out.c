@@ -218,57 +218,40 @@ int main(int argc, char *argv[]) {
 		continue;
 	    }
 
-	    if (bundle->func == DBATS_AGG_AVG) {
-		const double *values;
-		for (int k = 0; k < n_keys; k++) {
-		    rc = dbats_get_double(snapshot, keys[k].keyid, &values, bid);
-		    if (rc == DB_NOTFOUND)
-			continue;
-		    if (rc != 0) {
-			fprintf(stderr, "error in dbats_get(%s): rc=%d\n", keys[k].key, rc);
-			dbats_abort_snap(snapshot);
-			break;
-		    }
-		    switch (outtype) {
-		    case OT_TEXT:
-			fprintf(out, "%s ", keys[k].key);
-			for (int j = 0; j < cfg->values_per_entry; j++) {
-			    fprintf(out, "%.3f ", values ? values[j] : 0);
-			}
-			fprintf(out, "%u %d\n", t, bid);
-			break;
-		    case OT_GNUPLOT:
-			fprintf(out, "%u %.3f\n",
-			    t, values ? values[0] : 0);
-			break;
-		    }
+	    const dbats_value *values;
+	    for (int k = 0; k < n_keys; k++) {
+		rc = dbats_get(snapshot, keys[k].keyid, &values, bid);
+		if (rc == DB_NOTFOUND)
+		    continue;
+		if (rc != 0) {
+		    fprintf(stderr, "error in dbats_get(%s): rc=%d\n", keys[k].key, rc);
+		    dbats_abort_snap(snapshot);
+		    break;
 		}
-	    } else {
-		const dbats_value *values;
-		for (int k = 0; k < n_keys; k++) {
-		    rc = dbats_get(snapshot, keys[k].keyid, &values, bid);
-		    if (rc == DB_NOTFOUND)
-			continue;
-		    if (rc != 0) {
-			fprintf(stderr, "error in dbats_get(%s): rc=%d\n", keys[k].key, rc);
-			dbats_abort_snap(snapshot);
-			break;
+		switch (outtype) {
+		case OT_TEXT:
+		    fprintf(out, "%s ", keys[k].key);
+		    if (bundle->func == DBATS_AGG_AVG) {
+			for (int j = 0; j < cfg->values_per_entry; j++)
+			    fprintf(out, "%.3f ", values ? values[j].d : 0);
+		    } else {
+			for (int j = 0; j < cfg->values_per_entry; j++)
+			    fprintf(out, "%" PRIu64 " ", values ? values[j].u64 : 0);
 		    }
-		    switch (outtype) {
-		    case OT_TEXT:
-			fprintf(out, "%s ", keys[k].key);
-			for (int j = 0; j < cfg->values_per_entry; j++) {
-			    fprintf(out, "%" PRIval " ", values ? values[j] : 0);
-			}
-			fprintf(out, "%u %d\n", t, bid);
-			break;
-		    case OT_GNUPLOT:
-			fprintf(out, "%u %" PRIval "\n",
-			    t, values ? values[0] : 0);
-			break;
+		    fprintf(out, "%u %d\n", t, bid);
+		    break;
+		case OT_GNUPLOT:
+		    if (bundle->func == DBATS_AGG_AVG) {
+			fprintf(out, "%u %.3f\n",
+			    t, values ? values[0].d : 0);
+		    } else {
+			fprintf(out, "%u %" PRIu64 "\n",
+			    t, values ? values[0].u64 : 0);
 		    }
+		    break;
 		}
 	    }
+
 	    dbats_commit_snap(snapshot);
 	}
 	if (outtype == OT_GNUPLOT) {

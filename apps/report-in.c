@@ -149,7 +149,7 @@ int main(int argc, char *argv[]) {
 
     if (init_only) {
 	while (1) {
-	    int n = scanf("%127s %" SCNval " %" SCNu32 "\n", key, &value, &t);
+	    int n = scanf("%127s %" SCNu64 " %" SCNu32 "\n", key, &value.u64, &t);
 	    if (n != 3) break;
 
 	    if (n_keys > 0 && t != last_t)
@@ -167,7 +167,7 @@ int main(int argc, char *argv[]) {
     } else {
 	dbats_commit_open(handler); // commit the txn started by dbats_open
 	while (1) {
-	    int n = scanf("%127s %" SCNval " %" SCNu32 "\n", key, &value, &t);
+	    int n = scanf("%127s %" SCNu64 " %" SCNu32 "\n", key, &value.u64, &t);
 	    if (n != 3) break;
 
 	    if (t != last_t) {

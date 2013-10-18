@@ -242,7 +242,7 @@ static int render(request_rec *r)
     ap_log_rerror(APLOG_MARK, APLOG_NOTICE, 0, r, "# max_points: %" PRIu32, max_points);
 
     if (max_points > 0) {
-	bid = dbats_best_bundle(reqstate->dh, DBATS_AGG_SUM, from, until, max_points);
+	bid = dbats_best_bundle(reqstate->dh, DBATS_AGG_AVG, from, until, max_points);
 	if (bid < 0)
 	    return HTTP_NOT_FOUND; // XXX ?
     }
@@ -315,15 +315,15 @@ static int render(request_rec *r)
 	int c;
 	for (c = 0; c < chunks->nelts; c++) {
 	    chunk_t *chunk = &APR_ARRAY_IDX(chunks, c, chunk_t);
-	    const dbats_value *p;
+	    const dbats_value *v;
 	    ap_log_rerror(APLOG_MARK, APLOG_NOTICE, 0, r, "mod_dbats: dbats_get key #%u %s",
 		chunk->keyid, chunk->key);
-	    rc = dbats_get(snap, chunk->keyid, &p, bid);
+	    rc = dbats_get(snap, chunk->keyid, &v, bid);
 	    if (rc == DB_NOTFOUND) {
 		chunk->isset[i] = 0;
 	    } else if (rc == 0) {
 		chunk->isset[i] = 1;
-		chunk->data[i] = p[0];
+		chunk->data[i] = v[0];
 	    } else {
 		dbats_abort_snap(snap);
 		return HTTP_INTERNAL_SERVER_ERROR;
@@ -356,7 +356,10 @@ static int render(request_rec *r)
 	    ap_rprintf(r, "<tr><th>%s</th>\n", ap_escape_html(r->pool, chunk->key));
 	    for (i = 0; i < nsamples; i++) {
 		if (chunk->isset[i]) {
-		    ap_rprintf(r, "<td>%" PRIval "</td>\n", chunk->data[i]);
+		    if (bundle->func == DBATS_AGG_AVG)
+			ap_rprintf(r, "<td>%.17g</td>\n", chunk->data[i].d);
+		    else
+			ap_rprintf(r, "<td>%" PRIu64 "</td>\n", chunk->data[i].u64);
 		}
 	    }
 	    ap_rprintf(r, "</tr>\n");
@@ -379,7 +382,10 @@ static int render(request_rec *r)
 	    int first = 1;
 	    for (i = 0; i < nsamples; i++) {
 		if (chunk->isset[i]) {
-		    ap_rprintf(r, "%s[%" PRIval ", %u]", first ? "" : ", ", chunk->data[i], t);
+		    if (bundle->func == DBATS_AGG_AVG)
+			ap_rprintf(r, "%s[%.17g, %u]", first ? "" : ", ", chunk->data[i].d, t);
+		    else
+			ap_rprintf(r, "%s[%" PRIu64 ", %u]", first ? "" : ", ", chunk->data[i].u64, t);
 		    first = 0;
 		}
 		t += bundle->period;
