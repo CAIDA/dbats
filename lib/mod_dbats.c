@@ -214,6 +214,7 @@ static int render(request_rec *r)
     int bid = 0;
     int i;
     uint32_t from, until, max_points = 0;
+    enum dbats_agg_func agg_func = DBATS_AGG_AVG;
     int nsamples = 0;
     const dbats_bundle_info *bundle = NULL;
 
@@ -221,6 +222,7 @@ static int render(request_rec *r)
     const char *str_from = get_first_param(reqstate->queryparams, "from");
     const char *str_until = get_first_param(reqstate->queryparams, "until");
     const char *str_max_points = get_first_param(reqstate->queryparams, "maxDataPoints");
+    const char *str_agg_func = get_first_param(reqstate->queryparams, "aggFunc");
     const char *format = get_first_param(reqstate->queryparams, "format");
     //const char *logLevel = get_first_param(reqstate->queryparams, "logLevel");
 
@@ -233,6 +235,10 @@ static int render(request_rec *r)
 	max_points = strtol(str_max_points, &p, 10);
 	if (!*str_max_points || *p) return HTTP_BAD_REQUEST;
     }
+    if (str_agg_func) {
+	agg_func = dbats_find_agg_func(str_agg_func);
+	if (agg_func == DBATS_AGG_NONE) return HTTP_BAD_REQUEST;
+    }
 
     for (i = 0; i < targets->nelts; i++)
 	ap_log_rerror(APLOG_MARK, APLOG_NOTICE, 0, r, "# target[%d]: %s", i, APR_ARRAY_IDX(targets, i, char*));
@@ -242,7 +248,7 @@ static int render(request_rec *r)
     ap_log_rerror(APLOG_MARK, APLOG_NOTICE, 0, r, "# max_points: %" PRIu32, max_points);
 
     if (max_points > 0) {
-	bid = dbats_best_bundle(reqstate->dh, DBATS_AGG_AVG, from, until, max_points);
+	bid = dbats_best_bundle(reqstate->dh, agg_func, from, until, max_points);
 	if (bid < 0)
 	    return HTTP_NOT_FOUND; // XXX ?
     }
@@ -357,7 +363,7 @@ static int render(request_rec *r)
 	    for (i = 0; i < nsamples; i++) {
 		if (chunk->isset[i]) {
 		    if (bundle->func == DBATS_AGG_AVG)
-			ap_rprintf(r, "<td>%.17g</td>\n", chunk->data[i].d);
+			ap_rprintf(r, "<td>%.16g</td>\n", chunk->data[i].d);
 		    else
 			ap_rprintf(r, "<td>%" PRIu64 "</td>\n", chunk->data[i].u64);
 		}
@@ -383,7 +389,7 @@ static int render(request_rec *r)
 	    for (i = 0; i < nsamples; i++) {
 		if (chunk->isset[i]) {
 		    if (bundle->func == DBATS_AGG_AVG)
-			ap_rprintf(r, "%s[%.17g, %u]", first ? "" : ", ", chunk->data[i].d, t);
+			ap_rprintf(r, "%s[%.16g, %u]", first ? "" : ", ", chunk->data[i].d, t);
 		    else
 			ap_rprintf(r, "%s[%" PRIu64 ", %u]", first ? "" : ", ", chunk->data[i].u64, t);
 		    first = 0;
