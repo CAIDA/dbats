@@ -794,7 +794,7 @@ int dbats_open(dbats_handler **dhp,
     if (is_new) {
 	// initialize metadata for time series bundles
 	memset(&dh->bundle[0], 0, sizeof(dbats_bundle_info));
-	dh->bundle[0].func = DBATS_AGG_NONE;
+	dh->bundle[0].func = DBATS_AGG_DATA;
 	dh->bundle[0].steps = 1;
 	dh->bundle[0].period = dh->cfg.period;
 	dh->cfg.num_bundles = 1;
@@ -840,12 +840,15 @@ abort:
     return rc;
 }
 
-int dbats_aggregate(dbats_handler *dh, int func, int steps)
+int dbats_aggregate(dbats_handler *dh, enum dbats_agg_func func, int steps)
 {
     int rc;
 
     if (dh->cfg.readonly)
 	return EPERM;
+
+    if (func <= DBATS_AGG_DATA || func >= DBATS_AGG_N)
+	return EINVAL;
 
     // We don't need this value, but it locks against other threads/processes
     // calling dbats_select_snap() or dbats_aggregate().
@@ -885,6 +888,16 @@ int dbats_aggregate(dbats_handler *dh, int func, int steps)
 
     dh->cfg.num_bundles++;
     return 0;
+}
+
+enum dbats_agg_func dbats_find_agg_func(const char *name)
+{
+    enum dbats_agg_func func;
+    for (func = DBATS_AGG_DATA + 1; func < DBATS_AGG_N; func++) {
+	if (strcmp(dbats_agg_func_label[func], name) == 0)
+	    return func;
+    }
+    return DBATS_AGG_NONE;
 }
 
 int dbats_get_start_time(dbats_handler *dh, dbats_snapshot *ds, int bid, uint32_t *start)
@@ -958,7 +971,8 @@ int dbats_get_end_time(dbats_handler *dh, dbats_snapshot *ds, int bid, uint32_t 
     return rc;
 }
 
-int dbats_best_bundle(dbats_handler *dh, uint32_t func, uint32_t start, uint32_t end, int max_points)
+int dbats_best_bundle(dbats_handler *dh, enum dbats_agg_func func,
+    uint32_t start, uint32_t end, int max_points)
 {
     typedef struct {
 	int bid;

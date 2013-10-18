@@ -94,17 +94,19 @@
 #define DBATS_GLOB         0x0200 // allow glob
 ///@}
 
-/** @name Aggregation functions */
-///@{
-#define DBATS_AGG_NONE   0 ///< primary bundle, not an aggregate
-#define DBATS_AGG_MIN    1 ///< minimum
-#define DBATS_AGG_MAX    2 ///< maximum
-#define DBATS_AGG_AVG    3 ///< average. Values will be double.
-#define DBATS_AGG_LAST   4 ///< last
-#define DBATS_AGG_SUM    5 ///< sum
-///@}
+/** Aggregation function identifiers */
+enum dbats_agg_func {
+    DBATS_AGG_NONE = -1, ///< unknown
+    DBATS_AGG_DATA,      ///< primary data value (not an aggregate)
+    DBATS_AGG_MIN,       ///< minimum value
+    DBATS_AGG_MAX,       ///< maximum value
+    DBATS_AGG_AVG,       ///< average of values (double)
+    DBATS_AGG_LAST,      ///< last value (i.e., with greatest timestamp)
+    DBATS_AGG_SUM,       ///< sum of values
+    DBATS_AGG_N          // size of enum dbats_agg_func
+};
 
-/// Labels for aggregation functions
+/// Labels for aggregation functions (e.g. dbats_agg_func_label[@ref DBATS_AGG_MIN] is "min")
 extern const char *dbats_agg_func_label[];
 
 /// Time series bundle parameters (read only).
@@ -245,18 +247,20 @@ extern int dbats_close(dbats_handler *handler);
  *  of 120 primary values (2 hours).
  *
  *  @param[in] handler A dbats_handler created by dbats_open().
- *  @param[in] func one of the following values indicating which aggregation
- *    function to apply to the data points:
- *    - DBATS_AGG_MIN - minimum value (does not work with DBATS_UPDATABLE)
- *    - DBATS_AGG_MAX - maximum value (does not work with DBATS_UPDATABLE)
- *    - DBATS_AGG_AVG - average of values
- *    - DBATS_AGG_LAST - last value (i.e., with greatest timestamp)
- *    - DBATS_AGG_SUM - sum of values
+ *  @param[in] func a @ref dbats_agg_func indicating which aggregation
+ *    function to apply to the data points.
  *  @param[in] steps number of primary data points to include in an aggregate
  *    point
  *  @return 0 for success, nonzero for error.
  */
-extern int dbats_aggregate(dbats_handler *handler, int func, int steps);
+extern int dbats_aggregate(dbats_handler *handler, enum dbats_agg_func func, int steps);
+
+/** Look up an aggregate function by name.
+ *  @param[in] name the name of an aggregate function
+ *  @return the @ref dbats_agg_func function id, or @ref DBATS_AGG_NONE if
+ *    no match is found
+ */
+extern enum dbats_agg_func dbats_find_agg_func(const char *name);
 
 /** Get the earliest timestamp in a time series bundle.
  *  At least one key in the bundle will have a value at the start time.
@@ -347,7 +351,7 @@ extern void *dbats_get_userdata(dbats_handler *handler);
  *    max_points is 0, it is treated as infinite.
  *  @return the bundle id of the best bundle
  */
-extern int dbats_best_bundle(dbats_handler *handler, uint32_t func,
+extern int dbats_best_bundle(dbats_handler *handler, enum dbats_agg_func func,
     uint32_t start, uint32_t end, int max_points);
 
 /** Round a time value down to a multiple of a bundle's period.

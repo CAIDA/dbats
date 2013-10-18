@@ -17,7 +17,6 @@ static void help(void) {
 int main(int argc, char *argv[]) {
     char *dbats_path;
     dbats_handler *handler;
-    int func;
     int open_flags = DBATS_READONLY;
     progname = argv[0];
 
@@ -55,11 +54,8 @@ int main(int argc, char *argv[]) {
 	maxPoints = atoi(argv[4]);
     }
 
-    for (func = DBATS_AGG_SUM; func > 0; func--) {
-	if (strcmp(dbats_agg_func_label[func], funcstr) == 0)
-	    break;
-    }
-    if (func == 0) {
+    enum dbats_agg_func func = dbats_find_agg_func(funcstr);
+    if (func == DBATS_AGG_NONE) {
 	fprintf(stderr, "unknown function '%s'\n", funcstr);
 	exit(-1);
     }
