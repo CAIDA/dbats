@@ -378,12 +378,12 @@ static int render(request_rec *r)
 	ap_set_content_type(r, "application/json");
 	int n = 0;
 
-	ap_rprintf(r, "[");
+	ap_rprintf(r, "[\n");
 	int c;
 	for (c = 0; c < chunks->nelts; c++) {
 	    chunk_t *chunk = &APR_ARRAY_IDX(chunks, c, chunk_t);
 	    ap_rprintf(r, "%s{\"target\": \"%s\", \"datapoints\": [",
-		n>0 ? ", " : "", ap_escape_quotes(r->pool, chunk->key));
+		n>0 ? ",\n" : "", ap_escape_quotes(r->pool, chunk->key));
 	    t = from;
 	    int first = 1;
 	    for (i = 0; i < nsamples; i++) {
@@ -399,7 +399,7 @@ static int render(request_rec *r)
 	    ap_rprintf(r, "]}");
 	    n++;
 	}
-	ap_rprintf(r, "]\n");
+	ap_rprintf(r, "\n]\n");
     }
 
     return result;
@@ -496,12 +496,12 @@ static void *merge_dir_conf(apr_pool_t *pool, void *vbase, void *vadd)
 
 static void register_hooks(apr_pool_t *pool)
 {
-    int major, minor;
-    db_version(&major, &minor, NULL);
-    if (major != DB_VERSION_MAJOR || minor != DB_VERSION_MINOR) {
+    int major, minor, patch;
+    db_version(&major, &minor, &patch);
+    if (major != DB_VERSION_MAJOR || minor != DB_VERSION_MINOR || patch != DB_VERSION_PATCH) {
 	ap_log_perror(APLOG_MARK, APLOG_WARNING, 0, pool,
-	    "mod_dbats: libdb %d.%d != db.h %d.%d",
-	    major, minor, DB_VERSION_MAJOR, DB_VERSION_MINOR);
+	    "mod_dbats: libdb %d.%d.%d != db.h %d.%d.%d",
+	    major, minor, patch, DB_VERSION_MAJOR, DB_VERSION_MINOR, DB_VERSION_PATCH);
 	return;
     }
 
