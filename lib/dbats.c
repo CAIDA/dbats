@@ -197,10 +197,12 @@ const char *dbats_agg_func_label[] = {
 
 // Construct a DBT for sending data to DB.
 #define DBT_init_in(_var, _data, _size) \
-    memset(&_var, 0, sizeof(DBT)); \
-    _var.data = _data; \
-    _var.size = _size; \
-    _var.flags = DB_DBT_USERMEM
+    do { \
+	memset(&_var, 0, sizeof(DBT)); \
+	_var.data = _data; \
+	_var.size = _size; \
+	_var.flags = DB_DBT_USERMEM; \
+    } while (0)
 
 // Construct a DBT for sending data to DB.
 #define DBT_in(_var, _data, _size) DBT _var; DBT_init_in(_var, _data, _size)
@@ -208,10 +210,12 @@ const char *dbats_agg_func_label[] = {
 
 // Construct a DBT for receiving data from DB.
 #define DBT_init_out(_var, _data, _ulen) \
-    memset(&_var, 0, sizeof(DBT)); \
-    _var.data = _data; \
-    _var.ulen = _ulen; \
-    _var.flags = DB_DBT_USERMEM
+    do { \
+	memset(&_var, 0, sizeof(DBT)); \
+	_var.data = _data; \
+	_var.ulen = _ulen; \
+	_var.flags = DB_DBT_USERMEM; \
+    } while (0)
 
 // Construct a DBT for receiving data from DB.
 #define DBT_out(_var, _data, _ulen) DBT _var; DBT_init_out(_var, _data, _ulen)
@@ -219,8 +223,10 @@ const char *dbats_agg_func_label[] = {
 
 // Construct a DBT for receiving nothing from DB.
 #define DBT_init_null(_var) \
-    memset(&_var, 0, sizeof(DBT)); \
-    _var.flags = DB_DBT_PARTIAL
+    do { \
+	memset(&_var, 0, sizeof(DBT)); \
+	_var.flags = DB_DBT_USERMEM | DB_DBT_PARTIAL; \
+    } while (0)
 
 // Construct a DBT for receiving nothing from DB.
 #define DBT_null(_var) DBT _var; DBT_init_null(_var)
@@ -539,7 +545,14 @@ int dbats_open(dbats_handler **dhp,
     uint32_t flags,
     int mode)
 {
-    dbats_log(DBATS_LOG_CONFIG, "db_version: '%s'", db_version(0,0,0));
+    int major, minor, patch;
+    char *version = db_version(&major, &minor, &patch);
+    dbats_log(DBATS_LOG_CONFIG, "db_version: '%s'", version);
+    if (major != DB_VERSION_MAJOR || minor != DB_VERSION_MINOR || patch != DB_VERSION_PATCH) {
+	dbats_log(DBATS_LOG_ERR, "BDB version mismatch: libdb %d.%d.%d != db.h %d.%d.%d",
+	    major, minor, patch, DB_VERSION_MAJOR, DB_VERSION_MINOR, DB_VERSION_PATCH);
+	return DB_VERSION_MISMATCH;
+    }
 
     if (!HAVE_DB_SET_LK_EXCLUSIVE && (flags & DBATS_EXCLUSIVE)) {
 	dbats_log(DBATS_LOG_ERR,
@@ -1757,6 +1770,7 @@ abort:
     return rc;
 
 retry:
+    dbats_log(DBATS_LOG_FINE, "select_snap %u: retry", time_value);
     dbats_abort_snap(*dsp); // snapshot txn
     goto restart;
 }
@@ -2660,7 +2674,13 @@ int dbats_walk_keyid_next(dbats_keyid_iterator *dki, uint32_t *key_id_p,
     db_recno_t recno;
 
     DBT_out(dbt_keyrecno, &recno, sizeof(recno));
-    DBT_out(dbt_keyname, namebuf, DBATS_KEYLEN-1);
+    DBT dbt_keyname;
+    if (namebuf) {
+	DBT_init_out(dbt_keyname, namebuf, DBATS_KEYLEN-1);
+    } else {
+	DBT_init_null(dbt_keyname);
+    }
+
     rc = raw_cursor_get(&dki->cursor, &dbt_keyrecno, &dbt_keyname,
 	DB_NEXT | DB_READ_COMMITTED);
     if (rc != 0) {
