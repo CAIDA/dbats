@@ -44,14 +44,12 @@ static void print_time(const char *label, time_t t)
 int main(int argc, char *argv[]) {
     char *dbats_path;
     dbats_handler *handler;
-    uint32_t period = 60;
     int open_flags = DBATS_READONLY;
     int opt_summary = 0;
     int opt_keys = 0;
     char *keyglob = NULL;
     progname = argv[0];
     int rc = 0;
-    const dbats_config *cfg;
 
     int c;
     while ((c = getopt(argc, argv, "v:xtaskK:")) != -1) {
@@ -93,13 +91,12 @@ int main(int argc, char *argv[]) {
 	help();
     dbats_path = argv[0];
 
-    if (dbats_open(&handler, dbats_path, 1, period, open_flags, 0) != 0)
+    if (dbats_open(&handler, dbats_path, 1, 0, open_flags, 0) != 0)
 	return -1;
     dbats_commit_open(handler);
 
-    cfg = dbats_get_config(handler);
-
     if (opt_summary) {
+	const dbats_config *cfg = dbats_get_config(handler);
 	printf("dbats database version: %d\n", cfg->version);
 	printf("values_per_entry: %d\n", cfg->values_per_entry);
 	printf("entry_size: %d bytes\n", cfg->entry_size);
