@@ -91,14 +91,17 @@ static inline char *get_first_param(apr_table_t *queryparams, const char *key)
 typedef struct {
     apr_table_t *queryparams;
     dbats_handler *dh;
+    dbats_snapshot *snap;
+    dbats_keytree_iterator *dki;
+    int dbats_status;
+    int http_status;
 } mod_dbats_reqstate;
 
-static int metrics_find(request_rec *r)
+static void metrics_find(request_rec *r)
 {
     mod_dbats_reqstate *reqstate = (mod_dbats_reqstate*)
 	ap_get_module_config(r->request_config, &dbats_module);
 
-    int result = OK;
     int rc;
 
     const char *query = get_first_param(reqstate->queryparams, "query");
@@ -107,14 +110,15 @@ static int metrics_find(request_rec *r)
 
     ap_log_rerror(APLOG_MARK, APLOG_NOTICE, 0, r, "# query: %s", query);
 
-    dbats_keytree_iterator *dki;
     uint32_t keyid;
     char name[DBATS_KEYLEN];
 
-    rc = dbats_glob_keyname_start(reqstate->dh, NULL, &dki, query);
+    rc = dbats_glob_keyname_start(reqstate->dh, NULL, &reqstate->dki, query);
     if (rc != 0) {
 	ap_log_rerror(APLOG_MARK, APLOG_NOTICE, 0, r, "mod_dbats: dbats_glob_keyname_start: %s", db_strerror(rc));
-	return HTTP_INTERNAL_SERVER_ERROR;
+	reqstate->dbats_status = rc;
+	reqstate->dki = NULL;
+	return;
     }
 
     if (format && strcmp(format, "html") == 0) {
@@ -127,7 +131,7 @@ static int metrics_find(request_rec *r)
 	ap_rprintf(r, "<body>\n");
 	ap_rprintf(r, "<h1>DBATS key query</h1>\n");
 	ap_rprintf(r, "<ul>\n");
-	while ((rc = dbats_glob_keyname_next(dki, &keyid, name)) == 0) {
+	while ((rc = dbats_glob_keyname_next(reqstate->dki, &keyid, name)) == 0) {
 	    ap_rprintf(r, "<li>%s\n", ap_escape_html(r->pool, name));
 	}
 	ap_rprintf(r, "</ul>\n");
@@ -138,7 +142,7 @@ static int metrics_find(request_rec *r)
 	ap_set_content_type(r, "application/json");
 	int n = 0;
 	ap_rprintf(r, "[");
-	while ((rc = dbats_glob_keyname_next(dki, &keyid, name)) == 0) {
+	while ((rc = dbats_glob_keyname_next(reqstate->dki, &keyid, name)) == 0) {
 	    const char *ename = ap_escape_quotes(r->pool, name);
 	    const char *lastpart = strrchr(ename, '.');
 	    lastpart = lastpart ? lastpart + 1 : ename;
@@ -157,36 +161,35 @@ static int metrics_find(request_rec *r)
     if (rc != DB_NOTFOUND) {
 	ap_log_rerror(APLOG_MARK, APLOG_NOTICE, 0, r,
 	    "mod_dbats: dbats_glob_keyname_next: %s", db_strerror(rc));
-	result = HTTP_INTERNAL_SERVER_ERROR;
+	reqstate->dbats_status = rc;
     }
 
-    dbats_glob_keyname_end(dki);
-
-    return result;
+    dbats_glob_keyname_end(reqstate->dki);
+    reqstate->dki = NULL;
 }
 
-static int metrics_index(request_rec *r)
+static void metrics_index(request_rec *r)
 {
     mod_dbats_reqstate *reqstate = (mod_dbats_reqstate*)
 	ap_get_module_config(r->request_config, &dbats_module);
 
-    int result = OK;
     int rc;
 
-    dbats_keytree_iterator *dki;
     uint32_t keyid;
     char name[DBATS_KEYLEN];
 
-    rc = dbats_glob_keyname_start(reqstate->dh, NULL, &dki, NULL);
+    rc = dbats_glob_keyname_start(reqstate->dh, NULL, &reqstate->dki, NULL);
     if (rc != 0) {
 	ap_log_rerror(APLOG_MARK, APLOG_NOTICE, 0, r, "mod_dbats: dbats_glob_keyname_start: %s", db_strerror(rc));
-	return HTTP_INTERNAL_SERVER_ERROR;
+	reqstate->dbats_status = rc;
+	reqstate->dki = NULL;
+	return;
     }
 
     ap_set_content_type(r, "application/json");
     int n = 0;
     ap_rprintf(r, "[");
-    while ((rc = dbats_glob_keyname_next(dki, &keyid, name)) == 0) {
+    while ((rc = dbats_glob_keyname_next(reqstate->dki, &keyid, name)) == 0) {
 	ap_rprintf(r, "%s\n    \"%s\"",
 	    n ? "," : "", ap_escape_quotes(r->pool, name));
 	n++;
@@ -196,20 +199,18 @@ static int metrics_index(request_rec *r)
     if (rc != DB_NOTFOUND) {
 	ap_log_rerror(APLOG_MARK, APLOG_NOTICE, 0, r,
 	    "mod_dbats: dbats_glob_keyname_next: %s", db_strerror(rc));
-	result = HTTP_INTERNAL_SERVER_ERROR;
+	reqstate->dbats_status = rc;
     }
 
-    dbats_glob_keyname_end(dki);
-
-    return result;
+    dbats_glob_keyname_end(reqstate->dki);
+    reqstate->dki = NULL;
 }
 
-static int render(request_rec *r)
+static void render(request_rec *r)
 {
     mod_dbats_reqstate *reqstate = (mod_dbats_reqstate*)
 	ap_get_module_config(r->request_config, &dbats_module);
 
-    int result = OK;
     int rc;
     int bid = 0;
     int i;
@@ -226,19 +227,21 @@ static int render(request_rec *r)
     const char *format = get_first_param(reqstate->queryparams, "format");
     //const char *logLevel = get_first_param(reqstate->queryparams, "logLevel");
 
+    reqstate->http_status = HTTP_BAD_REQUEST;
     char *p;
     from = strtol(str_from, &p, 10);
-    if (!*str_from || *p) return HTTP_BAD_REQUEST;
+    if (!*str_from || *p) return;
     until = strtol(str_until, &p, 10);
-    if (!*str_until || *p) return HTTP_BAD_REQUEST;
+    if (!*str_until || *p) return;
     if (str_max_points) {
 	max_points = strtol(str_max_points, &p, 10);
-	if (!*str_max_points || *p) return HTTP_BAD_REQUEST;
+	if (!*str_max_points || *p) return;
     }
     if (str_agg_func) {
 	agg_func = dbats_find_agg_func(str_agg_func);
-	if (agg_func == DBATS_AGG_NONE) return HTTP_BAD_REQUEST;
+	if (agg_func == DBATS_AGG_NONE) return;
     }
+    reqstate->http_status = OK;
 
     for (i = 0; i < targets->nelts; i++)
 	ap_log_rerror(APLOG_MARK, APLOG_NOTICE, 0, r, "# target[%d]: %s", i, APR_ARRAY_IDX(targets, i, char*));
@@ -249,8 +252,6 @@ static int render(request_rec *r)
 
     if (max_points > 0) {
 	bid = dbats_best_bundle(reqstate->dh, agg_func, from, until, max_points);
-	if (bid < 0)
-	    return HTTP_NOT_FOUND; // XXX ?
     }
 
     dbats_normalize_time(reqstate->dh, bid, &from);
@@ -266,7 +267,8 @@ static int render(request_rec *r)
     } else if (rc == DB_NOTFOUND) {
 	from = until = 0;
     } else {
-	return HTTP_INTERNAL_SERVER_ERROR;
+	reqstate->dbats_status = HTTP_INTERNAL_SERVER_ERROR;
+	return;
     }
 
     bundle = dbats_get_bundle_info(reqstate->dh, bid);
@@ -280,20 +282,21 @@ static int render(request_rec *r)
     } chunk_t;
 
     // get keys
-    dbats_keytree_iterator *dki;
     char key[DBATS_KEYLEN];
     uint32_t keyid;
 
     apr_array_header_t *chunks = apr_array_make(r->pool, targets->nelts + 3, sizeof(chunk_t));
     for (i = 0; i < targets->nelts; i++) {
 	const char *target = APR_ARRAY_IDX(targets, i, char*);
-	rc = dbats_glob_keyname_start(reqstate->dh, NULL, &dki, target);
+	rc = dbats_glob_keyname_start(reqstate->dh, NULL, &reqstate->dki, target);
 	if (rc != 0) {
 	    ap_log_rerror(APLOG_MARK, APLOG_NOTICE, 0, r,
 		"mod_dbats: dbats_glob_keyname_start: %s", db_strerror(rc));
-	    return HTTP_INTERNAL_SERVER_ERROR;
+	    reqstate->dbats_status = rc;
+	    reqstate->dki = NULL;
+	    return;
 	}
-	while ((rc = dbats_glob_keyname_next(dki, &keyid, key)) == 0) {
+	while ((rc = dbats_glob_keyname_next(reqstate->dki, &keyid, key)) == 0) {
 	    chunk_t *chunk = (chunk_t*)apr_array_push(chunks);
 	    chunk->keyid = keyid;
 	    chunk->key = apr_pstrdup(r->pool, key);
@@ -305,38 +308,44 @@ static int render(request_rec *r)
 	if (rc != DB_NOTFOUND) {
 	    ap_log_rerror(APLOG_MARK, APLOG_NOTICE, 0, r,
 		"mod_dbats: dbats_glob_keyname_next: %s", db_strerror(rc));
-	    result = HTTP_INTERNAL_SERVER_ERROR;
+	    reqstate->dbats_status = rc;
+	    return;
 	}
-	dbats_glob_keyname_end(dki);
-	if (result != OK) return result;
+	dbats_glob_keyname_end(reqstate->dki);
+	reqstate->dki = NULL;
+	if (reqstate->dbats_status != 0) return;
     }
 
     // get data
     uint32_t t = from;
-    dbats_snapshot *snap;
     for (i = 0; i < nsamples; i++) {
-	rc = dbats_select_snap(reqstate->dh, &snap, t, 0);
-	if (rc != 0)
-	    return HTTP_INTERNAL_SERVER_ERROR;
+	rc = dbats_select_snap(reqstate->dh, &reqstate->snap, t, 0);
+	if (rc != 0) {
+	    reqstate->dbats_status = rc;
+	    return;
+	}
 	int c;
 	for (c = 0; c < chunks->nelts; c++) {
 	    chunk_t *chunk = &APR_ARRAY_IDX(chunks, c, chunk_t);
 	    const dbats_value *v;
 	    ap_log_rerror(APLOG_MARK, APLOG_NOTICE, 0, r, "mod_dbats: dbats_get key #%u %s",
 		chunk->keyid, chunk->key);
-	    rc = dbats_get(snap, chunk->keyid, &v, bid);
+	    rc = dbats_get(reqstate->snap, chunk->keyid, &v, bid);
 	    if (rc == DB_NOTFOUND) {
 		chunk->isset[i] = 0;
 	    } else if (rc == 0) {
 		chunk->isset[i] = 1;
 		chunk->data[i] = v[0];
 	    } else {
-		dbats_abort_snap(snap);
-		return HTTP_INTERNAL_SERVER_ERROR;
+		dbats_abort_snap(reqstate->snap);
+		reqstate->snap = NULL;
+		reqstate->dbats_status = rc;
+		return;
 	    }
 	}
 	t += bundle->period;
-	dbats_commit_snap(snap);
+	dbats_commit_snap(reqstate->snap);
+	reqstate->snap = NULL;
     }
 
     // print data
@@ -401,8 +410,6 @@ static int render(request_rec *r)
 	}
 	ap_rprintf(r, "\n]\n");
     }
-
-    return result;
 }
 
 static int ends_with(const char *s, const char *w)
@@ -432,17 +439,20 @@ static int req_handler(request_rec *r)
 
     // create request state
     mod_dbats_reqstate *reqstate = apr_pcalloc(r->pool, sizeof(*reqstate));
+    reqstate->http_status = OK;
+    reqstate->dbats_status = 0;
     ap_set_module_config(r->request_config, &dbats_module, reqstate);
 
     // parse query parameters
     args_to_table(r, &reqstate->queryparams);
 
-    // get dbats_handler for cfg->path
+    // get dbats_handler for this {process, cfg->path}
     apr_thread_mutex_lock(procstate.mutex);
     reqstate->dh = (dbats_handler*)apr_hash_get(procstate.dht, cfg->path, APR_HASH_KEY_STRING);
     if (reqstate->dh) {
 	apr_thread_mutex_unlock(procstate.mutex);
     } else {
+	reopen:
 	ap_log_rerror(APLOG_MARK, APLOG_NOTICE, 0, r, "######## mod_dbats: dbats_open %s", cfg->path);
 	int rc = dbats_open(&reqstate->dh, cfg->path, 1, 60, DBATS_READONLY, 0);
 	if (rc != 0) {
@@ -460,13 +470,46 @@ static int req_handler(request_rec *r)
 
     // dispatch request
     if (ends_with(r->uri, "/metrics/find/")) {
-	return metrics_find(r);
+	metrics_find(r);
     } else if (ends_with(r->uri, "/metrics/index.json")) {
-	return metrics_index(r);
+	metrics_index(r);
     } else if (ends_with(r->uri, "/render/")) {
-	return render(r);
+	render(r);
     } else {
 	return HTTP_NOT_FOUND;
+    }
+
+    // clean up
+    if (reqstate->dki) {
+	dbats_glob_keyname_end(reqstate->dki);
+	reqstate->dki = NULL;
+    }
+    if (reqstate->snap) {
+	dbats_abort_snap(reqstate->snap);
+	reqstate->snap = NULL;
+    }
+
+    // handle result
+    if (reqstate->dbats_status == 0) {
+	return reqstate->http_status;
+
+    } else if (reqstate->dbats_status == DB_NOTFOUND) {
+	return HTTP_NOT_FOUND;
+
+    } else if (reqstate->dbats_status == DB_RUNRECOVERY) {
+	// Since we're readonly, we can't do the recovery, but if database was
+	// recovered externally, we have to reopen it to use it.
+	ap_log_rerror(APLOG_MARK, APLOG_WARNING, 0, r, "######## attempting to reopen db");
+	if (reqstate->dh)
+	    apr_pool_cleanup_run(r->pool, reqstate->dh, mod_dbats_close);
+	apr_thread_mutex_lock(procstate.mutex);
+	apr_hash_set(procstate.dht, cfg->path, APR_HASH_KEY_STRING, NULL);
+	reqstate->http_status = OK;
+	reqstate->dbats_status = 0;
+	goto reopen;
+
+    } else {
+	return HTTP_INTERNAL_SERVER_ERROR;
     }
 }
 
