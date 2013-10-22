@@ -534,6 +534,34 @@ static int write_bundle_info(dbats_handler *dh, dbats_snapshot *ds, int bid)
 
 /*************************************************************************/
 
+static int make_file_writable(const char *filename)
+{
+    int fd;
+    struct stat statbuf;
+
+    fd = open(filename, 0, 0);
+    if (fd < 0) {
+	if (errno == ENOENT) return errno;
+	dbats_log(DBATS_LOG_ERR, "Error opening %s: %s", filename, strerror(errno));
+	return errno;
+    }
+    if (fstat(fd, &statbuf) < 0) {
+	dbats_log(DBATS_LOG_ERR, "fstat %s: %s", filename, strerror(errno));
+	return errno;
+    }
+    mode_t newmode = statbuf.st_mode;
+    if (newmode & S_IRUSR) newmode |= S_IWUSR;
+    if (newmode & S_IRGRP) newmode |= S_IWGRP;
+    if (newmode & S_IROTH) newmode |= S_IWOTH;
+    if (newmode == statbuf.st_mode) return 0; // no change
+    dbats_log(DBATS_LOG_INFO, "%s mode %03o -> %03o", filename, statbuf.st_mode, newmode);
+    if (fchmod(fd, newmode) < 0) {
+	dbats_log(DBATS_LOG_ERR, "fchmod %s: %s", filename, strerror(errno));
+	return errno;
+    }
+    return 0;
+}
+
 // Warning: never open the same dbats more than once in the same process,
 // because there must be only one DB_ENV per environment per process when
 // using DB_REGISTER.
@@ -561,7 +589,8 @@ int dbats_open(dbats_handler **dhp,
     }
 
     int rc;
-    uint32_t dbflags = DB_THREAD | DB_INIT_MPOOL | DB_INIT_LOCK | DB_INIT_LOG | DB_INIT_TXN;
+    uint32_t dbflags = DB_THREAD | DB_INIT_MPOOL | DB_INIT_LOCK | DB_INIT_LOG |
+	DB_INIT_TXN | DB_REGISTER;
     int is_new = 0;
 
     dbats_handler *dh = ecalloc(1, sizeof(dbats_handler), "dh");
@@ -576,7 +605,7 @@ int dbats_open(dbats_handler **dhp,
     dh->path = path;
 
     if (!dh->cfg.readonly) {
-	dbflags |= DB_REGISTER | DB_RECOVER | DB_CREATE;
+	dbflags |= DB_RECOVER | DB_CREATE;
     }
 
     if ((rc = db_env_create(&dh->dbenv, 0)) != 0) {
@@ -588,9 +617,10 @@ int dbats_open(dbats_handler **dhp,
     dh->dbenv->set_errpfx(dh->dbenv, dh->path);
     dh->dbenv->set_errfile(dh->dbenv, stderr);
 
-    dh->dbenv->set_verbose(dh->dbenv,
-	DB_VERB_FILEOPS | DB_VERB_RECOVERY | DB_VERB_REGISTER, 1);
     dh->dbenv->set_msgfile(dh->dbenv, stderr);
+    dh->dbenv->set_verbose(dh->dbenv, DB_VERB_FILEOPS, 1);
+    dh->dbenv->set_verbose(dh->dbenv, DB_VERB_RECOVERY, 1);
+    dh->dbenv->set_verbose(dh->dbenv, DB_VERB_REGISTER, 1);
 
     if ((flags & DBATS_NO_TXN) && (flags & DBATS_EXCLUSIVE)) {
 	dbats_log(DBATS_LOG_ERR,
@@ -694,38 +724,6 @@ int dbats_open(dbats_handler **dhp,
     if ((rc = dh->dbenv->open(dh->dbenv, path, dbflags, mode)) != 0) {
 	dbats_log(DBATS_LOG_ERR, "Error opening DB %s: %s", path, db_strerror(rc));
 	return rc;
-    }
-
-    if (is_new) {
-	// If we want other users to be able to read the db, we have to give
-	// them write permission on the environment's "__db.###" shared memory
-	// region files.
-	char filename[PATH_MAX];
-	int fd;
-	struct stat statbuf;
-	for (int i = 1; ; i++) {
-	    sprintf(filename, "%s/__db.%03d", path, i);
-	    fd = open(filename, 0, 0);
-	    if (fd < 0) {
-		if (errno == ENOENT) break;
-		dbats_log(DBATS_LOG_ERR, "Error opening %s: %s", filename, strerror(errno));
-		continue;
-	    }
-	    if (fstat(fd, &statbuf) < 0) {
-		dbats_log(DBATS_LOG_ERR, "fstat %s: %s", filename, strerror(errno));
-		continue;
-	    }
-	    mode_t newmode = statbuf.st_mode;
-	    if (newmode & S_IRUSR) newmode |= S_IWUSR;
-	    if (newmode & S_IRGRP) newmode |= S_IWGRP;
-	    if (newmode & S_IROTH) newmode |= S_IWOTH;
-	    if (newmode == statbuf.st_mode) continue; // no change
-	    dbats_log(DBATS_LOG_INFO, "%s mode %03o -> %03o", filename, statbuf.st_mode, newmode);
-	    if (fchmod(fd, newmode) < 0) {
-		dbats_log(DBATS_LOG_ERR, "fchmod %s: %s", filename, strerror(errno));
-		continue;
-	    }
-	}
     }
 
     const char *dirname;
@@ -842,6 +840,20 @@ int dbats_open(dbats_handler **dhp,
 	    }
 	    dh->cfg.num_bundles = bid + 1;
 	}
+    }
+
+    if (!dh->cfg.readonly) {
+	// If we want other users to be able to read the db, we have to give
+	// them write permission on the environment's "__db.###" shared memory
+	// region files and "__db.register" file, whenever these files are
+	// created (i.e., when creating a new DB, or recovering a corrupt DB).
+	char filename[PATH_MAX];
+	for (int i = 1; ; i++) {
+	    sprintf(filename, "%s/__db.%03d", path, i);
+	    if (make_file_writable(filename) != 0) break;
+	}
+	sprintf(filename, "%s/__db.register", path);
+	make_file_writable(filename);
     }
 
     dh->is_open = 1;
