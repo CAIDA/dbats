@@ -1259,7 +1259,7 @@ static int flush_tslice(dbats_snapshot *ds, int bid)
 
 	    uint32_t ones = 0; // # of leading "1" bits
 	    int zeroes = 0; // have any "0"s been seen?
-	    int matches = 1; // bit string matches regexp "1*0*"?
+	    int matches = 1; // bit string matches regexp "^1*0*$"?
 	    for (int i = 0; i < vec_size(ENTRIES_PER_FRAG); i++) {
 		uint8_t byte = ds->tslice[bid]->is_set[f][i];
 		if (zeroes) { if (!(matches = !byte)) break; }
