@@ -76,7 +76,7 @@
 
 /* ************************************************** */
 
-#define DBATS_DB_VERSION     8   ///< Version of db format written by this API
+#define DBATS_DB_VERSION     9   ///< Version of db format written by this API
 
 #define DBATS_KEYLEN         128 ///< max length of key name
 #define DBATS_KEY_IS_PREFIX  0x80000000
@@ -118,20 +118,22 @@ typedef struct {
 } dbats_bundle_info;
 
 /** Configuration parameters (read only).
- *  Fields marked "(C)" are fixed when the database is created;
- *  fields marked "(O)" are fixed when the database is opened.
+ *  Fields marked "(C)" are properties of the database and are permanently set
+ *  when the database is first created.  Other fields are properites of an
+ *  individual dbats_handle, set each time a database is opened, and do not
+ *  affect other dbats_handles opened by other threads or processes.
  */
 typedef struct {
     uint32_t version;          ///< Version of db format (C)
-    uint8_t readonly;          ///< Disallow writing to db (O)
-    uint8_t compress;          ///< Compress data written to db (O)
-    uint8_t exclusive;         ///< Obtain exclusive lock on whole db (O)
-    uint8_t no_txn;            ///< Don't use transactions (O)
-    uint8_t updatable;         ///< Allow updates to existing values (O)
-    uint16_t num_bundles;      ///< Number of time series bundles (C)
     uint16_t values_per_entry; ///< Number of dbats_values in an entry (C)
     uint16_t entry_size;       ///< Size of an entry in bytes (C)
     uint32_t period;           ///< Primary sample period in seconds (C)
+    uint16_t num_bundles;      ///< Number of time series bundles (C)
+    uint8_t readonly;          ///< Disallow writing to db
+    uint8_t compress;          ///< Compress data written to db
+    uint8_t exclusive;         ///< Obtain exclusive lock on whole db
+    uint8_t no_txn;            ///< Don't use transactions
+    uint8_t updatable;         ///< Allow updates to existing values
 } dbats_config;
 
 /// A value stored in a DBATS database.

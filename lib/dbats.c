@@ -29,6 +29,9 @@
 #define MAX_NUM_FRAGS       16384 // max number of fragments in a tslice
 #define MAX_NUM_BUNDLES        16 // max number of time series bundles
 
+#define DBATS_ISSET_ALL   1 // all bits of is_set are set
+#define DBATS_ISSET_NONE  2 // all bits of is_set are clear
+
 /*************************************************************************/
 // compile-time assertion (works anywhere a declaration is allowed)
 #define ct_assert(expr, label)  enum { ASSERT_ERROR__##label = 1/(!!(expr)) };
@@ -618,7 +621,7 @@ int dbats_open(dbats_handler **dhp,
     dh->dbenv->set_errfile(dh->dbenv, stderr);
 
     dh->dbenv->set_msgfile(dh->dbenv, stderr);
-    dh->dbenv->set_verbose(dh->dbenv, DB_VERB_FILEOPS, 1);
+    //dh->dbenv->set_verbose(dh->dbenv, DB_VERB_FILEOPS, 1);
     dh->dbenv->set_verbose(dh->dbenv, DB_VERB_RECOVERY, 1);
     dh->dbenv->set_verbose(dh->dbenv, DB_VERB_REGISTER, 1);
 
@@ -1254,8 +1257,33 @@ static int flush_tslice(dbats_snapshot *ds, int bid)
 	    }
 	    ds->tslice[bid]->frag_changed[f] = 0;
 
-	    rc = raw_db_set(ds->dh->dbIsSet, ds->txn, &dbkey, sizeof(dbkey),
-		ds->tslice[bid]->is_set[f], vec_size(ENTRIES_PER_FRAG), 0);
+	    uint32_t ones = 0; // # of leading "1" bits
+	    int zeroes = 0; // have any "0"s been seen?
+	    int matches = 1; // bit string matches regexp "1*0*"?
+	    for (int i = 0; i < vec_size(ENTRIES_PER_FRAG); i++) {
+		uint8_t byte = ds->tslice[bid]->is_set[f][i];
+		if (zeroes) { if (!(matches = !byte)) break; }
+		else if (byte == 0xFF) { ones += 8; }
+		else if (byte == 0x7F) { ones += 7; zeroes = 1; }
+		else if (byte == 0x3F) { ones += 6; zeroes = 1; }
+		else if (byte == 0x1F) { ones += 5; zeroes = 1; }
+		else if (byte == 0x0F) { ones += 4; zeroes = 1; }
+		else if (byte == 0x07) { ones += 3; zeroes = 1; }
+		else if (byte == 0x03) { ones += 2; zeroes = 1; }
+		else if (byte == 0x01) { ones += 1; zeroes = 1; }
+		else if (byte == 0x00) { ones += 0; zeroes = 1; }
+		else { matches = 0; break; }
+	    }
+	    if (matches) {
+		// write number of leading "1" bits
+		ones = htonl(ones);
+		rc = raw_db_set(ds->dh->dbIsSet, ds->txn, &dbkey, sizeof(dbkey),
+		    &ones, sizeof(ones), 0);
+	    } else {
+		// write the whole is_set vector
+		rc = raw_db_set(ds->dh->dbIsSet, ds->txn, &dbkey, sizeof(dbkey),
+		    ds->tslice[bid]->is_set[f], vec_size(ENTRIES_PER_FRAG), 0);
+	    }
 	    if (rc != 0) return rc;
 	}
     }
@@ -1453,12 +1481,13 @@ static int load_isset(dbats_snapshot *ds, fragkey_t *dbkey, uint8_t **dest,
 {
     uint8_t *buf = NULL;
     int rc;
+    uint32_t value_len;
 
     if (!(buf = emalloc(vec_size(ENTRIES_PER_FRAG), "is_set")))
 	return errno ? errno : ENOMEM; // error
 
     rc = raw_db_get(ds->dh->dbIsSet, ds->txn, dbkey, sizeof(*dbkey),
-	buf, vec_size(ENTRIES_PER_FRAG), NULL, flags);
+	buf, vec_size(ENTRIES_PER_FRAG), &value_len, flags);
 
     if (rc == DB_NOTFOUND) {
 	if (ntohl(dbkey->time) == ds->tslice[ntohl(dbkey->bid)]->time) {
@@ -1472,6 +1501,17 @@ static int load_isset(dbats_snapshot *ds, fragkey_t *dbkey, uint8_t **dest,
     } else if (rc != 0) {
 	*dest = NULL;
 	return rc; // error
+    }
+
+#if ENTRIES_PER_FRAG <= 32
+#error ENTRIES_PER_FRAG must be > 32
+#endif
+    if (value_len == sizeof(uint32_t)) {
+	// vector was compressed to a 32-bit counter
+	uint32_t bits = ntohl(*((uint32_t*)buf));
+	memset(buf, 0xFF, bits/8);
+	for (int i = bits - bits%8; i < bits; i++)
+	    vec_set(buf, i);
     }
 
     *dest = buf;
