@@ -37,7 +37,7 @@ static apr_status_t mod_dbats_close(void *data)
     dbats_handler *dh = (dbats_handler*)data;
     ap_log_perror(APLOG_MARK, APLOG_NOTICE, 0, procstate.pool, "mod_dbats: mod_dbats_close pid=%u:%lu", getpid(), pthread_self());
     int rc = dbats_close(dh);
-    ap_log_perror(APLOG_MARK, APLOG_NOTICE, 0, procstate.pool, "mod_dbats: dbats_close: %d", rc);
+    ap_log_perror(APLOG_MARK, APLOG_NOTICE, 0, procstate.pool, "mod_dbats: dbats_close: %d %s", rc, db_strerror(rc));
     return APR_SUCCESS;
 }
 
@@ -501,7 +501,7 @@ static int req_handler(request_rec *r)
 	// recovered externally, we have to reopen it to use it.
 	ap_log_rerror(APLOG_MARK, APLOG_WARNING, 0, r, "######## attempting to reopen db");
 	if (reqstate->dh)
-	    apr_pool_cleanup_run(r->pool, reqstate->dh, mod_dbats_close);
+	    apr_pool_cleanup_run(procstate.pool, reqstate->dh, mod_dbats_close);
 	apr_thread_mutex_lock(procstate.mutex);
 	apr_hash_set(procstate.dht, cfg->path, APR_HASH_KEY_STRING, NULL);
 	reqstate->http_status = OK;
