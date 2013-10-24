@@ -35,14 +35,20 @@ static const char *set_path(cmd_parms *cmd, void *vcfg, const char *arg)
     return NULL;
 }
 
-static void log_callback(const char *file, int line, const char *msg)
+static void log_callback(int level, const char *file, int line, const char *msg)
 {
     void *r;
     apr_threadkey_private_get(&r, tlskey_req);
+
+    level = (level >= DBATS_LOG_FINE) ? APLOG_DEBUG :
+	(level >= DBATS_LOG_CONFIG) ? APLOG_INFO :
+	(level >= DBATS_LOG_INFO) ? APLOG_NOTICE :
+	(level >= DBATS_LOG_WARN) ? APLOG_WARNING :
+	APLOG_ERR;
     if (r)
-	ap_log_rerror(file, line, APLOG_DEBUG, 0, (request_rec*)r, "%s", msg);
-    else
-	ap_log_error(file, line, APLOG_DEBUG, 0, main_server, "%s", msg);
+	ap_log_rerror(file, line, level, 0, (request_rec*)r, "%s", msg);
+    else // e.g., during init or cleanup
+	ap_log_error(file, line, level, 0, main_server, "%s", msg);
 }
 
 static apr_status_t mod_dbats_close(void *data)
@@ -61,7 +67,7 @@ static apr_status_t mod_dbats_threadkey_private_delete(void *data)
 
 static void child_init_handler(apr_pool_t *pchild, server_rec *s)
 {
-    ap_log_error(APLOG_MARK, APLOG_NOTICE, 0, s, "############ mod_dbats on %s (%s:%u): child_init_handler pchild=%08x pid=%u:%lu", s->defn_name, s->server_hostname, s->port, (unsigned)pchild, getpid(), pthread_self());
+    ap_log_error(APLOG_MARK, APLOG_NOTICE, 0, s, "############ mod_dbats on %s (%s:%u virt=%d): child_init_handler pchild=%08x pid=%u:%lu", s->defn_name, s->server_hostname, s->port, s->is_virtual, (unsigned)pchild, getpid(), pthread_self());
 
     procstate.dht = apr_hash_make(pchild);
     procstate.pool = pchild;
@@ -72,7 +78,6 @@ static void child_init_handler(apr_pool_t *pchild, server_rec *s)
     apr_threadkey_private_create(&tlskey_req, NULL, pchild);
     apr_pool_cleanup_register(pchild, tlskey_req, mod_dbats_threadkey_private_delete, NULL);
 
-    dbats_log_level = DBATS_LOG_FINE;
     dbats_log_callback = log_callback;
 }
 
@@ -451,7 +456,7 @@ static int req_handler(request_rec *r)
     if (!r->handler || strcmp(r->handler, "dbats-handler") != 0)
 	return DECLINED;
 
-    ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r, "######## mod_dbats: req_handler on %s (%s:%u) pid=%u:%lu", r->server->defn_name, r->server->server_hostname, r->server->port, getpid(), pthread_self());
+    ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r, "######## mod_dbats: req_handler on %s (%s:%u virt=%d) pid=%u:%lu", r->server->defn_name, r->server->server_hostname, r->server->port, r->server->is_virtual, getpid(), pthread_self());
     ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r, "# the_request: %s", r->the_request);
     ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r, "# uri: %s", r->uri);
     ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r, "# filename: %s", r->filename);
@@ -473,6 +478,16 @@ static int req_handler(request_rec *r)
 
     // parse query parameters
     args_to_table(r, &reqstate->queryparams);
+
+    // We should have a log level per virtual server, but does anybody care?
+    int level = r->server->loglevel;
+    dbats_log_level =
+	level > APLOG_DEBUG ? DBATS_LOG_FINEST :
+	level >= APLOG_DEBUG ? DBATS_LOG_FINE :
+	level >= APLOG_INFO ? DBATS_LOG_CONFIG :
+	level >= APLOG_NOTICE ? DBATS_LOG_INFO :
+	level >= APLOG_WARNING ? DBATS_LOG_WARN :
+	level >= APLOG_ERR ? DBATS_LOG_ERR : 0;
 
     // get dbats_handler for this {process, cfg->path}
     apr_thread_mutex_lock(procstate.mutex);
