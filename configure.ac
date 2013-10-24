@@ -1,4 +1,4 @@
-AC_REVISION([$Id: configure.ac,v 1.8 2013/10/10 22:12:55 kkeys Exp $])
+AC_REVISION([$Id: configure.ac,v 1.9 2013/10/24 22:23:05 kkeys Exp $])
 
 AC_INIT(include/dbats.h)
 AC_PREREQ(2.53)
@@ -22,11 +22,16 @@ AC_ARG_ENABLE(assert,
 
 AC_CONFIG_HEADER(lib/config.h)
 
-dnl MY_DIRS(src, dst[, prefix[, suffix]])
+dnl MY_DIRS(src, dst[, prefix[, suffix[, separator]]])
 AC_DEFUN(MY_DIRS, [
+    sep="$5"
     if test "${$1}" != "no" && test "${$1}" != ""; then
         for dir in ${$1}; do
-            $2="${$2} $3${dir}$4"
+	    if test "${$2}" = ""; then
+		$2="$3${dir}$4"
+	    else
+		$2="${$2}${sep:- }$3${dir}$4"
+	    fi
         done
     fi
 ])
@@ -38,6 +43,10 @@ MY_DIRS(with_inclibprefix, CPPFLAGS, -I, /include)
 MY_DIRS(with_libdirs, LDFLAGS, -L)
 MY_DIRS(with_inclibdirs, LDFLAGS, -L)
 MY_DIRS(with_inclibprefix, LDFLAGS, -L, /lib)
+
+MY_DIRS(with_libdirs, LD_RUN_PATH, , , [:])
+MY_DIRS(with_inclibdirs, LD_RUN_PATH, , , [:])
+MY_DIRS(with_inclibprefix, LD_RUN_PATH, , /lib, [:])
 
 
 test "${enable_assert}" = "yes" || AC_DEFINE(NDEBUG, 1)
@@ -177,6 +186,7 @@ AC_LINK_IFELSE([AC_LANG_PROGRAM(
     [AC_MSG_RESULT([yes]); AC_DEFINE(HAVE_DB_SET_PRIORITY)],
     [AC_MSG_RESULT([no])])
 
+AC_SUBST(LD_RUN_PATH)
 AC_OUTPUT(lib/Makefile apps/Makefile)
 
 AC_MSG_RESULT([])
