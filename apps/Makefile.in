@@ -15,27 +15,20 @@ clean:
 
 DBATS_LIB = ../lib/libdbats.a
 
+.o:
+	$(CC) $(CFLAGS) $(LDFLAGS) $< $(LDLIBS) -o $@
+
 report-in.o: report-in.c ../include/dbats.h ../include/dbats_log.h Makefile
+report-in: report-in.o $(DBATS_LIB) Makefile
 
 report-out.o: report-out.c ../include/dbats.h ../include/dbats_log.h Makefile
+report-out: report-out.o $(DBATS_LIB) Makefile
 
 dbats_series_limit.o: dbats_series_limit.c ../include/dbats.h ../include/dbats_log.h Makefile
+dbats_series_limit: dbats_series_limit.o $(DBATS_LIB) Makefile
 
 dbats_info.o: dbats_info.c ../include/dbats.h ../include/dbats_log.h Makefile
+dbats_info: dbats_info.o $(DBATS_LIB) Makefile
 
 dbats_best_bundle.o: dbats_best_bundle.c ../include/dbats.h ../include/dbats_log.h Makefile
-
-report-in: report-in.o $(DBATS_LIB) Makefile
-	$(CC) $(CFLAGS) $(LDFLAGS) report-in.o $(LDLIBS) -o $@
-
-report-out: report-out.o $(DBATS_LIB) Makefile
-	$(CC) $(CFLAGS) $(LDFLAGS) report-out.o $(LDLIBS) -o $@
-
-dbats_series_limit: dbats_series_limit.o $(DBATS_LIB) Makefile
-	$(CC) $(CFLAGS) $(LDFLAGS) dbats_series_limit.o $(LDLIBS) -o $@
-
-dbats_info: dbats_info.o $(DBATS_LIB) Makefile
-	$(CC) $(CFLAGS) $(LDFLAGS) dbats_info.o $(LDLIBS) -o $@
-
 dbats_best_bundle: dbats_best_bundle.o $(DBATS_LIB) Makefile
-	$(CC) $(CFLAGS) $(LDFLAGS) dbats_best_bundle.o $(LDLIBS) -o $@
