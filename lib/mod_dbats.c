@@ -25,11 +25,24 @@ struct {
 
 module AP_MODULE_DECLARE_DATA dbats_module;
 
+apr_threadkey_t *tlskey_req = NULL; // thread-local storage key for request
+server_rec *main_server = NULL;
+
 static const char *set_path(cmd_parms *cmd, void *vcfg, const char *arg)
 {
     mod_dbats_dir_config *cfg = (mod_dbats_dir_config*)vcfg;
     cfg->path = arg;
     return NULL;
+}
+
+static void log_callback(const char *file, int line, const char *msg)
+{
+    void *r;
+    apr_threadkey_private_get(&r, tlskey_req);
+    if (r)
+	ap_log_rerror(file, line, APLOG_DEBUG, 0, (request_rec*)r, "%s", msg);
+    else
+	ap_log_error(file, line, APLOG_DEBUG, 0, main_server, "%s", msg);
 }
 
 static apr_status_t mod_dbats_close(void *data)
@@ -41,13 +54,26 @@ static apr_status_t mod_dbats_close(void *data)
     return APR_SUCCESS;
 }
 
+static apr_status_t mod_dbats_threadkey_private_delete(void *data)
+{
+    return apr_threadkey_private_delete(data);
+}
+
 static void child_init_handler(apr_pool_t *pchild, server_rec *s)
 {
-    ap_log_error(APLOG_MARK, APLOG_NOTICE, 0, s, "############ mod_dbats: child_init_handler pchild=%08x pid=%u:%lu", (unsigned)pchild, getpid(), pthread_self());
-    dbats_log_level = DBATS_LOG_FINE;
+    ap_log_error(APLOG_MARK, APLOG_NOTICE, 0, s, "############ mod_dbats on %s (%s:%u): child_init_handler pchild=%08x pid=%u:%lu", s->defn_name, s->server_hostname, s->port, (unsigned)pchild, getpid(), pthread_self());
+
     procstate.dht = apr_hash_make(pchild);
     procstate.pool = pchild;
+
     apr_thread_mutex_create(&procstate.mutex, APR_THREAD_MUTEX_DEFAULT, pchild);
+
+    main_server = s;
+    apr_threadkey_private_create(&tlskey_req, NULL, pchild);
+    apr_pool_cleanup_register(pchild, tlskey_req, mod_dbats_threadkey_private_delete, NULL);
+
+    dbats_log_level = DBATS_LOG_FINE;
+    dbats_log_callback = log_callback;
 }
 
 // Parse URL query parameters into a table.  Each entry is a list of values.
@@ -267,7 +293,7 @@ static void render(request_rec *r)
     } else if (rc == DB_NOTFOUND) {
 	from = until = 0;
     } else {
-	reqstate->dbats_status = HTTP_INTERNAL_SERVER_ERROR;
+	reqstate->http_status = HTTP_INTERNAL_SERVER_ERROR;
 	return;
     }
 
@@ -425,13 +451,15 @@ static int req_handler(request_rec *r)
     if (!r->handler || strcmp(r->handler, "dbats-handler") != 0)
 	return DECLINED;
 
-    ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r, "######## mod_dbats: req_handler pid=%u:%lu", getpid(), pthread_self());
+    ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r, "######## mod_dbats: req_handler on %s (%s:%u) pid=%u:%lu", r->server->defn_name, r->server->server_hostname, r->server->port, getpid(), pthread_self());
     ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r, "# the_request: %s", r->the_request);
     ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r, "# uri: %s", r->uri);
     ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r, "# filename: %s", r->filename);
     ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r, "# canonical_filename: %s", r->canonical_filename);
     ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r, "# path_info: %s", r->path_info);
     ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r, "# args: %s", r->args);
+
+    apr_threadkey_private_set(r, tlskey_req);
 
     // get config
     mod_dbats_dir_config *cfg = (mod_dbats_dir_config*)ap_get_module_config(r->per_dir_config, &dbats_module);
@@ -458,7 +486,8 @@ static int req_handler(request_rec *r)
 	if (rc != 0) {
 	    ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r, "mod_dbats: dbats_open: %s", db_strerror(rc));
 	    apr_thread_mutex_unlock(procstate.mutex);
-	    return HTTP_INTERNAL_SERVER_ERROR;
+	    reqstate->http_status = HTTP_INTERNAL_SERVER_ERROR;
+	    goto done;
 	}
 	ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r, "mod_dbats: dbats_open: ok");
 	apr_hash_set(procstate.dht, cfg->path, APR_HASH_KEY_STRING, reqstate->dh);
@@ -476,7 +505,8 @@ static int req_handler(request_rec *r)
     } else if (ends_with(r->uri, "/render/")) {
 	render(r);
     } else {
-	return HTTP_NOT_FOUND;
+	reqstate->http_status = HTTP_NOT_FOUND;
+	goto done;
     }
 
     // clean up
@@ -491,10 +521,11 @@ static int req_handler(request_rec *r)
 
     // handle result
     if (reqstate->dbats_status == 0) {
-	return reqstate->http_status;
+	goto done;
 
     } else if (reqstate->dbats_status == DB_NOTFOUND) {
-	return HTTP_NOT_FOUND;
+	reqstate->http_status = HTTP_NOT_FOUND;
+	goto done;
 
     } else if (reqstate->dbats_status == DB_RUNRECOVERY) {
 	// Since we're readonly, we can't do the recovery, but if database was
@@ -509,8 +540,14 @@ static int req_handler(request_rec *r)
 	goto reopen;
 
     } else {
-	return HTTP_INTERNAL_SERVER_ERROR;
+	reqstate->http_status = HTTP_INTERNAL_SERVER_ERROR;
+	goto done;
     }
+
+done:
+    apr_threadkey_private_set(NULL, tlskey_req);
+    ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r, "request result: %d", reqstate->http_status);
+    return reqstate->http_status;
 }
 
 static void *create_dir_conf(apr_pool_t *pool, char *context)
