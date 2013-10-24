@@ -565,6 +565,19 @@ static int make_file_writable(const char *filename)
     return 0;
 }
 
+static void error_callback(const DB_ENV *dbenv, const char *errpfx, const char *msg)
+{
+    if (errpfx)
+	dbats_log(DBATS_LOG_ERR, "%s: %s", errpfx, msg);
+    else
+	dbats_log(DBATS_LOG_ERR, "%s", msg);
+}
+
+static void message_callback(const DB_ENV *dbenv, const char *msg)
+{
+    dbats_log(DBATS_LOG_INFO, "%s", msg);
+}
+
 // Warning: never open the same dbats more than once in the same process,
 // because there must be only one DB_ENV per environment per process when
 // using DB_REGISTER.
@@ -617,10 +630,10 @@ int dbats_open(dbats_handler **dhp,
 	return rc;
     }
 
+    dh->dbenv->set_errcall(dh->dbenv, error_callback);
     dh->dbenv->set_errpfx(dh->dbenv, dh->path);
-    dh->dbenv->set_errfile(dh->dbenv, stderr);
 
-    dh->dbenv->set_msgfile(dh->dbenv, stderr);
+    dh->dbenv->set_msgcall(dh->dbenv, message_callback);
     //dh->dbenv->set_verbose(dh->dbenv, DB_VERB_FILEOPS, 1);
     dh->dbenv->set_verbose(dh->dbenv, DB_VERB_RECOVERY, 1);
     dh->dbenv->set_verbose(dh->dbenv, DB_VERB_REGISTER, 1);
