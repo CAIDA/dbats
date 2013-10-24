@@ -24,7 +24,7 @@
 
 int dbats_log_level = DBATS_LOG_INFO;
 FILE *dbats_log_file = NULL;
-void (*dbats_log_callback)(const char *file, int line, const char *msg) = NULL;
+void (*dbats_log_callback)(int level, const char *file, int line, const char *msg) = NULL;
 
 void dbats_log_func(int level, const char *file, int line, const char *fmt, ...)
 {
@@ -39,7 +39,7 @@ void dbats_log_func(int level, const char *file, int line, const char *fmt, ...)
 	va_end(va_ap);
 
 	if (dbats_log_callback) {
-	    dbats_log_callback(file, line, msgbuf);
+	    dbats_log_callback(level, file, line, msgbuf);
 
 	} else {
 	    if (!dbats_log_file)
