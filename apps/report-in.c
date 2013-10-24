@@ -16,7 +16,6 @@ static void help(void) {
     fprintf(stderr, "-p       preload timeslices\n");
     fprintf(stderr, "-Z       don't compress db\n");
     fprintf(stderr, "-i       initialize db only; do not write data\n");
-    fprintf(stderr, "-m       allow multiple processes to write simultaneously (experimental)\n");
     exit(-1);
 }
 
@@ -89,7 +88,7 @@ int main(int argc, char *argv[]) {
     char key[128];
 
     int c;
-    while ((c = getopt(argc, argv, "v:xtupZim")) != -1) {
+    while ((c = getopt(argc, argv, "v:xtupZi")) != -1) {
 	switch (c) {
 	case 'v':
 	    dbats_log_level = atoi(optarg);
@@ -108,9 +107,6 @@ int main(int argc, char *argv[]) {
 	    break;
 	case 'Z':
 	    open_flags |= DBATS_UNCOMPRESSED;
-	    break;
-	case 'm':
-	    open_flags |= DBATS_MULTIWRITE;
 	    break;
 	case 'i':
 	    init_only = 1;

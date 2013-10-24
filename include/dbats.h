@@ -51,8 +51,8 @@
  *    - -1 for other error
  *
  *  If multiple snapshots (in different processes or threads) are accessing
- *  the same DBATS database concurrently, and the database was opened with
- *  DBATS_MULTIWRITE, the writers may deadlock.  When this happens, one or
+ *  the same DBATS database concurrently, the writers may deadlock.
+ *  When this happens, one or
  *  more operations will be cancelled so that another may proceed.  The
  *  cancelled operations will return DB_LOCK_DEADLOCK.  After a function in a
  *  transaction returns DB_LOCK_DEADLOCK, no other dbats calls are allowed on
@@ -90,7 +90,6 @@
 #define DBATS_EXCLUSIVE    0x0020 ///< obtain exclusive lock on whole db
 #define DBATS_NO_TXN       0x0040 ///< don't use transactions (fast but unsafe)
 #define DBATS_UPDATABLE    0x0080 ///< allow updates to existing values
-#define DBATS_MULTIWRITE   0x0100 ///< allow multiple processes to write in parallel
 #define DBATS_GLOB         0x0200 // allow glob
 ///@}
 
@@ -187,8 +186,6 @@ typedef struct dbats_keytree_iterator dbats_keytree_iterator; ///< Opaque handle
  *    -	DBATS_EXCLUSIVE - do not allow any other process to access the database
  *    -	DBATS_NO_TXN - do not use transactions (fast but unsafe)
  *    -	DBATS_UPDATABLE - allow updates to existing values
- *    - DBATS_MULTIWRITE - allow multiple snapshots (in different processes or
- *      threads) to be written simultaneously instead of taking turns.
  *  @param[in] mode permissions for files created by this function (as defined
  *    by open(2)) and modified by the process's umask.
  *  @return
@@ -376,9 +373,9 @@ extern uint32_t dbats_normalize_time(const dbats_handler *handler,
  *  dbats_abort_snap().
  *  If this function fails for any reason, it returns nonzero without
  *  beginning a transaction.
- *  If multiple snapshots are being used to write to the database, this function may block
- *  until those other processes complete their transactions, especially if the
- *  database was not opened with DBATS_MULTIWRITE.
+ *  If multiple snapshots are being used to write to the database in parallel
+ *  (in other processes or threads), this function may block
+ *  until those other snapshots complete their transactions.
  *  If a deadlock occurs within this function, it will automatically retry, up
  *  to a limit; if this limit is reached, this function will return
  *  DB_LOCK_DEADLOCK without beginning a transaction (so dbats_abort_snap() is

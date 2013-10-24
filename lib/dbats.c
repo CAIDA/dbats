@@ -617,7 +617,7 @@ int dbats_open(dbats_handler **dhp,
     dh->cfg.exclusive = !!(flags & DBATS_EXCLUSIVE);
     dh->cfg.no_txn = !!(flags & DBATS_NO_TXN);
     dh->cfg.values_per_entry = 1;
-    dh->serialize = !(flags & DBATS_MULTIWRITE);
+    dh->serialize = 1;
     dh->path = path;
 
     if (!dh->cfg.readonly) {
