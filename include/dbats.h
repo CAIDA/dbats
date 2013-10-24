@@ -59,11 +59,11 @@
  *  that dbats_snapshot (or dbats_handler) until dbats_abort_snap() (or
  *  dbats_abort_open()) is called to clean up the cancelled transaction.  When
  *  an operation needs to be cancelled, one with the lowest priority is
- *  preferred.  There are three priority categories, from lowest to highest:
- *  read only; writable, but haven't yet called dbats_set(); writable, and
- *  have called dbats_set().  Within the two writable categories, priority
- *  depends on timestamp, so that inserts of "live" data have higher priority
- *  than inserts of historic data.
+ *  preferred.  There are three priority categories; from lowest to highest,
+ *  they are: read only; writable, but haven't yet called dbats_set();
+ *  writable, and have called dbats_set().  Within the two writable
+ *  categories, priority depends on timestamp, so that inserts of "live" data
+ *  have higher priority than inserts of historic data.
  *
  *  Although this API will not prevent you from opening two snapshots for
  *  writing within a single thread, doing so is not recommended since it may
@@ -155,6 +155,9 @@ typedef struct dbats_keytree_iterator dbats_keytree_iterator; ///< Opaque handle
  *  By default, the database will allow reading data values and inserting new
  *  data values, but not updating existing data values.
  *
+ *  If dbats_open() succeeds, the process should not call dbats_open() again
+ *  with the same path until the former handle is closed with dbats_close().
+ *
  *  Opening a database also starts a transaction that can be used to configure
  *  the database.  When configuration is complete, you must call
  *  dbats_commit_open() to commit the transaction.  Before calling
@@ -170,7 +173,7 @@ typedef struct dbats_keytree_iterator dbats_keytree_iterator; ///< Opaque handle
  *  @param[out] handlerp the address of a dbats_handler*; after the call,
  *    *handlerp will contain a pointer that must be passed to subsequent calls
  *    on this database.
- *  @param[in] dbats_path path of an existing directory containing a DBATS
+ *  @param[in] path path of an existing directory containing a DBATS
  *    database or a nonexistant directory in which to create a new DBATS
  *    database.
  *  @param[in] values_per_entry number of dbats_values in the array read by
@@ -192,14 +195,14 @@ typedef struct dbats_keytree_iterator dbats_keytree_iterator; ///< Opaque handle
  *    - 0 for success;
  *    - EINVAL if a parameter was invalid;
  *    - ENOMEM if out of memory;
- *    - ENOENT if the directory specified by @c dbats_path does not exist and
+ *    - ENOENT if the directory specified by @c path does not exist and
  *      @c flags did not contain DBATS_CREATE;
  *    - DB_VERSION_MISMATCH if the version of the BDB library or DBATS library
  *      is not compatible with that used to create the database;
  *    - other nonzero value for other errors.
  */
 extern int dbats_open(dbats_handler **handlerp,
-    const char *dbats_path,
+    const char *path,
     uint16_t values_per_entry,
     uint32_t period,
     uint32_t flags,
