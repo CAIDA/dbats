@@ -31,9 +31,7 @@ libdbats.a: dbats.o dbats_log.o quicklz.o
 	ranlib $@
 
 mod_dbats.la: mod_dbats.c libdbats.a
-	env LD_RUN_PATH=/usr/local/pkg/bdb/lib $(APXS) -c \
-	    $(APXS_DEBUG) \
-	    $(CPPFLAGS) -L. $(LDFLAGS) $(LDLIBS) mod_dbats.c
+	env LD_RUN_PATH=@LD_RUN_PATH@ $(APXS) -c $(APXS_DEBUG) $(CPPFLAGS) -L. $(LDFLAGS) $(LDLIBS) mod_dbats.c
 
 install: mod_dbats.la
 	$(APXS) -a -i mod_dbats.la
