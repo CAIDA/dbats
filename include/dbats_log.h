@@ -26,6 +26,7 @@
 
 extern int dbats_log_level;
 extern FILE *dbats_log_file;
+extern void (*dbats_log_callback)(const char *file, int line, const char *msg);
 
 #define dbats_log(level, ...) \
     do { \
