@@ -67,7 +67,7 @@ static apr_status_t mod_dbats_threadkey_private_delete(void *data)
 
 static void child_init_handler(apr_pool_t *pchild, server_rec *s)
 {
-    ap_log_error(APLOG_MARK, APLOG_NOTICE, 0, s, "############ mod_dbats on %s:%u: child_init_handler pchild=%08x pid=%u:%lu", s->server_hostname, s->port, (unsigned)pchild, getpid(), pthread_self());
+    ap_log_error(APLOG_MARK, APLOG_INFO, 0, s, "mod_dbats on %s:%u: child_init_handler pchild=%08x pid=%u:%lu", s->server_hostname, s->port, (unsigned)pchild, getpid(), pthread_self());
 
     procstate.dht = apr_hash_make(pchild);
     procstate.pool = pchild;
@@ -464,13 +464,13 @@ static int req_handler(request_rec *r)
     if (!r->handler || strcmp(r->handler, "dbats-handler") != 0)
 	return DECLINED;
 
-    ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r, "######## mod_dbats: req_handler on %s:%u pid=%u:%lu", r->server->server_hostname, r->server->port, getpid(), pthread_self());
-    ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r, "# the_request: %s", r->the_request);
-    ap_log_rerror(APLOG_MARK, APLOG_DEBUG, 0, r, "# uri: %s", r->uri);
-    ap_log_rerror(APLOG_MARK, APLOG_DEBUG, 0, r, "# filename: %s", r->filename);
-    ap_log_rerror(APLOG_MARK, APLOG_DEBUG, 0, r, "# canonical_filename: %s", r->canonical_filename);
-    ap_log_rerror(APLOG_MARK, APLOG_DEBUG, 0, r, "# path_info: %s", r->path_info);
-    ap_log_rerror(APLOG_MARK, APLOG_DEBUG, 0, r, "# args: %s", r->args);
+    ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r, "mod_dbats: req_handler on %s:%u pid=%u:%lu", r->server->server_hostname, r->server->port, getpid(), pthread_self());
+    ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r, "the_request: %s", r->the_request);
+    ap_log_rerror(APLOG_MARK, APLOG_DEBUG, 0, r, "uri: %s", r->uri);
+    ap_log_rerror(APLOG_MARK, APLOG_DEBUG, 0, r, "filename: %s", r->filename);
+    ap_log_rerror(APLOG_MARK, APLOG_DEBUG, 0, r, "canonical_filename: %s", r->canonical_filename);
+    ap_log_rerror(APLOG_MARK, APLOG_DEBUG, 0, r, "path_info: %s", r->path_info);
+    ap_log_rerror(APLOG_MARK, APLOG_DEBUG, 0, r, "args: %s", r->args);
 
     apr_threadkey_private_set(r, tlskey_req);
 
@@ -529,7 +529,7 @@ static int req_handler(request_rec *r)
 	apr_thread_mutex_unlock(procstate.mutex);
     } else {
 	reopen:
-	ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r, "######## mod_dbats: dbats_open %s", dbats_path);
+	ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r, "mod_dbats: dbats_open %s", dbats_path);
 	int rc = dbats_open(&reqstate->dh, dbats_path, 1, 60, DBATS_READONLY, 0);
 	if (rc != 0) {
 	    ap_log_rerror(APLOG_MARK, APLOG_NOTICE, 0, r, "mod_dbats: dbats_open: %s", db_strerror(rc));
@@ -570,7 +570,7 @@ static int req_handler(request_rec *r)
     } else if (reqstate->dbats_status == DB_RUNRECOVERY) {
 	// Since we're readonly, we can't do the recovery, but if database was
 	// recovered externally, we have to reopen it to use it.
-	ap_log_rerror(APLOG_MARK, APLOG_WARNING, 0, r, "######## attempting to reopen db");
+	ap_log_rerror(APLOG_MARK, APLOG_WARNING, 0, r, "mod_dbats attempting to reopen db");
 	if (reqstate->dh)
 	    apr_pool_cleanup_run(procstate.pool, reqstate->dh, mod_dbats_close);
 	apr_thread_mutex_lock(procstate.mutex);
