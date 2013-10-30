@@ -443,16 +443,24 @@ static void render(request_rec *r)
     }
 }
 
-static int ends_with(const char *s, const char *w)
+// If {s} ends with {w}, returns a pointer to the copy of {w} within {s}.
+static const char *ends_with(const char *s, const char *w)
 {
     size_t sl = strlen(s);
     size_t wl = strlen(w);
     if (wl > sl) return 0;
-    return strcmp(s + sl - wl, w) == 0;
+    if (strcmp(s + sl - wl, w) == 0)
+	return s + sl - wl;
+    else
+	return NULL;
 }
 
 static int req_handler(request_rec *r)
 {
+    const char *uri_tail = NULL;
+    void (*func)(request_rec*) = NULL;
+    const char *dbats_path;
+
     if (!r->handler || strcmp(r->handler, "dbats-handler") != 0)
 	return DECLINED;
 
@@ -466,9 +474,34 @@ static int req_handler(request_rec *r)
 
     apr_threadkey_private_set(r, tlskey_req);
 
+    if ((uri_tail = ends_with(r->uri, "/metrics/find/"))) {
+	func = metrics_find;
+    } else if ((uri_tail = ends_with(r->uri, "/metrics/index.json"))) {
+	func = metrics_index;
+    } else if ((uri_tail = ends_with(r->uri, "/render/"))) {
+	func = render;
+    } else {
+	reqstate->http_status = HTTP_NOT_FOUND;
+	goto done;
+    }
+
     // get config
     mod_dbats_dir_config *cfg = (mod_dbats_dir_config*)ap_get_module_config(r->per_dir_config, &dbats_module);
     ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r, "dir_cfg: %08x, n=%d, context=%s, path=%s", (unsigned)cfg, ++cfg->n, cfg->context, cfg->path);
+    if (cfg->path) {
+	dbats_path = cfg->path;
+    } else {
+	// Generate default dbats_path by removing uri_tail from r->filename +
+	// r->path_info.  (This allows a <Directory> or <DirectoryMatch>
+	// without a dbatsPath directive to refer to an actual DBATS directory
+	// under the document root.)  (It would be better to get the name of
+	// the matching directory from apache, but AFAICT apache doesn't
+	// provide it.)
+	char *tmp = apr_psprintf(r->pool, "%s%s", r->filename, r->path_info);
+	tmp[strlen(tmp) - strlen(uri_tail)] = '\0'; // chop off tail
+	dbats_path = tmp;
+	ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r, "default path=%s", dbats_path);
+    }
 
     // create request state
     mod_dbats_reqstate *reqstate = apr_pcalloc(r->pool, sizeof(*reqstate));
@@ -489,15 +522,15 @@ static int req_handler(request_rec *r)
 	level >= APLOG_WARNING ? DBATS_LOG_WARN :
 	level >= APLOG_ERR ? DBATS_LOG_ERR : 0;
 
-    // get dbats_handler for this {process, cfg->path}
+    // get dbats_handler for this {process, dbats_path}
     apr_thread_mutex_lock(procstate.mutex);
-    reqstate->dh = (dbats_handler*)apr_hash_get(procstate.dht, cfg->path, APR_HASH_KEY_STRING);
+    reqstate->dh = (dbats_handler*)apr_hash_get(procstate.dht, dbats_path, APR_HASH_KEY_STRING);
     if (reqstate->dh) {
 	apr_thread_mutex_unlock(procstate.mutex);
     } else {
 	reopen:
-	ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r, "######## mod_dbats: dbats_open %s", cfg->path);
-	int rc = dbats_open(&reqstate->dh, cfg->path, 1, 60, DBATS_READONLY, 0);
+	ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r, "######## mod_dbats: dbats_open %s", dbats_path);
+	int rc = dbats_open(&reqstate->dh, dbats_path, 1, 60, DBATS_READONLY, 0);
 	if (rc != 0) {
 	    ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r, "mod_dbats: dbats_open: %s", db_strerror(rc));
 	    apr_thread_mutex_unlock(procstate.mutex);
@@ -505,7 +538,7 @@ static int req_handler(request_rec *r)
 	    goto done;
 	}
 	ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r, "mod_dbats: dbats_open: ok");
-	apr_hash_set(procstate.dht, cfg->path, APR_HASH_KEY_STRING, reqstate->dh);
+	apr_hash_set(procstate.dht, dbats_path, APR_HASH_KEY_STRING, reqstate->dh);
 	apr_pool_cleanup_register(procstate.pool, reqstate->dh, mod_dbats_close, NULL);
 	apr_thread_mutex_unlock(procstate.mutex);
 	dbats_commit_open(reqstate->dh);
@@ -513,16 +546,7 @@ static int req_handler(request_rec *r)
     }
 
     // dispatch request
-    if (ends_with(r->uri, "/metrics/find/")) {
-	metrics_find(r);
-    } else if (ends_with(r->uri, "/metrics/index.json")) {
-	metrics_index(r);
-    } else if (ends_with(r->uri, "/render/")) {
-	render(r);
-    } else {
-	reqstate->http_status = HTTP_NOT_FOUND;
-	goto done;
-    }
+    func(r);
 
     // clean up
     if (reqstate->dki) {
@@ -549,7 +573,7 @@ static int req_handler(request_rec *r)
 	if (reqstate->dh)
 	    apr_pool_cleanup_run(procstate.pool, reqstate->dh, mod_dbats_close);
 	apr_thread_mutex_lock(procstate.mutex);
-	apr_hash_set(procstate.dht, cfg->path, APR_HASH_KEY_STRING, NULL);
+	apr_hash_set(procstate.dht, dbats_path, APR_HASH_KEY_STRING, NULL);
 	reqstate->http_status = OK;
 	reqstate->dbats_status = 0;
 	goto reopen;
