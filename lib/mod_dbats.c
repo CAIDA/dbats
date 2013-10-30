@@ -54,9 +54,9 @@ static void log_callback(int level, const char *file, int line, const char *msg)
 static apr_status_t mod_dbats_close(void *data)
 {
     dbats_handler *dh = (dbats_handler*)data;
-    ap_log_perror(APLOG_MARK, APLOG_INFO, 0, procstate.pool, "mod_dbats: mod_dbats_close pid=%u:%lu", getpid(), pthread_self());
+    ap_log_perror(APLOG_MARK, APLOG_DEBUG, 0, procstate.pool, "mod_dbats: mod_dbats_close pid=%u:%lu", getpid(), pthread_self());
     int rc = dbats_close(dh);
-    ap_log_perror(APLOG_MARK, APLOG_INFO, 0, procstate.pool, "mod_dbats: dbats_close: %d %s", rc, db_strerror(rc));
+    ap_log_perror(APLOG_MARK, APLOG_DEBUG, 0, procstate.pool, "mod_dbats: dbats_close: %d %s", rc, db_strerror(rc));
     return APR_SUCCESS;
 }
 
@@ -67,7 +67,7 @@ static apr_status_t mod_dbats_threadkey_private_delete(void *data)
 
 static void child_init_handler(apr_pool_t *pchild, server_rec *s)
 {
-    ap_log_error(APLOG_MARK, APLOG_NOTICE, 0, s, "############ mod_dbats on %s (%s:%u virt=%d): child_init_handler pchild=%08x pid=%u:%lu", s->defn_name, s->server_hostname, s->port, s->is_virtual, (unsigned)pchild, getpid(), pthread_self());
+    ap_log_error(APLOG_MARK, APLOG_NOTICE, 0, s, "############ mod_dbats on %s:%u: child_init_handler pchild=%08x pid=%u:%lu", s->server_hostname, s->port, (unsigned)pchild, getpid(), pthread_self());
 
     procstate.dht = apr_hash_make(pchild);
     procstate.pool = pchild;
@@ -333,7 +333,7 @@ static void render(request_rec *r)
 	    chunk->key = apr_pstrdup(r->pool, key);
 	    chunk->isset = apr_palloc(r->pool, nsamples * sizeof(uint8_t));
 	    chunk->data = apr_palloc(r->pool, nsamples * sizeof(dbats_value));
-	    ap_log_rerror(APLOG_MARK, APLOG_NOTICE, 0, r, "mod_dbats: (%d/%d) key #%u %s",
+	    ap_log_rerror(APLOG_MARK, APLOG_DEBUG, 0, r, "mod_dbats: (%d/%d) key #%u %s",
 		chunks->nelts, chunks->nalloc, chunk->keyid, chunk->key);
 	}
 	if (rc != DB_NOTFOUND) {
@@ -464,13 +464,13 @@ static int req_handler(request_rec *r)
     if (!r->handler || strcmp(r->handler, "dbats-handler") != 0)
 	return DECLINED;
 
-    ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r, "######## mod_dbats: req_handler on %s (%s:%u virt=%d) pid=%u:%lu", r->server->defn_name, r->server->server_hostname, r->server->port, r->server->is_virtual, getpid(), pthread_self());
+    ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r, "######## mod_dbats: req_handler on %s:%u pid=%u:%lu", r->server->server_hostname, r->server->port, getpid(), pthread_self());
     ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r, "# the_request: %s", r->the_request);
-    ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r, "# uri: %s", r->uri);
-    ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r, "# filename: %s", r->filename);
-    ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r, "# canonical_filename: %s", r->canonical_filename);
-    ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r, "# path_info: %s", r->path_info);
-    ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r, "# args: %s", r->args);
+    ap_log_rerror(APLOG_MARK, APLOG_DEBUG, 0, r, "# uri: %s", r->uri);
+    ap_log_rerror(APLOG_MARK, APLOG_DEBUG, 0, r, "# filename: %s", r->filename);
+    ap_log_rerror(APLOG_MARK, APLOG_DEBUG, 0, r, "# canonical_filename: %s", r->canonical_filename);
+    ap_log_rerror(APLOG_MARK, APLOG_DEBUG, 0, r, "# path_info: %s", r->path_info);
+    ap_log_rerror(APLOG_MARK, APLOG_DEBUG, 0, r, "# args: %s", r->args);
 
     apr_threadkey_private_set(r, tlskey_req);
 
@@ -493,7 +493,7 @@ static int req_handler(request_rec *r)
 
     // get config
     mod_dbats_dir_config *cfg = (mod_dbats_dir_config*)ap_get_module_config(r->per_dir_config, &dbats_module);
-    ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r, "dir_cfg: %08x, n=%d, context=%s, path=%s", (unsigned)cfg, ++cfg->n, cfg->context, cfg->path);
+    ap_log_rerror(APLOG_MARK, APLOG_DEBUG, 0, r, "dir_cfg: %08x, n=%d, context=%s, path=%s", (unsigned)cfg, ++cfg->n, cfg->context, cfg->path);
     if (cfg->path) {
 	dbats_path = cfg->path;
     } else {
@@ -506,7 +506,7 @@ static int req_handler(request_rec *r)
 	char *tmp = apr_psprintf(r->pool, "%s%s", r->filename, r->path_info);
 	tmp[strlen(tmp) - strlen(uri_tail)] = '\0'; // chop off tail
 	dbats_path = tmp;
-	ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r, "default path=%s", dbats_path);
+	ap_log_rerror(APLOG_MARK, APLOG_DEBUG, 0, r, "default path=%s", dbats_path);
     }
 
     // parse query parameters
@@ -532,18 +532,18 @@ static int req_handler(request_rec *r)
 	ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r, "######## mod_dbats: dbats_open %s", dbats_path);
 	int rc = dbats_open(&reqstate->dh, dbats_path, 1, 60, DBATS_READONLY, 0);
 	if (rc != 0) {
-	    ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r, "mod_dbats: dbats_open: %s", db_strerror(rc));
+	    ap_log_rerror(APLOG_MARK, APLOG_NOTICE, 0, r, "mod_dbats: dbats_open: %s", db_strerror(rc));
 	    apr_thread_mutex_unlock(procstate.mutex);
 	    reqstate->http_status = (rc == ENOENT) ? HTTP_NOT_FOUND :
 		HTTP_INTERNAL_SERVER_ERROR;
 	    goto done;
 	}
-	ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r, "mod_dbats: dbats_open: ok");
+	ap_log_rerror(APLOG_MARK, APLOG_DEBUG, 0, r, "mod_dbats: dbats_open: ok");
 	apr_hash_set(procstate.dht, dbats_path, APR_HASH_KEY_STRING, reqstate->dh);
 	apr_pool_cleanup_register(procstate.pool, reqstate->dh, mod_dbats_close, NULL);
 	apr_thread_mutex_unlock(procstate.mutex);
 	dbats_commit_open(reqstate->dh);
-	ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r, "mod_dbats: dbats_commit_open: ok");
+	ap_log_rerror(APLOG_MARK, APLOG_DEBUG, 0, r, "mod_dbats: dbats_commit_open: ok");
     }
 
     // dispatch request
@@ -625,7 +625,7 @@ static void register_hooks(apr_pool_t *pool)
 	return;
     }
 
-    ap_log_perror(APLOG_MARK, APLOG_DEBUG, 0, pool, "mod_dbats: register_hooks");
+    ap_log_perror(APLOG_MARK, APLOG_INFO, 0, pool, "mod_dbats initializing");
     ap_hook_handler(req_handler, NULL, NULL, APR_HOOK_MIDDLE);
     ap_hook_child_init(child_init_handler, NULL, NULL, APR_HOOK_MIDDLE);
 }

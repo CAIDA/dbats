@@ -575,7 +575,7 @@ static void error_callback(const DB_ENV *dbenv, const char *errpfx, const char *
 
 static void message_callback(const DB_ENV *dbenv, const char *msg)
 {
-    dbats_log(DBATS_LOG_INFO, "%s", msg);
+    dbats_log(DBATS_LOG_FINE, "%s", msg);
 }
 
 // Warning: never open the same dbats more than once in the same process,
@@ -746,13 +746,13 @@ int dbats_open(dbats_handler **dhp,
     const char **dirnames;
     dh->dbenv->get_data_dirs(dh->dbenv, &dirnames);
     for ( ; *dirnames; dirnames++)
-	dbats_log(DBATS_LOG_CONFIG, "data dir: %s", *dirnames);
+	dbats_log(DBATS_LOG_FINE, "data dir: %s", *dirnames);
     dh->dbenv->get_create_dir(dh->dbenv, &dirname);
-    dbats_log(DBATS_LOG_CONFIG, "create-data dir: %s", dirname);
+    dbats_log(DBATS_LOG_FINE, "create-data dir: %s", dirname);
     dh->dbenv->get_lg_dir(dh->dbenv, &dirname);
-    dbats_log(DBATS_LOG_CONFIG, "lg dir: %s", dirname);
+    dbats_log(DBATS_LOG_FINE, "lg dir: %s", dirname);
     dh->dbenv->get_metadata_dir(dh->dbenv, &dirname);
-    dbats_log(DBATS_LOG_CONFIG, "metadata dir: %s", dirname);
+    dbats_log(DBATS_LOG_FINE, "metadata dir: %s", dirname);
 
 #if defined(DB_LOG_AUTO_REMOVE)
     dh->dbenv->log_set_config(dh->dbenv, DB_LOG_AUTO_REMOVE, 1);
