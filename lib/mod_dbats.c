@@ -474,6 +474,12 @@ static int req_handler(request_rec *r)
 
     apr_threadkey_private_set(r, tlskey_req);
 
+    // create request state
+    mod_dbats_reqstate *reqstate = apr_pcalloc(r->pool, sizeof(*reqstate));
+    reqstate->http_status = OK;
+    reqstate->dbats_status = 0;
+    ap_set_module_config(r->request_config, &dbats_module, reqstate);
+
     if ((uri_tail = ends_with(r->uri, "/metrics/find/"))) {
 	func = metrics_find;
     } else if ((uri_tail = ends_with(r->uri, "/metrics/index.json"))) {
@@ -503,12 +509,6 @@ static int req_handler(request_rec *r)
 	ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r, "default path=%s", dbats_path);
     }
 
-    // create request state
-    mod_dbats_reqstate *reqstate = apr_pcalloc(r->pool, sizeof(*reqstate));
-    reqstate->http_status = OK;
-    reqstate->dbats_status = 0;
-    ap_set_module_config(r->request_config, &dbats_module, reqstate);
-
     // parse query parameters
     args_to_table(r, &reqstate->queryparams);
 
@@ -534,7 +534,8 @@ static int req_handler(request_rec *r)
 	if (rc != 0) {
 	    ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r, "mod_dbats: dbats_open: %s", db_strerror(rc));
 	    apr_thread_mutex_unlock(procstate.mutex);
-	    reqstate->http_status = HTTP_INTERNAL_SERVER_ERROR;
+	    reqstate->http_status = (rc == ENOENT) ? HTTP_NOT_FOUND :
+		HTTP_INTERNAL_SERVER_ERROR;
 	    goto done;
 	}
 	ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r, "mod_dbats: dbats_open: ok");
