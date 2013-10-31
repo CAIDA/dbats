@@ -10,6 +10,7 @@ static void help(void) {
     fprintf(stderr, "%s [{options}] {dbats_path} < report.metrics\n", progname);
     fprintf(stderr, "options:\n");
     fprintf(stderr, "-v{N}    verbosity level\n");
+    fprintf(stderr, "-a{N}    define {N} aggregations\n");
     fprintf(stderr, "-x       obtain exclusive lock on db\n");
     fprintf(stderr, "-t       don't use transactions (fast, but unsafe)\n");
     fprintf(stderr, "-u       allow updates to existing data\n");
@@ -79,6 +80,7 @@ int main(int argc, char *argv[]) {
     progname = argv[0];
     uint32_t run_start, elapsed;
     int rc = 0;
+    int n_aggs = 0;
 
     dbats_log_level = DBATS_LOG_INFO;
 
@@ -88,10 +90,13 @@ int main(int argc, char *argv[]) {
     char key[128];
 
     int c;
-    while ((c = getopt(argc, argv, "v:xtupZi")) != -1) {
+    while ((c = getopt(argc, argv, "v:a:xtupZi")) != -1) {
 	switch (c) {
 	case 'v':
 	    dbats_log_level = atoi(optarg);
+	    break;
+	case 'a':
+	    n_aggs = atoi(optarg);
 	    break;
 	case 'x':
 	    open_flags |= DBATS_EXCLUSIVE;
@@ -130,17 +135,11 @@ int main(int argc, char *argv[]) {
 
     const dbats_config *cfg = dbats_get_config(handler);
     if (cfg->num_bundles == 1) {
-	dbats_log(DBATS_LOG_INFO, "report-in: config aggs");
-	if (dbats_aggregate(handler, DBATS_AGG_MIN, 10) != 0)
-	    return -1;
-	if (dbats_aggregate(handler, DBATS_AGG_MAX, 10) != 0)
-	    return -1;
-	if (dbats_aggregate(handler, DBATS_AGG_AVG, 10) != 0)
-	    return -1;
-	if (dbats_aggregate(handler, DBATS_AGG_LAST, 10) != 0)
-	    return -1;
-	if (dbats_aggregate(handler, DBATS_AGG_SUM, 10) != 0)
-	    return -1;
+	for (int i = 0; i < n_aggs; i++) {
+	    dbats_log(DBATS_LOG_INFO, "report-in: config aggs");
+	    if (dbats_aggregate(handler, i%(DBATS_AGG_N-1) + 1, 10) != 0)
+		return -1;
+	}
     }
 
     if (init_only) {
