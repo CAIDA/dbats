@@ -12,9 +12,7 @@
 #include "dbats.h"
 
 typedef struct {
-    const char *context;
     const char *path;
-    int n;
 } mod_dbats_dir_config;
 
 struct {
@@ -67,7 +65,7 @@ static apr_status_t mod_dbats_threadkey_private_delete(void *data)
 
 static void child_init_handler(apr_pool_t *pchild, server_rec *s)
 {
-    ap_log_error(APLOG_MARK, APLOG_INFO, 0, s, "mod_dbats on %s:%u: child_init_handler pchild=%08x pid=%u:%lu", s->server_hostname, s->port, (unsigned)pchild, getpid(), pthread_self());
+    ap_log_error(APLOG_MARK, APLOG_INFO, 0, s, "mod_dbats on %s:%u: child_init_handler pid=%u:%lu", s->server_hostname, s->port, getpid(), pthread_self());
 
     procstate.dht = apr_hash_make(pchild);
     procstate.pool = pchild;
@@ -128,11 +126,8 @@ typedef struct {
     int http_status;
 } mod_dbats_reqstate;
 
-static void metrics_find(request_rec *r)
+static void metrics_find(request_rec *r, mod_dbats_reqstate *reqstate)
 {
-    mod_dbats_reqstate *reqstate = (mod_dbats_reqstate*)
-	ap_get_module_config(r->request_config, &dbats_module);
-
     int rc;
 
     const char *query = get_first_param(reqstate->queryparams, "query");
@@ -199,11 +194,8 @@ static void metrics_find(request_rec *r)
     reqstate->dki = NULL;
 }
 
-static void metrics_index(request_rec *r)
+static void metrics_index(request_rec *r, mod_dbats_reqstate *reqstate)
 {
-    mod_dbats_reqstate *reqstate = (mod_dbats_reqstate*)
-	ap_get_module_config(r->request_config, &dbats_module);
-
     int rc;
 
     uint32_t keyid;
@@ -237,11 +229,8 @@ static void metrics_index(request_rec *r)
     reqstate->dki = NULL;
 }
 
-static void render(request_rec *r)
+static void render(request_rec *r, mod_dbats_reqstate *reqstate)
 {
-    mod_dbats_reqstate *reqstate = (mod_dbats_reqstate*)
-	ap_get_module_config(r->request_config, &dbats_module);
-
     int rc;
     int bid = 0;
     int i;
@@ -458,7 +447,7 @@ static const char *ends_with(const char *s, const char *w)
 static int req_handler(request_rec *r)
 {
     const char *uri_tail = NULL;
-    void (*func)(request_rec*) = NULL;
+    void (*func)(request_rec*, mod_dbats_reqstate*) = NULL;
     const char *dbats_path;
 
     if (!r->handler || strcmp(r->handler, "dbats-handler") != 0)
@@ -493,7 +482,7 @@ static int req_handler(request_rec *r)
 
     // get config
     mod_dbats_dir_config *cfg = (mod_dbats_dir_config*)ap_get_module_config(r->per_dir_config, &dbats_module);
-    ap_log_rerror(APLOG_MARK, APLOG_DEBUG, 0, r, "dir_cfg: %08x, n=%d, context=%s, path=%s", (unsigned)cfg, ++cfg->n, cfg->context, cfg->path);
+    ap_log_rerror(APLOG_MARK, APLOG_DEBUG, 0, r, "dir_cfg: path=%s", cfg->path);
     if (cfg->path) {
 	dbats_path = cfg->path;
     } else {
@@ -547,7 +536,7 @@ static int req_handler(request_rec *r)
     }
 
     // dispatch request
-    func(r);
+    func(r, reqstate);
 
     // clean up
     if (reqstate->dki) {
@@ -592,13 +581,7 @@ done:
 
 static void *create_dir_conf(apr_pool_t *pool, char *context)
 {
-    ap_log_perror(APLOG_MARK, APLOG_DEBUG, 0, pool, "create_dir_conf: pid=%u:%lu, context=%s", getpid(), pthread_self(), context);
     mod_dbats_dir_config *cfg = apr_pcalloc(pool, sizeof(mod_dbats_dir_config));
-    if (cfg) {
-	cfg->path = NULL;
-	cfg->context = apr_pstrdup(pool, context);
-	cfg->n = 0;
-    }
     return cfg;
 }
 
@@ -607,8 +590,7 @@ static void *merge_dir_conf(apr_pool_t *pool, void *vbase, void *vadd)
     mod_dbats_dir_config *base = (mod_dbats_dir_config *)vbase;
     mod_dbats_dir_config *add = (mod_dbats_dir_config *)vadd;
 
-    char *context = apr_psprintf(pool, "(%s) + (%s)", base->context, add->context);
-    mod_dbats_dir_config *merged = (mod_dbats_dir_config *)create_dir_conf(pool, context);
+    mod_dbats_dir_config *merged = (mod_dbats_dir_config *)create_dir_conf(pool, NULL);
     merged->path = add->path ? add->path : base->path;
 
     return merged;
@@ -625,14 +607,14 @@ static void register_hooks(apr_pool_t *pool)
 	return;
     }
 
-    ap_log_perror(APLOG_MARK, APLOG_INFO, 0, pool, "mod_dbats initializing");
+    ap_log_perror(APLOG_MARK, APLOG_NOTICE, 0, pool, "mod_dbats initializing");
     ap_hook_handler(req_handler, NULL, NULL, APR_HOOK_MIDDLE);
     ap_hook_child_init(child_init_handler, NULL, NULL, APR_HOOK_MIDDLE);
 }
 
 static const command_rec directives[] =
 {
-    AP_INIT_TAKE1("dbatsPath", set_path, NULL, OR_ALL, "Path to DBATS database"),
+    AP_INIT_TAKE1("dbatsPath", set_path, NULL, ACCESS_CONF, "Path to DBATS database"),
     { NULL }
 };
 
