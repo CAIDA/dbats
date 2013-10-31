@@ -4,3 +4,6 @@ report-in
 report-out
 dbats_info
 dbats_series_limit
+dbats_best_bundle
+dbats_recover
+dbats_corrupt
