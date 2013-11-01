@@ -6,19 +6,10 @@ CFLAGS       = @CFLAGS@ $(PROF) $(CPPFLAGS) # -fPIC
 LDFLAGS      = @LDFLAGS@ $(PROF)
 LDLIBS       = -ldbats @LIBS@
 APXS         = @APXS@
+APXS_DEBUG   = @APXS_DEBUG@
 
 TARGETS     = libdbats.a mod_dbats.la
 
-APXS_DEBUG= \
-	-Wc,-Wall \
-	-Wc,-Wshadow \
-	-Wc,-Wpointer-arith \
-	-Wc,-Wcast-align \
-	-Wc,-Wstrict-prototypes \
-	-Wc,-Wmissing-prototypes \
-	-Wc,-Wwrite-strings \
-	-Wc,-Winline \
-	-Wc,-Waggregate-return
 
 all: $(TARGETS)
 

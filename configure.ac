@@ -1,4 +1,4 @@
-AC_REVISION([$Id: configure.ac,v 1.9 2013/10/24 22:23:05 kkeys Exp $])
+AC_REVISION([$Id: configure.ac,v 1.10 2013/11/01 19:11:11 kkeys Exp $])
 
 AC_INIT(include/dbats.h)
 AC_PREREQ(2.53)
@@ -51,24 +51,26 @@ MY_DIRS(with_inclibprefix, LD_RUN_PATH, , /lib, [:])
 
 test "${enable_assert}" = "yes" || AC_DEFINE(NDEBUG, 1)
 
+
 if test "${enable_developer}" = "yes"; then
-#   default to CC=gcc-anal (if available).
-    if test -z "${CC}"; then
-        AC_CHECK_PROGS(GCC_ANAL, gcc-anal anal-gcc)
-        if test -n "$GCC_ANAL"; then
-            CC="$GCC_ANAL -pedantic"
-        fi
+    AC_PROG_CC(gcc-anal anal-gcc)
+    if test "$GCC" = "yes"; then
+	CC="$CC -pedantic"
     fi
     test -z "$CFLAGS" && CFLAGS='-g'
+else
+    AC_PROG_CC
 fi
 
-AC_PROG_CC
 if test "$GCC" = "yes"; then
     CC="$CC -std=gnu99"
 fi
 
-AC_CHECK_PROGS(APXS, apxs2 apxs)
 
+AC_CHECK_PROGS(APXS, apxs2 apxs)
+if test "${enable_developer}" = "yes" && test "$GCC" = "yes"; then
+    AC_SUBST(APXS_DEBUG, ["-Wc,-Wall -Wc,-Wshadow -Wc,-Wpointer-arith -Wc,-Wcast-align -Wc,-Wstrict-prototypes -Wc,-Wmissing-prototypes -Wc,-Wwrite-strings -Wc,-Winline -Wc,-Waggregate-return"])
+fi
 
 AC_CHECK_HEADERS(db.h)
 LIBS="-ldb $LIBS"
