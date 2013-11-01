@@ -8,7 +8,7 @@ LDLIBS       = -ldbats @LIBS@
 APXS         = @APXS@
 APXS_DEBUG   = @APXS_DEBUG@
 
-TARGETS     = libdbats.a mod_dbats.la
+TARGETS     = libdbats.a @MOD_DBATS@
 
 
 all: $(TARGETS)

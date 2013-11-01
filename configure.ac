@@ -1,4 +1,4 @@
-AC_REVISION([$Id: configure.ac,v 1.10 2013/11/01 19:11:11 kkeys Exp $])
+AC_REVISION([$Id: configure.ac,v 1.11 2013/11/01 19:58:59 kkeys Exp $])
 
 AC_INIT(include/dbats.h)
 AC_PREREQ(2.53)
@@ -13,6 +13,9 @@ AC_ARG_WITH(inclibdirs,
     [  --with-inclibdirs=DIRS  same as --with-incdirs=DIRS --with-libdirs=DIRS])
 AC_ARG_WITH(inclibprefix,
     [  --with-inclibprefix=DIR same as --with-incdirs=DIR/include --with-libdirs=DIR/lib])
+AC_ARG_ENABLE(apache,
+    [  --enable-apache         enable DBATS module for Apache httpd],
+    , enable_apache=maybe)
 AC_ARG_ENABLE(developer,
     [  --enable-developer      enable developer options],
     , test -r CVS && enable_developer=yes || enable_developer=no)
@@ -67,9 +70,20 @@ if test "$GCC" = "yes"; then
 fi
 
 
-AC_CHECK_PROGS(APXS, apxs2 apxs)
-if test "${enable_developer}" = "yes" && test "$GCC" = "yes"; then
-    AC_SUBST(APXS_DEBUG, ["-Wc,-Wall -Wc,-Wshadow -Wc,-Wpointer-arith -Wc,-Wcast-align -Wc,-Wstrict-prototypes -Wc,-Wmissing-prototypes -Wc,-Wwrite-strings -Wc,-Winline -Wc,-Waggregate-return"])
+if test "${enable_apache}" != "no"; then
+    AC_CHECK_PROGS(APXS, apxs2 apxs)
+    if test "${enable_developer}" = "yes" && test "$GCC" = "yes"; then
+	AC_SUBST(APXS_DEBUG, ["-Wc,-Wall -Wc,-Wshadow -Wc,-Wpointer-arith -Wc,-Wcast-align -Wc,-Wstrict-prototypes -Wc,-Wmissing-prototypes -Wc,-Wwrite-strings -Wc,-Winline -Wc,-Waggregate-return"])
+    fi
+
+    MSG="can't build apache module without apxs"
+    if test "${APXS}" != ""; then
+	AC_SUBST(MOD_DBATS, mod_dbats.la)
+    elif test "${enable_apache}" == "yes"; then
+	AC_MSG_ERROR([$MSG])
+    else
+	AC_MSG_WARN([$MSG])
+    fi
 fi
 
 AC_CHECK_HEADERS(db.h)
