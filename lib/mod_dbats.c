@@ -529,7 +529,8 @@ static int req_handler(request_rec *r)
 	    goto done;
 	}
 	ap_log_rerror(APLOG_MARK, APLOG_DEBUG, 0, r, "mod_dbats: dbats_open: ok");
-	apr_hash_set(procstate.dht, dbats_path, APR_HASH_KEY_STRING, reqstate->dh);
+	apr_hash_set(procstate.dht, apr_pstrdup(procstate.pool, dbats_path),
+	    APR_HASH_KEY_STRING, reqstate->dh);
 	apr_pool_cleanup_register(procstate.pool, reqstate->dh, mod_dbats_close, NULL);
 	apr_thread_mutex_unlock(procstate.mutex);
 	dbats_commit_open(reqstate->dh);
