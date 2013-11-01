@@ -248,6 +248,7 @@ static void render(request_rec *r, mod_dbats_reqstate *reqstate)
     //const char *logLevel = get_first_param(reqstate->queryparams, "logLevel");
 
     reqstate->http_status = HTTP_BAD_REQUEST;
+    if (!targets) return;
     char *p;
     from = strtol(str_from, &p, 10);
     if (!*str_from || *p) return;
