@@ -15,16 +15,32 @@ typedef struct {
     const char *path;
 } mod_dbats_dir_config;
 
+typedef struct {
+    request_rec *r;
+    unsigned long id;
+    apr_table_t *queryparams;
+    dbats_handler *dh;
+    dbats_snapshot *snap;
+    dbats_keytree_iterator *dki;
+    int dbats_status;
+    int http_status;
+} mod_dbats_reqstate;
+
 struct {
     apr_pool_t *pool;
-    apr_thread_mutex_t *mutex;
+    apr_thread_mutex_t *dht_mutex;
     apr_hash_t *dht; // hash table of dbats_path -> dbats_handler
+    apr_thread_mutex_t *reqcount_mutex;
+    unsigned long reqcount;
 } procstate;
 
 module AP_MODULE_DECLARE_DATA dbats_module;
 
 apr_threadkey_t *tlskey_req = NULL; // thread-local storage key for request
 server_rec *main_server = NULL;
+
+#define log_rerror(level, reqstate, fmt, ...) \
+    ap_log_rerror(APLOG_MARK, level, 0, reqstate->r, "%u#%lu: " fmt, getpid(), reqstate->id, __VA_ARGS__)
 
 static const char *set_path(cmd_parms *cmd, void *vcfg, const char *arg)
 {
@@ -35,24 +51,27 @@ static const char *set_path(cmd_parms *cmd, void *vcfg, const char *arg)
 
 static void log_callback(int level, const char *file, int line, const char *msg)
 {
-    void *r;
-    apr_threadkey_private_get(&r, tlskey_req);
+    void *vr;
+    apr_threadkey_private_get(&vr, tlskey_req);
+    request_rec *r = vr;
 
     level = (level >= DBATS_LOG_FINE) ? APLOG_DEBUG :
 	(level >= DBATS_LOG_CONFIG) ? APLOG_INFO :
 	(level >= DBATS_LOG_INFO) ? APLOG_NOTICE :
 	(level >= DBATS_LOG_WARN) ? APLOG_WARNING :
 	APLOG_ERR;
-    if (r)
-	ap_log_rerror(file, line, level, 0, (request_rec*)r, "%s", msg);
-    else // e.g., during init or cleanup
+    if (r) {
+	mod_dbats_reqstate *reqstate = (mod_dbats_reqstate*)ap_get_module_config(r->request_config, &dbats_module);
+	ap_log_rerror(file, line, level, 0, reqstate->r, "%u#%lu: " "%s", getpid(), reqstate->id, msg);
+    } else { // e.g., during init or cleanup
 	ap_log_error(file, line, level, 0, main_server, "%s", msg);
+    }
 }
 
 static apr_status_t mod_dbats_close(void *data)
 {
     dbats_handler *dh = (dbats_handler*)data;
-    ap_log_perror(APLOG_MARK, APLOG_DEBUG, 0, procstate.pool, "mod_dbats: mod_dbats_close pid=%u:%lu", getpid(), pthread_self());
+    ap_log_perror(APLOG_MARK, APLOG_DEBUG, 0, procstate.pool, "mod_dbats: mod_dbats_close pid=%u", getpid());
     int rc = dbats_close(dh);
     ap_log_perror(APLOG_MARK, APLOG_DEBUG, 0, procstate.pool, "mod_dbats: dbats_close: %d %s", rc, db_strerror(rc));
     return APR_SUCCESS;
@@ -65,12 +84,14 @@ static apr_status_t mod_dbats_threadkey_private_delete(void *data)
 
 static void child_init_handler(apr_pool_t *pchild, server_rec *s)
 {
-    ap_log_error(APLOG_MARK, APLOG_INFO, 0, s, "mod_dbats on %s:%u: child_init_handler pid=%u:%lu", s->server_hostname, s->port, getpid(), pthread_self());
+    ap_log_error(APLOG_MARK, APLOG_INFO, 0, s, "mod_dbats on %s:%u: child_init_handler pid=%u", s->server_hostname, s->port, getpid());
 
-    procstate.dht = apr_hash_make(pchild);
+    apr_thread_mutex_create(&procstate.reqcount_mutex, APR_THREAD_MUTEX_DEFAULT, pchild);
+
     procstate.pool = pchild;
+    procstate.dht = apr_hash_make(pchild);
 
-    apr_thread_mutex_create(&procstate.mutex, APR_THREAD_MUTEX_DEFAULT, pchild);
+    apr_thread_mutex_create(&procstate.dht_mutex, APR_THREAD_MUTEX_DEFAULT, pchild);
 
     main_server = s;
     apr_threadkey_private_create(&tlskey_req, NULL, pchild);
@@ -117,15 +138,6 @@ static inline char *get_first_param(apr_table_t *queryparams, const char *key)
     return plist ? APR_ARRAY_IDX(plist, 0, char*) : NULL;
 }
 
-typedef struct {
-    apr_table_t *queryparams;
-    dbats_handler *dh;
-    dbats_snapshot *snap;
-    dbats_keytree_iterator *dki;
-    int dbats_status;
-    int http_status;
-} mod_dbats_reqstate;
-
 static void metrics_find(request_rec *r, mod_dbats_reqstate *reqstate)
 {
     int rc;
@@ -134,14 +146,14 @@ static void metrics_find(request_rec *r, mod_dbats_reqstate *reqstate)
     const char *format = get_first_param(reqstate->queryparams, "format");
     //const char *logLevel = get_first_param(reqstate->queryparams, "logLevel");
 
-    ap_log_rerror(APLOG_MARK, APLOG_DEBUG, 0, r, "# query: %s", query);
+    log_rerror(APLOG_DEBUG, reqstate, "# query: %s", query);
 
     uint32_t keyid;
     char name[DBATS_KEYLEN];
 
     rc = dbats_glob_keyname_start(reqstate->dh, NULL, &reqstate->dki, query);
     if (rc != 0) {
-	ap_log_rerror(APLOG_MARK, APLOG_DEBUG, 0, r, "mod_dbats: dbats_glob_keyname_start: %s", db_strerror(rc));
+	log_rerror(APLOG_DEBUG, reqstate, "mod_dbats: dbats_glob_keyname_start: %s", db_strerror(rc));
 	reqstate->dbats_status = rc;
 	reqstate->dki = NULL;
 	return;
@@ -185,7 +197,7 @@ static void metrics_find(request_rec *r, mod_dbats_reqstate *reqstate)
     }
 
     if (rc != DB_NOTFOUND) {
-	ap_log_rerror(APLOG_MARK, APLOG_NOTICE, 0, r,
+	log_rerror(APLOG_NOTICE, reqstate,
 	    "mod_dbats: dbats_glob_keyname_next: %s", db_strerror(rc));
 	reqstate->dbats_status = rc;
     }
@@ -203,7 +215,7 @@ static void metrics_index(request_rec *r, mod_dbats_reqstate *reqstate)
 
     rc = dbats_glob_keyname_start(reqstate->dh, NULL, &reqstate->dki, NULL);
     if (rc != 0) {
-	ap_log_rerror(APLOG_MARK, APLOG_NOTICE, 0, r, "mod_dbats: dbats_glob_keyname_start: %s", db_strerror(rc));
+	log_rerror(APLOG_NOTICE, reqstate, "mod_dbats: dbats_glob_keyname_start: %s", db_strerror(rc));
 	reqstate->dbats_status = rc;
 	reqstate->dki = NULL;
 	return;
@@ -220,7 +232,7 @@ static void metrics_index(request_rec *r, mod_dbats_reqstate *reqstate)
     ap_rprintf(r, "\n]\n");
 
     if (rc != DB_NOTFOUND) {
-	ap_log_rerror(APLOG_MARK, APLOG_NOTICE, 0, r,
+	log_rerror(APLOG_NOTICE, reqstate,
 	    "mod_dbats: dbats_glob_keyname_next: %s", db_strerror(rc));
 	reqstate->dbats_status = rc;
     }
@@ -265,11 +277,11 @@ static void render(request_rec *r, mod_dbats_reqstate *reqstate)
     reqstate->http_status = OK;
 
     for (i = 0; i < targets->nelts; i++)
-	ap_log_rerror(APLOG_MARK, APLOG_DEBUG, 0, r, "# target[%d]: %s", i, APR_ARRAY_IDX(targets, i, char*));
+	log_rerror(APLOG_DEBUG, reqstate, "# target[%d]: %s", i, APR_ARRAY_IDX(targets, i, char*));
 
-    ap_log_rerror(APLOG_MARK, APLOG_DEBUG, 0, r, "# from:   %" PRIu32, from);
-    ap_log_rerror(APLOG_MARK, APLOG_DEBUG, 0, r, "# until:  %" PRIu32, until);
-    ap_log_rerror(APLOG_MARK, APLOG_DEBUG, 0, r, "# max_points: %" PRIu32, max_points);
+    log_rerror(APLOG_DEBUG, reqstate, "# from:   %" PRIu32, from);
+    log_rerror(APLOG_DEBUG, reqstate, "# until:  %" PRIu32, until);
+    log_rerror(APLOG_DEBUG, reqstate, "# max_points: %" PRIu32, max_points);
 
     if (max_points > 0) {
 	bid = dbats_best_bundle(reqstate->dh, agg_func, from, until, max_points);
@@ -311,7 +323,7 @@ static void render(request_rec *r, mod_dbats_reqstate *reqstate)
 	const char *target = APR_ARRAY_IDX(targets, i, char*);
 	rc = dbats_glob_keyname_start(reqstate->dh, NULL, &reqstate->dki, target);
 	if (rc != 0) {
-	    ap_log_rerror(APLOG_MARK, APLOG_NOTICE, 0, r,
+	    log_rerror(APLOG_NOTICE, reqstate,
 		"mod_dbats: dbats_glob_keyname_start: %s", db_strerror(rc));
 	    reqstate->dbats_status = rc;
 	    reqstate->dki = NULL;
@@ -323,11 +335,11 @@ static void render(request_rec *r, mod_dbats_reqstate *reqstate)
 	    chunk->key = apr_pstrdup(r->pool, key);
 	    chunk->isset = apr_palloc(r->pool, nsamples * sizeof(uint8_t));
 	    chunk->data = apr_palloc(r->pool, nsamples * sizeof(dbats_value));
-	    ap_log_rerror(APLOG_MARK, APLOG_DEBUG, 0, r, "mod_dbats: (%d/%d) key #%u %s",
+	    log_rerror(APLOG_DEBUG, reqstate, "mod_dbats: (%d/%d key #%u %s)",
 		chunks->nelts, chunks->nalloc, chunk->keyid, chunk->key);
 	}
 	if (rc != DB_NOTFOUND) {
-	    ap_log_rerror(APLOG_MARK, APLOG_NOTICE, 0, r,
+	    log_rerror(APLOG_NOTICE, reqstate,
 		"mod_dbats: dbats_glob_keyname_next: %s", db_strerror(rc));
 	    reqstate->dbats_status = rc;
 	    return;
@@ -349,7 +361,7 @@ static void render(request_rec *r, mod_dbats_reqstate *reqstate)
 	for (c = 0; c < chunks->nelts; c++) {
 	    chunk_t *chunk = &APR_ARRAY_IDX(chunks, c, chunk_t);
 	    const dbats_value *v;
-	    ap_log_rerror(APLOG_MARK, APLOG_DEBUG, 0, r, "mod_dbats: dbats_get key #%u %s",
+	    log_rerror(APLOG_DEBUG, reqstate, "mod_dbats: dbats_get key #%u %s",
 		chunk->keyid, chunk->key);
 	    rc = dbats_get(reqstate->snap, chunk->keyid, &v, bid);
 	    if (rc == DB_NOTFOUND) {
@@ -454,21 +466,25 @@ static int req_handler(request_rec *r)
     if (!r->handler || strcmp(r->handler, "dbats-handler") != 0)
 	return DECLINED;
 
-    ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r, "mod_dbats: req_handler on %s:%u pid=%u:%lu", r->server->server_hostname, r->server->port, getpid(), pthread_self());
-    ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r, "the_request: %s", r->the_request);
-    ap_log_rerror(APLOG_MARK, APLOG_DEBUG, 0, r, "uri: %s", r->uri);
-    ap_log_rerror(APLOG_MARK, APLOG_DEBUG, 0, r, "filename: %s", r->filename);
-    ap_log_rerror(APLOG_MARK, APLOG_DEBUG, 0, r, "canonical_filename: %s", r->canonical_filename);
-    ap_log_rerror(APLOG_MARK, APLOG_DEBUG, 0, r, "path_info: %s", r->path_info);
-    ap_log_rerror(APLOG_MARK, APLOG_DEBUG, 0, r, "args: %s", r->args);
-
     apr_threadkey_private_set(r, tlskey_req);
 
     // create request state
     mod_dbats_reqstate *reqstate = apr_pcalloc(r->pool, sizeof(*reqstate));
+    reqstate->r = r;
     reqstate->http_status = OK;
     reqstate->dbats_status = 0;
+    apr_thread_mutex_lock(procstate.reqcount_mutex);
+    reqstate->id = ++procstate.reqcount;
+    apr_thread_mutex_unlock(procstate.reqcount_mutex);
     ap_set_module_config(r->request_config, &dbats_module, reqstate);
+
+    log_rerror(APLOG_INFO, reqstate, "mod_dbats: req_handler on %s:%u", r->server->server_hostname, r->server->port);
+    log_rerror(APLOG_INFO, reqstate, "the_request: %s", r->the_request);
+    log_rerror(APLOG_DEBUG, reqstate, "uri: %s", r->uri);
+    log_rerror(APLOG_DEBUG, reqstate, "filename: %s", r->filename);
+    log_rerror(APLOG_DEBUG, reqstate, "canonical_filename: %s", r->canonical_filename);
+    log_rerror(APLOG_DEBUG, reqstate, "path_info: %s", r->path_info);
+    log_rerror(APLOG_DEBUG, reqstate, "args: %s", r->args);
 
     if ((uri_tail = ends_with(r->uri, "/metrics/find/"))) {
 	func = metrics_find;
@@ -483,7 +499,7 @@ static int req_handler(request_rec *r)
 
     // get config
     mod_dbats_dir_config *cfg = (mod_dbats_dir_config*)ap_get_module_config(r->per_dir_config, &dbats_module);
-    ap_log_rerror(APLOG_MARK, APLOG_DEBUG, 0, r, "dir_cfg: path=%s", cfg->path);
+    log_rerror(APLOG_DEBUG, reqstate, "dir_cfg: path=%s", cfg->path);
     if (cfg->path) {
 	dbats_path = cfg->path;
     } else {
@@ -496,7 +512,7 @@ static int req_handler(request_rec *r)
 	char *tmp = apr_psprintf(r->pool, "%s%s", r->filename, r->path_info);
 	tmp[strlen(tmp) - strlen(uri_tail)] = '\0'; // chop off tail
 	dbats_path = tmp;
-	ap_log_rerror(APLOG_MARK, APLOG_DEBUG, 0, r, "default path=%s", dbats_path);
+	log_rerror(APLOG_DEBUG, reqstate, "default path=%s", dbats_path);
     }
 
     // parse query parameters
@@ -513,28 +529,28 @@ static int req_handler(request_rec *r)
 	level >= APLOG_ERR ? DBATS_LOG_ERR : 0;
 
     // get dbats_handler for this {process, dbats_path}
-    apr_thread_mutex_lock(procstate.mutex);
+    apr_thread_mutex_lock(procstate.dht_mutex);
     reqstate->dh = (dbats_handler*)apr_hash_get(procstate.dht, dbats_path, APR_HASH_KEY_STRING);
     if (reqstate->dh) {
-	apr_thread_mutex_unlock(procstate.mutex);
+	apr_thread_mutex_unlock(procstate.dht_mutex);
     } else {
 	reopen:
-	ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r, "mod_dbats: dbats_open %s", dbats_path);
+	log_rerror(APLOG_INFO, reqstate, "mod_dbats: dbats_open %s", dbats_path);
 	int rc = dbats_open(&reqstate->dh, dbats_path, 1, 60, DBATS_READONLY, 0);
 	if (rc != 0) {
-	    ap_log_rerror(APLOG_MARK, APLOG_NOTICE, 0, r, "mod_dbats: dbats_open: %s", db_strerror(rc));
-	    apr_thread_mutex_unlock(procstate.mutex);
+	    log_rerror(APLOG_NOTICE, reqstate, "mod_dbats: dbats_open: %s", db_strerror(rc));
+	    apr_thread_mutex_unlock(procstate.dht_mutex);
 	    reqstate->http_status = (rc == ENOENT) ? HTTP_NOT_FOUND :
 		HTTP_INTERNAL_SERVER_ERROR;
 	    goto done;
 	}
-	ap_log_rerror(APLOG_MARK, APLOG_DEBUG, 0, r, "mod_dbats: dbats_open: ok");
+	log_rerror(APLOG_DEBUG, reqstate, "mod_dbats: dbats_open: %s", "ok");
 	apr_hash_set(procstate.dht, apr_pstrdup(procstate.pool, dbats_path),
 	    APR_HASH_KEY_STRING, reqstate->dh);
 	apr_pool_cleanup_register(procstate.pool, reqstate->dh, mod_dbats_close, NULL);
-	apr_thread_mutex_unlock(procstate.mutex);
+	apr_thread_mutex_unlock(procstate.dht_mutex);
 	dbats_commit_open(reqstate->dh);
-	ap_log_rerror(APLOG_MARK, APLOG_DEBUG, 0, r, "mod_dbats: dbats_commit_open: ok");
+	log_rerror(APLOG_DEBUG, reqstate, "mod_dbats: dbats_commit_open: %s", "ok");
     }
 
     // dispatch request
@@ -561,10 +577,10 @@ static int req_handler(request_rec *r)
     } else if (reqstate->dbats_status == DB_RUNRECOVERY) {
 	// Since we're readonly, we can't do the recovery, but if database was
 	// recovered externally, we have to reopen it to use it.
-	ap_log_rerror(APLOG_MARK, APLOG_WARNING, 0, r, "mod_dbats attempting to reopen db");
+	log_rerror(APLOG_WARNING, reqstate, "mod_dbats attempting to reopen %s", dbats_path);
 	if (reqstate->dh)
 	    apr_pool_cleanup_run(procstate.pool, reqstate->dh, mod_dbats_close);
-	apr_thread_mutex_lock(procstate.mutex);
+	apr_thread_mutex_lock(procstate.dht_mutex);
 	apr_hash_set(procstate.dht, dbats_path, APR_HASH_KEY_STRING, NULL);
 	reqstate->http_status = OK;
 	reqstate->dbats_status = 0;
@@ -577,7 +593,7 @@ static int req_handler(request_rec *r)
 
 done:
     apr_threadkey_private_set(NULL, tlskey_req);
-    ap_log_rerror(APLOG_MARK, APLOG_INFO, 0, r, "request result: %d", reqstate->http_status);
+    log_rerror(APLOG_INFO, reqstate, "request result: %d", reqstate->http_status);
     return reqstate->http_status;
 }
 
