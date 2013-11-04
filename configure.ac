@@ -1,7 +1,9 @@
-AC_REVISION([$Id: configure.ac,v 1.11 2013/11/01 19:58:59 kkeys Exp $])
+AC_REVISION([$Id: configure.ac,v 1.12 2013/11/04 20:33:35 kkeys Exp $])
 
-AC_INIT(include/dbats.h)
-AC_PREREQ(2.53)
+AC_PREREQ(2.68)
+AC_INIT(DBATS, 0.1, kkeys@caida.org)
+AC_CONFIG_SRCDIR(include/dbats.h)
+AC_CONFIG_HEADERS(lib/config.h)
 
 m4_include([m4/ax_pthread.m4]) dnl
 
@@ -22,8 +24,6 @@ AC_ARG_ENABLE(developer,
 AC_ARG_ENABLE(assert,
     [  --enable-assert         enable assert() for debugging],
     , enable_assert="$enable_developer")
-
-AC_CONFIG_HEADER(lib/config.h)
 
 dnl MY_DIRS(src, dst[, prefix[, suffix[, separator]]])
 AC_DEFUN(MY_DIRS, [
@@ -50,11 +50,13 @@ MY_DIRS(with_inclibprefix, LDFLAGS, -L, /lib)
 MY_DIRS(with_libdirs, LD_RUN_PATH, , , [:])
 MY_DIRS(with_inclibdirs, LD_RUN_PATH, , , [:])
 MY_DIRS(with_inclibprefix, LD_RUN_PATH, , /lib, [:])
+AC_SUBST(LD_RUN_PATH)
+export LD_RUN_PATH
 
 
 test "${enable_assert}" = "yes" || AC_DEFINE(NDEBUG, 1)
 
-
+# Checks for programs.
 if test "${enable_developer}" = "yes"; then
     AC_PROG_CC(gcc-anal anal-gcc)
     if test "$GCC" = "yes"; then
@@ -86,80 +88,68 @@ if test "${enable_apache}" != "no"; then
     fi
 fi
 
-AC_CHECK_HEADERS(db.h)
-LIBS="-ldb $LIBS"
 
+# Checks for libraries.
+AC_CHECK_LIB([db], [db_version], , [
+    # Some instances of libdb depend on pthreads, so try that.
+    AX_PTHREAD()
+    LIBS="$PTHREAD_LIBS $LIBS"
+    CFLAGS="$CFLAGS $PTHREAD_CFLAGS"
+    CC="$PTHREAD_CC"
+    AC_CHECK_LIB([db], [db_version])
+])
+
+
+# Checks for header files.
+AC_CHECK_HEADERS(db.h)
+
+
+# Checks for typedefs, structures, and compiler characteristics.
 AC_C_BIGENDIAN()
 
 
-PROGINC="
-#include <stdlib.h>
-#include <db.h>"
-PROGBODY="
-db_version(0,0,0); exit(0);"
 
 
-# Simple db program to check linking with -ldb
-AC_MSG_CHECKING([for linking with db (without pthreads)])
-AC_LINK_IFELSE([AC_LANG_PROGRAM([$PROGINC],[$PROGBODY])],
-    [AC_MSG_RESULT([yes])],
-    [
-	AC_MSG_RESULT([no])
-	# try again with pthreads
-	AX_PTHREAD()
-	AC_MSG_CHECKING([for linking with db (with pthreads)])
-	LIBS="$PTHREAD_LIBS $LIBS"
-	CFLAGS="$CFLAGS $PTHREAD_CFLAGS"
-	CC="$PTHREAD_CC"
-	AC_LINK_IFELSE([AC_LANG_PROGRAM([$PROGINC],[$PROGBODY])],
-	    [AC_MSG_RESULT([yes])],
-	    [AC_MSG_RESULT([no]); AC_MSG_ERROR([unable to link with db])])
-    ])
 
-# If running the same program doesn't work, try re-linking with different
-# RPATH options.
+# Other.
+
 AC_MSG_CHECKING([for dynamic linking options])
+# Also, create the conftest.out used by the next test.
 ORIG_LDFLAGS=$LDFLAGS
 for opt in "" "-Wl,-rpath=" "-rpath " "-R "; do
     RPATH_OPTS=""
     if test -n "$opt"; then
-	for path in $with_libdirs $with_inclibdirs; do
-	    RPATH_OPTS="$RPATH_OPTS $opt$path"
-	done
-	for path in $with_inclibprefix; do
-	    RPATH_OPTS="$RPATH_OPTS $opt$path/lib"
-	done
+	MY_DIRS(with_libdirs, RPATH_OPTS, $opt)
+	MY_DIRS(with_inclibdirs, RPATH_OPTS, $opt)
+	MY_DIRS(with_inclibprefix, RPATH_OPTS, $opt, /lib)
     fi
     LDFLAGS="$ORIG_LDFLAGS $RPATH_OPTS"
-    AC_RUN_IFELSE([AC_LANG_PROGRAM([$PROGINC],[$PROGBODY])],
-	[run_ok=1], [run_ok=0], [run_ok=0])
-    if test $run_ok -eq 1; then
+    AC_RUN_IFELSE([AC_LANG_PROGRAM([
+	#include <stdlib.h>
+	#include <errno.h>
+	#include <db.h>
+	], [
+	FILE *out = fopen("conftest.out", "w");
+	if (!out) exit(errno);
+	int major, minor, patch;
+	db_version(&major,&minor,&patch);
+	fprintf(out, "dbhversion=X%d.%d.%d\ndbmajor=%d\ndbminor=%d\ndbpatch=%d\n",
+	    DB_VERSION_MAJOR, DB_VERSION_MINOR, DB_VERSION_PATCH,
+	    major, minor, patch);
+	exit(0);
+	])],
+	[ok=1], [ok=0])
+    if test $ok -eq 1; then
 	AC_MSG_RESULT([${RPATH_OPTS:-(none needed)}])
 	break
     fi
 done
-if test $run_ok -ne 1; then
+if test $ok -ne 1; then
     AC_MSG_RESULT([no working options found])
     AC_MSG_ERROR([You might want to try running configure again with CFLAGS=-static in the environment.])
 fi
 
 AC_MSG_CHECKING([Berkeley DB version])
-AC_RUN_IFELSE([AC_LANG_PROGRAM([
-    #include <stdlib.h>
-    #include <errno.h>
-    #include <db.h>
-    ], [
-    FILE *out = fopen("conftest.out", "w");
-    if (!out) exit(errno);
-    int major, minor, patch;
-    db_version(&major,&minor,&patch);
-    fprintf(out, "dbmajor=%d\ndbminor=%d\ndbpatch=%d\n", major, minor, patch);
-    exit(0);
-    ])],
-    [ok=1], [ok=0], [ok=0])
-if test "$ok" -ne "1"; then
-    AC_MSG_ERROR([error])
-fi
 . ./conftest.out
 AC_MSG_RESULT([$dbmajor.$dbminor.$dbpatch])
 if test "$dbmajor" -lt 4; then
@@ -168,17 +158,8 @@ fi
 if test "$dbmajor" -lt 5 || { test "$dbmajor" -eq 5 && test "$dbminor" -lt 3; } then
     AC_MSG_WARN([DB version 5.3 or higher is recommended.])
 fi
-
-AC_RUN_IFELSE([AC_LANG_PROGRAM([
-    #include <db.h>
-    ], [
-    fprintf(stderr, "db_version: %s\n", db_version(0,0,0));
-    fprintf(stderr, "DB_VERSION_STRING: %s\n", DB_VERSION_STRING);
-    exit(!!strcmp(db_version(0,0,0), DB_VERSION_STRING));
-    ])],
-    [db_version_ok=1], [db_version_ok=0], [db_version_ok=0])
-if test "$db_version_ok" -ne "1"; then
-    AC_MSG_ERROR([DB_VERSION_STRING in <db.h> does not match db_version() in library.])
+if test "$dbhversion" != "$dbmajor.$dbminor.$dbpatch"; then
+    AC_MSG_ERROR([DB_VERSION ($dbhversion) in <db.h> does not match db_version() ($dbmajor.$dbminor.$dbpatch) in libdb.])
 fi
 
 AC_MSG_CHECKING([for DB_ENV->txn_begin()])
@@ -202,8 +183,10 @@ AC_LINK_IFELSE([AC_LANG_PROGRAM(
     [AC_MSG_RESULT([yes]); AC_DEFINE(HAVE_DB_SET_PRIORITY)],
     [AC_MSG_RESULT([no])])
 
-AC_SUBST(LD_RUN_PATH)
-AC_OUTPUT(lib/Makefile apps/Makefile)
+
+# Output.
+AC_CONFIG_FILES(lib/Makefile apps/Makefile)
+AC_OUTPUT()
 
 AC_MSG_RESULT([])
 AC_MSG_RESULT([Configuration complete.])
