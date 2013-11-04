@@ -2,6 +2,8 @@
  * DBATS module for Apache 2.2 web server
  */
 
+#define _POSIX_C_SOURCE 200809L
+#include <db.h>
 #include "httpd.h"
 #include "http_config.h"
 #include "http_protocol.h"

@@ -1,4 +1,4 @@
-AC_REVISION([$Id: configure.ac,v 1.13 2013/11/04 20:34:33 kkeys Exp $])
+AC_REVISION([$Id: configure.ac,v 1.14 2013/11/04 23:19:17 kkeys Exp $])
 
 AC_PREREQ(2.68)
 AC_INIT(DBATS, 0.1, kkeys@caida.org)
@@ -68,7 +68,7 @@ else
 fi
 
 if test "$GCC" = "yes"; then
-    CC="$CC -std=gnu99"
+    CC="$CC -std=c99"
 fi
 
 
@@ -101,12 +101,27 @@ AC_CHECK_LIB([db], [db_version], , [
 
 
 # Checks for header files.
-AC_CHECK_HEADERS(db.h)
+
+POSIX_HEADER="
+#define _POSIX_C_SOURCE 200809L
+#include <unistd.h>"
+
+DB_HEADER="
+#include \"include/uint.h\"
+#include <db.h>"
+
+AC_CHECK_HEADERS(db.h, , , [
+$POSIX_HEADER
+#include "include/uint.h"
+])
 
 
 # Checks for typedefs, structures, and compiler characteristics.
 AC_C_BIGENDIAN()
 
+
+# Checks for library functions.
+AC_CHECK_FUNCS([fchmod])
 
 
 
@@ -114,7 +129,7 @@ AC_C_BIGENDIAN()
 # Other.
 
 AC_MSG_CHECKING([for dynamic linking options])
-# Also, create the conftest.out used by the next test.
+# Also, generate the conftest.out script used by the db version test below.
 ORIG_LDFLAGS=$LDFLAGS
 for opt in "" "-Wl,-rpath=" "-rpath " "-R "; do
     RPATH_OPTS=""
@@ -125,9 +140,10 @@ for opt in "" "-Wl,-rpath=" "-rpath " "-R "; do
     fi
     LDFLAGS="$ORIG_LDFLAGS $RPATH_OPTS"
     AC_RUN_IFELSE([AC_LANG_PROGRAM([
+	$POSIX_HEADER
 	#include <stdlib.h>
 	#include <errno.h>
-	#include <db.h>
+	$DB_HEADER
 	], [
 	FILE *out = fopen("conftest.out", "w");
 	if (!out) exit(errno);
@@ -164,22 +180,22 @@ fi
 
 AC_MSG_CHECKING([for DB_ENV->txn_begin()])
 AC_LINK_IFELSE([AC_LANG_PROGRAM(
-    [#include <db.h>],
-    [DB_ENV *env; env->txn_begin(0,0,0,0);])],
+    [$POSIX_HEADER $DB_HEADER],
+    [DB_ENV *env=0; env->txn_begin(0,0,0,0);])],
     [AC_MSG_RESULT([yes]); AC_DEFINE(HAVE_DB_TXN_BEGIN)],
     [AC_MSG_RESULT([no])])
 
 AC_MSG_CHECKING([for DB->set_lk_exclusive()])
 AC_LINK_IFELSE([AC_LANG_PROGRAM(
-    [#include <db.h>],
-    [DB *db; db->set_lk_exclusive(db, 1);])],
+    [$POSIX_HEADER $DB_HEADER],
+    [DB *db=0; db->set_lk_exclusive(db, 1);])],
     [AC_MSG_RESULT([yes]); AC_DEFINE(HAVE_DB_SET_LK_EXCLUSIVE)],
     [AC_MSG_RESULT([no]); AC_MSG_WARN([Exclusive locking will not be available.])])
 
 AC_MSG_CHECKING([for DB_TXN->set_priority()])
 AC_LINK_IFELSE([AC_LANG_PROGRAM(
-    [#include <db.h>],
-    [DB_TXN *txn; txn->set_priority(txn, 100);])],
+    [$POSIX_HEADER $DB_HEADER],
+    [DB_TXN *txn=0; txn->set_priority(txn, 100);])],
     [AC_MSG_RESULT([yes]); AC_DEFINE(HAVE_DB_SET_PRIORITY)],
     [AC_MSG_RESULT([no])])
 

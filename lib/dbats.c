@@ -5,11 +5,13 @@
  * (at your option) any later version.
  */
 
+#define _POSIX_C_SOURCE 200809L
+
+#include <unistd.h>
+#include "uint.h"
 #include <stdio.h>
-#include <db.h>
 #include <sys/stat.h>
 #include <errno.h>
-
 #include <stdlib.h>
 #include <string.h>
 #include <limits.h>
@@ -20,6 +22,7 @@
 #include <assert.h>
 #include <arpa/inet.h> // htonl() etc
 
+#include <db.h>
 #include "dbats.h"
 #include "quicklz.h"
 #include "config.h"
@@ -368,7 +371,7 @@ static void log_db_op(int level, const char *fname, int line, DB *db,
     } else if (db == dh->dbKeytree) {
 	keytree_key* ktkey = (keytree_key*)key;
 	sprintf(keybuf, "parent=%x name=\"%.*s\"",
-	    ntohl(ktkey->parent), key_len - KTKEY_SIZE(0), ktkey->nodename);
+	    ntohl(ktkey->parent), key_len - (int)KTKEY_SIZE(0), ktkey->nodename);
     } else if (db == dh->dbConfig) {
 	sprintf(keybuf, "\"%.*s\"", key_len, (char*)key);
     } else if (db == dh->dbKeyid) {
@@ -558,8 +561,13 @@ static int make_file_writable(const char *filename)
     if (newmode & S_IROTH) newmode |= S_IWOTH;
     if (newmode == statbuf.st_mode) return 0; // no change
     dbats_log(DBATS_LOG_INFO, "%s mode %03o -> %03o", filename, statbuf.st_mode, newmode);
-    if (fchmod(fd, newmode) < 0) {
-	dbats_log(DBATS_LOG_ERR, "fchmod %s: %s", filename, strerror(errno));
+#if HAVE_FCHMOD
+    if (fchmod(fd, newmode) < 0)
+#else
+    if (chmod(filename, newmode) < 0)
+#endif
+    {
+	dbats_log(DBATS_LOG_ERR, "chmod %s: %s", filename, strerror(errno));
 	return errno;
     }
     return 0;

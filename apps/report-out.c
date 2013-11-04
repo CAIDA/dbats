@@ -1,7 +1,12 @@
+#define _POSIX_C_SOURCE 200809L
+#include <unistd.h>
+#include <inttypes.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <errno.h>
 #include <string.h>
+#include "uint.h"
+#include <db.h>
 #include "dbats.h"
 
 static char *progname = 0;

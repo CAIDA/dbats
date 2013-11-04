@@ -70,8 +70,9 @@
  *  lead to an unbreakable deadlock.
 */
 
-#include <inttypes.h>
-#include <db.h>
+#ifndef DBATS_H
+#define DBATS_H
+
 #include "dbats_log.h"
 
 /* ************************************************** */
@@ -581,8 +582,8 @@ extern int dbats_num_keys(dbats_handler *handler, uint32_t *num_keys);
  *    - ? matches any one character (except '.')
  *    - [...] matches any one character in the character class (except '.')
  *      - A leading '^' negates the character class
- *      - Two characters separated by '-' describe the range of ASCII
- *        characters between the first and second characters, inclusive
+ *      - Two characters separated by '-' matches any ASCII character between
+ *        the two characters, inclusive
  *    - {...} matches any one string of characters in the comma-separated list
  *      of strings
  *    - Any other character matches itself.
@@ -719,3 +720,5 @@ extern const dbats_bundle_info *dbats_get_bundle_info(dbats_handler *handler,
     int bid);
 
 extern void dbats_stat_print(const dbats_handler *handler);
+
+#endif // DBATS_H
