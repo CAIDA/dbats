@@ -1,4 +1,4 @@
-AC_REVISION([$Id: configure.ac,v 1.12 2013/11/04 20:33:35 kkeys Exp $])
+AC_REVISION([$Id: configure.ac,v 1.13 2013/11/04 20:34:33 kkeys Exp $])
 
 AC_PREREQ(2.68)
 AC_INIT(DBATS, 0.1, kkeys@caida.org)
@@ -133,7 +133,7 @@ for opt in "" "-Wl,-rpath=" "-rpath " "-R "; do
 	if (!out) exit(errno);
 	int major, minor, patch;
 	db_version(&major,&minor,&patch);
-	fprintf(out, "dbhversion=X%d.%d.%d\ndbmajor=%d\ndbminor=%d\ndbpatch=%d\n",
+	fprintf(out, "dbhversion=%d.%d.%d\ndbmajor=%d\ndbminor=%d\ndbpatch=%d\n",
 	    DB_VERSION_MAJOR, DB_VERSION_MINOR, DB_VERSION_PATCH,
 	    major, minor, patch);
 	exit(0);
