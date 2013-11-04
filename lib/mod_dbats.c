@@ -3,6 +3,7 @@
  */
 
 #define _POSIX_C_SOURCE 200809L
+#include "uint.h"
 #include <db.h>
 #include "httpd.h"
 #include "http_config.h"
