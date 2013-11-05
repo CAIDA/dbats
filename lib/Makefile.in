@@ -8,7 +8,7 @@ LDLIBS       = @LIBS@
 RANLIB       = @RANLIB@
 APXS         = @APXS@
 APXS_DEBUG   = @APXS_DEBUG@
-LIBTOOL      = @LIBTOOL@ --no-silent
+LIBTOOL      = @LIBTOOL@
 LD_RUN_PATH  = @LD_RUN_PATH@
 
 TARGETS     = libdbats.a @MOD_DBATS@
@@ -46,3 +46,4 @@ install: mod_dbats.la
 
 clean:
 	/bin/rm -f $(TARGETS) *.o *~
+	test -n "$(LIBTOOL)" && $(LIBTOOL) --mode=clean /bin/rm -f *.lo

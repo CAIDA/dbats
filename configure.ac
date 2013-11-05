@@ -1,4 +1,4 @@
-AC_REVISION([$Id: configure.ac,v 1.16 2013/11/05 20:57:08 kkeys Exp $])
+AC_REVISION([$Id: configure.ac,v 1.17 2013/11/05 23:39:46 kkeys Exp $])
 
 AC_PREREQ(2.68)
 AC_INIT(DBATS, 0.1, kkeys@caida.org)
@@ -83,7 +83,7 @@ if test "${enable_apache}" != "no"; then
     MSG="can't build apache module without apxs"
     if test "${APXS}" != ""; then
 	AC_SUBST(MOD_DBATS, mod_dbats.la)
-	AC_SUBST(LIBTOOL, [$($APXS -q LIBTOOL)])
+	AC_SUBST(LIBTOOL, ["`$APXS -q LIBTOOL` --no-silent"])
     elif test "${enable_apache}" == "yes"; then
 	AC_MSG_ERROR([$MSG])
     else
