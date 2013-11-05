@@ -1,4 +1,4 @@
-AC_REVISION([$Id: configure.ac,v 1.15 2013/11/05 01:25:38 kkeys Exp $])
+AC_REVISION([$Id: configure.ac,v 1.16 2013/11/05 20:57:08 kkeys Exp $])
 
 AC_PREREQ(2.68)
 AC_INIT(DBATS, 0.1, kkeys@caida.org)
@@ -57,6 +57,8 @@ export LD_RUN_PATH
 test "${enable_assert}" = "yes" || AC_DEFINE(NDEBUG, 1)
 
 # Checks for programs.
+AC_PROG_RANLIB
+
 if test "${enable_developer}" = "yes"; then
     AC_PROG_CC(gcc-anal anal-gcc)
     if test "$GCC" = "yes"; then
@@ -119,6 +121,8 @@ $POSIX_HEADER
 
 # Checks for typedefs, structures, and compiler characteristics.
 AC_C_BIGENDIAN()
+AC_TYPE_MODE_T
+AC_TYPE_SIZE_T
 
 
 # Checks for library functions.
@@ -131,6 +135,8 @@ AC_CHECK_FUNCS([fchmod])
 
 AC_MSG_CHECKING([for dynamic linking options])
 # Also, generate the conftest.out script used by the db version test below.
+# LD_RUN_PATH was exported above, so if the compiler supports that, no special
+# options should be needed.
 ORIG_LDFLAGS=$LDFLAGS
 for opt in "" "-Wl,-rpath=" "-rpath " "-R "; do
     RPATH_OPTS=""
