@@ -8,6 +8,7 @@ LDLIBS       = @LIBS@
 APXS         = @APXS@
 APXS_DEBUG   = @APXS_DEBUG@
 LIBTOOL      = @LIBTOOL@ --no-silent
+LD_RUN_PATH  = @LD_RUN_PATH@
 
 TARGETS     = libdbats.a @MOD_DBATS@
 
@@ -37,7 +38,7 @@ libdbats.la: dbats.lo dbats_log.lo quicklz.lo
 	$(LIBTOOL) --mode=link $(CC) $(CFLAGS) -L. $(LDFLAGS) $(LDLIBS) -o $@ $?
 
 mod_dbats.la: mod_dbats.c libdbats.la
-	env LD_RUN_PATH=@LD_RUN_PATH@ $(APXS) -c $(APXS_DEBUG) $(CPPFLAGS) -L. $(LDFLAGS) -ldbats $(LDLIBS) mod_dbats.c
+	env LD_RUN_PATH="$(LD_RUN_PATH)" $(APXS) -c $(APXS_DEBUG) $(CPPFLAGS) -L. $(LDFLAGS) -ldbats $(LDLIBS) mod_dbats.c
 
 install: mod_dbats.la
 	$(APXS) -a -i mod_dbats.la
