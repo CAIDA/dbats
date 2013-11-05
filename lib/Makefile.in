@@ -5,6 +5,7 @@ CPPFLAGS     = @CPPFLAGS@ -I../include
 CFLAGS       = @CFLAGS@ $(PROF) $(CPPFLAGS) # -fPIC
 LDFLAGS      = @LDFLAGS@ $(PROF)
 LDLIBS       = @LIBS@
+RANLIB       = @RANLIB@
 APXS         = @APXS@
 APXS_DEBUG   = @APXS_DEBUG@
 LIBTOOL      = @LIBTOOL@ --no-silent
@@ -32,7 +33,7 @@ quicklz.lo: quicklz.c Makefile
 
 libdbats.a: dbats.o dbats_log.o quicklz.o
 	ar rs $@ $?
-	ranlib $@
+	$(RANLIB) $@
 
 libdbats.la: dbats.lo dbats_log.lo quicklz.lo
 	$(LIBTOOL) --mode=link $(CC) $(CFLAGS) -L. $(LDFLAGS) $(LDLIBS) -o $@ $?
