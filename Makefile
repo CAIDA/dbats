@@ -16,6 +16,10 @@ apps: FORCE
 	@#echo Making apps
 	cd apps; $(MAKE)
 
+install: FORCE
+	@#echo Installing DBATS Apache module
+	cd lib; $(MAKE) install
+
 html/index.html: include/dbats.h
 	rm -rf html
 	doxygen
