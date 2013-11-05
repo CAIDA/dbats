@@ -4,7 +4,8 @@ CC           = @CC@
 CPPFLAGS     = @CPPFLAGS@ -I../include
 CFLAGS       = @CFLAGS@ $(PROF) $(CPPFLAGS) # -fPIC
 LDFLAGS      = -L../lib @LDFLAGS@ $(PROF)
-LDLIBS      = -ldbats @LIBS@
+LDLIBS       = -ldbats @LIBS@
+LD_RUN_PATH  = @LD_RUN_PATH@
 
 TARGETS     = report-in report-out dbats_series_limit dbats_info dbats_best_bundle dbats_recover
 
@@ -16,7 +17,7 @@ clean:
 DBATS_LIB = ../lib/libdbats.a
 
 .o:
-	$(CC) $(CFLAGS) $(LDFLAGS) $< $(LDLIBS) -o $@
+	env LD_RUN_PATH="$(LD_RUN_PATH)" $(CC) $(CFLAGS) $(LDFLAGS) $< $(LDLIBS) -o $@
 
 report-in.o: report-in.c ../include/dbats.h ../include/dbats_log.h Makefile
 report-in: report-in.o $(DBATS_LIB) Makefile
