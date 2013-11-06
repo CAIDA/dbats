@@ -42,7 +42,7 @@ static void print_time(const char *label, time_t t)
     struct tm *tm;
     tm = gmtime(&t);
     strftime(buf, sizeof(buf), "%F %T UTC", tm);
-    printf("%s%ld (%s)\n", label, t, buf);
+    printf("%s%" PRId64 " (%s)\n", label, (int64_t)t, buf);
 }
 
 int main(int argc, char *argv[]) {
