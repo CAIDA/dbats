@@ -1,6 +1,7 @@
 Makefile
 *.o
 config.h
+.deps
 *.a
 *.slo
 *.lo

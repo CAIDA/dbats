@@ -1,11 +1,14 @@
-AC_REVISION([$Id: configure.ac,v 1.17 2013/11/05 23:39:46 kkeys Exp $])
+AC_REVISION([$Id: configure.ac,v 1.18 2013/11/06 23:30:13 kkeys Exp $])
 
 AC_PREREQ(2.68)
-AC_INIT(DBATS, 0.1, kkeys@caida.org)
+AC_INIT([DBATS], [0.1], [kkeys@caida.org])
+AC_CONFIG_MACRO_DIR([m4])
 AC_CONFIG_SRCDIR(include/dbats.h)
 AC_CONFIG_HEADERS(lib/config.h)
 
-m4_include([m4/ax_pthread.m4]) dnl
+AM_INIT_AUTOMAKE([-Wall -Werror foreign])
+
+dnl m4_include([m4/ax_pthread.m4]) dnl
 
 AC_ARG_WITH(incdirs,
     [  --with-incdirs=DIRS     search for include files in DIRS])
@@ -25,8 +28,12 @@ AC_ARG_ENABLE(assert,
     [  --enable-assert         enable assert() for debugging],
     , enable_assert="$enable_developer")
 
+if test "${enable_developer}" = "yes"; then
+    AC_SUBST(DBATS_CORRUPT, [dbats_corrupt])
+fi
+
 dnl MY_DIRS(src, dst[, prefix[, suffix[, separator]]])
-AC_DEFUN(MY_DIRS, [
+AC_DEFUN([MY_DIRS], [
     sep="$5"
     if test "${$1}" != "no" && test "${$1}" != ""; then
         for dir in ${$1}; do
@@ -54,10 +61,11 @@ AC_SUBST(LD_RUN_PATH)
 export LD_RUN_PATH
 
 
-test "${enable_assert}" = "yes" || AC_DEFINE(NDEBUG, 1)
+test "${enable_assert}" = "yes" || AC_DEFINE([NDEBUG], 1, [disable assert()])
 
 # Checks for programs.
-AC_PROG_RANLIB
+AM_PROG_AR
+LT_INIT
 
 if test "${enable_developer}" = "yes"; then
     AC_PROG_CC(gcc-anal anal-gcc)
@@ -189,26 +197,26 @@ AC_MSG_CHECKING([for DB_ENV->txn_begin()])
 AC_LINK_IFELSE([AC_LANG_PROGRAM(
     [$POSIX_HEADER $DB_HEADER],
     [DB_ENV *env=0; env->txn_begin(0,0,0,0);])],
-    [AC_MSG_RESULT([yes]); AC_DEFINE(HAVE_DB_TXN_BEGIN)],
+    [AC_MSG_RESULT([yes]); AC_DEFINE([HAVE_DB_TXN_BEGIN], [1], [Define if you have DB->txn_begin()])],
     [AC_MSG_RESULT([no])])
 
 AC_MSG_CHECKING([for DB->set_lk_exclusive()])
 AC_LINK_IFELSE([AC_LANG_PROGRAM(
     [$POSIX_HEADER $DB_HEADER],
     [DB *db=0; db->set_lk_exclusive(db, 1);])],
-    [AC_MSG_RESULT([yes]); AC_DEFINE(HAVE_DB_SET_LK_EXCLUSIVE)],
+    [AC_MSG_RESULT([yes]); AC_DEFINE([HAVE_DB_SET_LK_EXCLUSIVE], [1], [Define if you have DB->set_lk_exclusive()])],
     [AC_MSG_RESULT([no]); AC_MSG_WARN([Exclusive locking will not be available.])])
 
 AC_MSG_CHECKING([for DB_TXN->set_priority()])
 AC_LINK_IFELSE([AC_LANG_PROGRAM(
     [$POSIX_HEADER $DB_HEADER],
     [DB_TXN *txn=0; txn->set_priority(txn, 100);])],
-    [AC_MSG_RESULT([yes]); AC_DEFINE(HAVE_DB_SET_PRIORITY)],
+    [AC_MSG_RESULT([yes]); AC_DEFINE([HAVE_DB_SET_PRIORITY], [1], [Define if you have DB_TXN->set_priority()])],
     [AC_MSG_RESULT([no])])
 
 
 # Output.
-AC_CONFIG_FILES(lib/Makefile apps/Makefile)
+AC_CONFIG_FILES(Makefile include/Makefile lib/Makefile apps/Makefile)
 AC_OUTPUT()
 
 AC_MSG_RESULT([])
