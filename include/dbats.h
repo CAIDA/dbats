@@ -85,7 +85,7 @@
 /** @name Flags */
 ///@{
 #define DBATS_CREATE       0x0001 ///< create object if it doesn't exist
-#define DBATS_PRELOAD      0x0004 ///< load fragments when tslice is selected
+#define DBATS_PRELOAD      0x0004 ///< load fragments when snapshot is selected
 #define DBATS_READONLY     0x0008 ///< don't allow writing
 #define DBATS_UNCOMPRESSED 0x0010 ///< don't compress written time series data
 #define DBATS_EXCLUSIVE    0x0020 ///< obtain exclusive lock on whole db
@@ -289,7 +289,7 @@ extern int dbats_get_start_time(dbats_handler *handler, dbats_snapshot *snap, in
  */
 extern int dbats_get_end_time(dbats_handler *handler, dbats_snapshot *snap, int bid, uint32_t *end);
 
-/** Congfiure the number of data points to keep for each time series of a
+/** Configure the number of data points to keep for each time series of a
  *  bundle.
  *  When a transaction started by dbats_select_snap() is committed, any data
  *  points that are <code>keep</code> periods or more older than the latest
