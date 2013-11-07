@@ -708,19 +708,6 @@ int dbats_open(dbats_handler **dhp,
 	    return errno;
 	}
 
-	sprintf(filename, "%s/dbmeta", path);
-	if (mkdir(filename, 0777) != 0) {
-	    dbats_log(DBATS_LOG_ERR, "Error creating %s: %s",
-		filename, strerror(errno));
-	    return errno;
-	}
-	rc = dh->dbenv->set_metadata_dir(dh->dbenv, filename);
-	if (rc != 0) {
-	    dbats_log(DBATS_LOG_ERR, "set_metadata_dir %s: %s",
-		filename, db_strerror(rc));
-	    return rc;
-	}
-
 	sprintf(filename, "%s/DB_CONFIG", path);
 	FILE *file = fopen(filename, "w");
 	if (!file) {
@@ -732,7 +719,6 @@ int dbats_open(dbats_handler **dhp,
 	fprintf(file, "add_data_dir dbdata\n"); // where to find data
 	fprintf(file, "set_create_dir dbdata\n"); // where to create data
 	fprintf(file, "set_lg_dir dblog\n");
-	fprintf(file, "set_metadata_dir dbmeta\n");
 
 	// XXX These should be based on max expected number of metric keys?
 	// 40000 is enough to insert at least 2000000 metric keys.
@@ -759,8 +745,6 @@ int dbats_open(dbats_handler **dhp,
     dbats_log(DBATS_LOG_FINE, "create-data dir: %s", dirname);
     dh->dbenv->get_lg_dir(dh->dbenv, &dirname);
     dbats_log(DBATS_LOG_FINE, "lg dir: %s", dirname);
-    dh->dbenv->get_metadata_dir(dh->dbenv, &dirname);
-    dbats_log(DBATS_LOG_FINE, "metadata dir: %s", dirname);
 
 #if defined(DB_LOG_AUTO_REMOVE)
     dh->dbenv->log_set_config(dh->dbenv, DB_LOG_AUTO_REMOVE, 1);
