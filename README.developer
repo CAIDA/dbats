@@ -1,0 +1,9 @@
+Developer work requires these additional tools:
+    autoconf
+    automake
+    libtool
+
+To build from a cvs checkout:
+    autoreconf --install
+    ./configure
+    make
