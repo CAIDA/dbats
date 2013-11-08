@@ -1,5 +1,7 @@
+Makefile.in
 Makefile
 *.o
+config.h.in
 config.h
 .deps
 *.a

@@ -1,3 +1,4 @@
+Makefile.in
 Makefile
 .deps
 *.o
@@ -8,3 +9,4 @@ dbats_series_limit
 dbats_best_bundle
 dbats_recover
 dbats_corrupt
+.libs
