@@ -1,4 +1,4 @@
-AC_REVISION([$Id: configure.ac,v 1.19 2013/11/08 23:41:14 kkeys Exp $])
+AC_REVISION([$Id: configure.ac,v 1.20 2013/11/09 00:25:06 kkeys Exp $])
 
 AC_PREREQ(2.68)
 AC_INIT([DBATS], [0.1], [kkeys@caida.org])
@@ -83,6 +83,7 @@ fi
 # Checks for programs.
 AM_PROG_AR
 LT_INIT
+AC_SUBST([LIBTOOL_DEPS])
 
 
 if test "${enable_apache}" != "no"; then

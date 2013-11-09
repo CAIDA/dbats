@@ -3,10 +3,12 @@
 # htmldir = $(datadir)/html
 # html_DATA = html
 
-SUBDIRS = lib include apps
+SUBDIRS = . lib include apps
 
 ACLOCAL_AMFLAGS = -I m4
 
-#libtool: $(LIBTOOL_DEPS)
-#	$(SHELL) ./config.status libtool
+all-local: libtool
+
+libtool: $(LIBTOOL_DEPS)
+	$(SHELL) ./config.status libtool
 
