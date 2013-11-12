@@ -4,6 +4,7 @@ lib_LTLIBRARIES     = libdbats.la
 libdbats_la_SOURCES = dbats.c dbats_log.c quicklz.c ../include/uint.h
 noinst_HEADERS      = quicklz.h
 EXTRA_DIST          = mod_dbats.c
+CLEANFILES          = mod_dbats.la mod_dbats.slo
 
 APXS                = @APXS@
 
@@ -15,9 +16,6 @@ mod_dbats.c: Makefile
 
 mod_dbats.la: mod_dbats.c libdbats.la
 	$(APXS) -c $(APXS_DEBUG) $(AM_CPPFLAGS) $(CPPFLAGS) -L. $(AM_LDFLAGS) $(LDFLAGS) -ldbats mod_dbats.c
-
-clean-local:
-	$(RM) mod_dbats.la mod_dbats.slo
 
 install-apache: $(MOD_DBATS)
 	$(APXS) -a -i mod_dbats.la
