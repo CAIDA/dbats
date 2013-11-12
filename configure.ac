@@ -1,4 +1,4 @@
-AC_REVISION([$Id: configure.ac,v 1.20 2013/11/09 00:25:06 kkeys Exp $])
+AC_REVISION([$Id: configure.ac,v 1.21 2013/11/12 23:48:43 kkeys Exp $])
 
 AC_PREREQ(2.68)
 AC_INIT([DBATS], [0.1], [kkeys@caida.org])
@@ -27,19 +27,13 @@ AC_ARG_ENABLE(assert,
     , enable_assert="$enable_developer")
 
 
-dnl Note: AM_INIT_AUTOMAKE calls AC_PROG_CC, so we must call it first if we
-dnl want custom arguments.
+dnl Note: AM_INIT_AUTOMAKE may call AC_PROG_CC, so we must set CC first if we
+dnl want to change the default.
 if test "${enable_developer}" = "yes"; then
-    AC_PROG_CC(gcc-anal anal-gcc)
-    if test "$GCC" = "yes"; then
-	CC="$CC -pedantic"
+    if test -z "$CC" && gcc-anal --version >/dev/null 2>&1; then
+	CC="gcc-anal -pedantic"
     fi
     test -z "$CFLAGS" && CFLAGS='-g'
-else
-    AC_PROG_CC
-fi
-if test "$GCC" = "yes"; then
-    CC="$CC -std=c99"
 fi
 
 AM_INIT_AUTOMAKE([-Wall -Werror foreign])
@@ -80,7 +74,19 @@ if test "${enable_developer}" = "yes"; then
     AC_SUBST(DBATS_CORRUPT, [dbats_corrupt])
 fi
 
+
 # Checks for programs.
+
+# note: AM_INIT_AUTOMAKE may or may not have already called AC_PROG_CC
+AC_PROG_CC
+AC_MSG_CHECKING([whether "$CC" accepts the "-std=c99" option])
+if $CC -std=c99 --version >/dev/null 2>&1; then
+    AC_MSG_RESULT([yes])
+    CC="$CC -std=c99"
+else
+    AC_MSG_RESULT([no])
+fi
+
 AM_PROG_AR
 LT_INIT
 AC_SUBST([LIBTOOL_DEPS])
@@ -95,7 +101,7 @@ if test "${enable_apache}" != "no"; then
     MSG="can't build apache module without apxs"
     if test "${APXS}" != ""; then
 	AC_SUBST(MOD_DBATS, mod_dbats.la)
-    elif test "${enable_apache}" == "yes"; then
+    elif test "${enable_apache}" = "yes"; then
 	AC_MSG_ERROR([$MSG])
     else
 	AC_MSG_WARN([$MSG])
@@ -116,17 +122,21 @@ AC_CHECK_LIB([db], [db_version], , [
 
 # Checks for header files.
 
+dbats_srcdir=`AS_DIRNAME([$0])`; # directory of this configure script
+dbats_srcdir=`( cd "$dbats_srcdir"; pwd; )`; # absolute directory
+CPPFLAGS="-I${dbats_srcdir}/include ${CPPFLAGS}"; # for uint.h during configure
+
 POSIX_HEADER="
 #define _POSIX_C_SOURCE 200809L
 #include <unistd.h>"
 
 DB_HEADER="
-#include \"include/uint.h\"
+#include \"uint.h\"
 #include <db.h>"
 
 AC_CHECK_HEADERS(db.h, , , [
 $POSIX_HEADER
-#include "include/uint.h"
+#include "uint.h"
 ])
 
 

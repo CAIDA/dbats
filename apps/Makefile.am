@@ -3,6 +3,6 @@
 DBATS_CORRUPT  = @DBATS_CORRUPT@
 bin_PROGRAMS   = report-in report-out dbats_series_limit dbats_info dbats_best_bundle dbats_recover $(DBATS_CORRUPT)
 EXTRA_PROGRAMS = dbats_corrupt
-AM_CPPFLAGS    = -I../include
-LDADD          = ../lib/libdbats.la
+AM_CPPFLAGS    = -I$(srcdir)
+LDADD          = $(top_builddir)/lib/libdbats.la
 
