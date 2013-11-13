@@ -599,12 +599,12 @@ int dbats_open(dbats_handler **dhp,
 {
     int major, minor, patch;
     char *version = db_version(&major, &minor, &patch);
-    dbats_log(DBATS_LOG_CONFIG, "db_version: '%s'", version);
     if (major != DB_VERSION_MAJOR || minor != DB_VERSION_MINOR || patch != DB_VERSION_PATCH) {
 	dbats_log(DBATS_LOG_ERR, "BDB version mismatch: libdb %d.%d.%d != db.h %d.%d.%d",
 	    major, minor, patch, DB_VERSION_MAJOR, DB_VERSION_MINOR, DB_VERSION_PATCH);
 	return DB_VERSION_MISMATCH;
     }
+    dbats_log(DBATS_LOG_CONFIG, "db_version: '%s'", version);
 
     if (!HAVE_DB_SET_LK_EXCLUSIVE && (flags & DBATS_EXCLUSIVE)) {
 	dbats_log(DBATS_LOG_ERR,
