@@ -1,8 +1,7 @@
 ## Process this file with automake to produce Makefile.in
 
-SUBDIRS         = lib include apps .
+SUBDIRS         = lib include apps . tests
 EXTRA_DIST      = html Doxyfile
-
 ACLOCAL_AMFLAGS = -I m4
 
 all-local: libtool html/index.html
@@ -36,5 +35,4 @@ distcheck-hook:
 	@chmod u+w $(distdir)
 	$(RM) $(distdir)/missing
 	cp missing-fail $(distdir)/missing
-	@chmod u-w $(distdir)/missing
-	@chmod u-w $(distdir)
+	@chmod u-w $(distdir)/missing $(distdir)

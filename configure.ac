@@ -1,4 +1,4 @@
-AC_REVISION([$Id: configure.ac,v 1.22 2013/11/13 02:18:30 kkeys Exp $])
+AC_REVISION([$Id: configure.ac,v 1.23 2013/11/13 20:38:36 kkeys Exp $])
 
 AC_PREREQ(2.68)
 AC_INIT([DBATS], [0.1], [kkeys@caida.org])
@@ -233,7 +233,7 @@ AC_LINK_IFELSE([AC_LANG_PROGRAM(
 
 
 # Output.
-AC_CONFIG_FILES(Makefile include/Makefile lib/Makefile apps/Makefile)
+AC_CONFIG_FILES(Makefile include/Makefile lib/Makefile apps/Makefile tests/Makefile)
 AC_OUTPUT()
 
 AC_MSG_RESULT([])
