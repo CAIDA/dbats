@@ -1,4 +1,4 @@
-AC_REVISION([$Id: configure.ac,v 1.23 2013/11/13 20:38:36 kkeys Exp $])
+AC_REVISION([$Id: configure.ac,v 1.24 2013/11/13 22:56:20 kkeys Exp $])
 
 AC_PREREQ(2.68)
 AC_INIT([DBATS], [0.1], [kkeys@caida.org])
@@ -99,9 +99,8 @@ if test "${enable_apache}" != "no"; then
     if test "${enable_developer}" = "yes" && test "$GCC" = "yes"; then
 	AC_SUBST(APXS_DEBUG, ["-Wc,-Wall -Wc,-Wshadow -Wc,-Wpointer-arith -Wc,-Wcast-align -Wc,-Wstrict-prototypes -Wc,-Wmissing-prototypes -Wc,-Wwrite-strings -Wc,-Winline -Wc,-Waggregate-return"])
     fi
-
     MSG="can't build apache module without apxs"
-    if test "${APXS}" != ""; then
+    if test -n "${APXS}"; then
 	AC_SUBST(MOD_DBATS, mod_dbats.la)
     elif test "${enable_apache}" = "yes"; then
 	AC_MSG_ERROR([$MSG])
@@ -124,9 +123,8 @@ AC_CHECK_LIB([db], [db_version], , [
 
 # Checks for header files.
 
-dbats_srcdir=`AS_DIRNAME([$0])`; # directory of this configure script
-dbats_srcdir=`( cd "$dbats_srcdir"; pwd; )`; # absolute directory
-CPPFLAGS="-I${dbats_srcdir}/include ${CPPFLAGS}"; # for uint.h during configure
+abs_srcdir=`( cd "$srcdir"; pwd; )`; # absolute directory
+CPPFLAGS="-I${abs_srcdir}/include ${CPPFLAGS}"; # for uint.h during configure and make
 
 POSIX_HEADER="
 #define _POSIX_C_SOURCE 200809L
@@ -152,12 +150,9 @@ AC_TYPE_SIZE_T
 AC_CHECK_FUNCS([fchmod])
 
 
-
-
 # Other.
 
 AC_MSG_CHECKING([Berkeley DB version])
-
 # Check version in <db.h> against our minimum requirements (linking with libdb
 # is not needed for this test).
 AC_RUN_IFELSE([AC_LANG_PROGRAM([
@@ -183,53 +178,24 @@ if test "$dbh_major" -lt 5 || { test "$dbh_major" -eq 5 && test "$dbh_minor" -lt
     AC_MSG_WARN([DB version 5.3 or higher is recommended.])
 fi
 
-## Check version in <db.h> against version in libdb.
-#OLD_CC="$CC"
-#CC="./libtool --mode=link ${CC} -rpath /usr/local/pkg/bdb/lib"
-#AC_MSG_NOTICE([LD_RUN_PATH=$LD_RUN_PATH])
-#AC_RUN_IFELSE([AC_LANG_PROGRAM([
-#    $POSIX_HEADER
-#    #include <stdlib.h>
-#    #include <errno.h>
-#    $DB_HEADER
-#    ], [
-#    FILE *out = fopen("conftest.out", "w");
-#    if (!out) exit(errno);
-#    int major, minor, patch;
-#    db_version(&major,&minor,&patch);
-#    fprintf(out, "libdb_version=%d.%d.%d\n", major, minor, patch);
-#    exit(0);
-#    ])],
-#    [], [AC_MSG_FAILURE([can not run compiled program])])
-#. ./conftest.out
-#if test "$dbh_version" != "$libdb_version"; then
-#    AC_MSG_ERROR([DB_VERSION ($dbh_version) in <db.h> does not match db_version() ($libdb_version) in libdb.])
-#fi
-#CC="$OLD_CC"
+dnl DBATS_CHECK_DB_FUNC(symbol, label, code, [action-if-not-found])
+AC_DEFUN([DBATS_CHECK_DB_FUNC], [
+AC_DEFINE($1, [0], [Define to 1 if you have $2])
+AC_MSG_CHECKING([for $2])
+AC_LINK_IFELSE([AC_LANG_PROGRAM([$POSIX_HEADER $DB_HEADER], $3)],
+    [AC_MSG_RESULT([yes]); AC_DEFINE($1, [1])],
+    [AC_MSG_RESULT([no]); $4])
+])
 
-AC_DEFINE([HAVE_DB_TXN_BEGIN], [0], [Define to 1 if you have DB->txn_begin()])
-AC_MSG_CHECKING([for DB_ENV->txn_begin()])
-AC_LINK_IFELSE([AC_LANG_PROGRAM(
-    [$POSIX_HEADER $DB_HEADER],
-    [DB_ENV *env=0; env->txn_begin(0,0,0,0);])],
-    [AC_MSG_RESULT([yes]); AC_DEFINE([HAVE_DB_TXN_BEGIN], [1])],
-    [AC_MSG_RESULT([no])])
+DBATS_CHECK_DB_FUNC([HAVE_DB_TXN_BEGIN], [DB_ENV->txn_begin()],
+    [DB_ENV *env=0; env->txn_begin(0,0,0,0);])
 
-AC_DEFINE([HAVE_DB_SET_LK_EXCLUSIVE], [0], [Define to 1 if you have DB->set_lk_exclusive()])
-AC_MSG_CHECKING([for DB->set_lk_exclusive()])
-AC_LINK_IFELSE([AC_LANG_PROGRAM(
-    [$POSIX_HEADER $DB_HEADER],
-    [DB *db=0; db->set_lk_exclusive(db, 1);])],
-    [AC_MSG_RESULT([yes]); AC_DEFINE([HAVE_DB_SET_LK_EXCLUSIVE], [1])],
-    [AC_MSG_RESULT([no]); AC_MSG_WARN([Exclusive locking will not be available.])])
+DBATS_CHECK_DB_FUNC([HAVE_DB_SET_LK_EXCLUSIVE], [DB->set_lk_exclusive()],
+    [DB *db=0; db->set_lk_exclusive(db, 1);],
+    [AC_MSG_WARN([Exclusive locking will not be available.])])
 
-AC_DEFINE([HAVE_DB_SET_PRIORITY], [0], [Define to 1 if you have DB_TXN->set_priority()])
-AC_MSG_CHECKING([for DB_TXN->set_priority()])
-AC_LINK_IFELSE([AC_LANG_PROGRAM(
-    [$POSIX_HEADER $DB_HEADER],
-    [DB_TXN *txn=0; txn->set_priority(txn, 100);])],
-    [AC_MSG_RESULT([yes]); AC_DEFINE([HAVE_DB_SET_PRIORITY], [1])],
-    [AC_MSG_RESULT([no])])
+DBATS_CHECK_DB_FUNC([HAVE_DB_SET_PRIORITY], [DB_TXN->set_priority()],
+    [DB_TXN *txn=0; txn->set_priority(txn, 100);])
 
 
 # Output.
