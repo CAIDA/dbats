@@ -1,4 +1,4 @@
-AC_REVISION([$Id: configure.ac,v 1.21 2013/11/12 23:48:43 kkeys Exp $])
+AC_REVISION([$Id: configure.ac,v 1.22 2013/11/13 02:18:30 kkeys Exp $])
 
 AC_PREREQ(2.68)
 AC_INIT([DBATS], [0.1], [kkeys@caida.org])
@@ -88,6 +88,8 @@ else
 fi
 
 AM_PROG_AR
+AM_MISSING_PROG([DOXYGEN], [doxygen])
+AC_SUBST(DOXYGEN)
 LT_INIT
 AC_SUBST([LIBTOOL_DEPS])
 

@@ -1,0 +1,11 @@
+#! /bin/sh
+# Alternate version of "missing" for using during "make distcheck" to make
+# sure an end user can build from a dist without any maintainer tools.
+# -kkeys
+
+# Let configure accept this version of "missing".
+if test "$1" = "--run"; then shift; fi
+if test "$1" = "true"; then exit 0; fi
+
+echo "ERROR: distcheck depends on maintainer tool $1" >&2
+exit 127

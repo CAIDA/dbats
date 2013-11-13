@@ -1,10 +1,7 @@
 ## Process this file with automake to produce Makefile.in
 
-# htmldir = $(datadir)/html
-# html_DATA = html
-
 SUBDIRS         = lib include apps .
-EXTRA_DIST      = html
+EXTRA_DIST      = html Doxyfile
 
 ACLOCAL_AMFLAGS = -I m4
 
@@ -13,9 +10,13 @@ all-local: libtool html/index.html
 libtool: $(LIBTOOL_DEPS)
 	$(SHELL) ./config.status libtool
 
-html/index.html: include/dbats.h
-	rm -rf html
-	doxygen
+# Generate html/ only if this is not a VPATH build (if it is, $srcdir/html/
+# should already exist, and Doxyfile can't handle it anyway).
+html html/index.html:
+	if test "$(srcdir)" = "$(builddir)"; then \
+	    $(RM) -rf html; \
+	    $(DOXYGEN) $(top_srcdir)/Doxyfile; \
+	fi
 
 install-data-hook:
 	@if test -n "$(MOD_DBATS)"; then \
@@ -26,3 +27,14 @@ install-data-hook:
 
 install-apache: Makefile
 	cd lib; $(MAKE) install-apache
+
+distclean-local:
+	-$(RM) -rf html
+
+# Replace "missing" with "missing-fail" to detect dependence on maintaner tools.
+distcheck-hook:
+	@chmod u+w $(distdir)
+	$(RM) $(distdir)/missing
+	cp missing-fail $(distdir)/missing
+	@chmod u-w $(distdir)/missing
+	@chmod u-w $(distdir)
