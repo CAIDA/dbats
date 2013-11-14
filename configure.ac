@@ -1,4 +1,4 @@
-AC_REVISION([$Id: configure.ac,v 1.24 2013/11/13 22:56:20 kkeys Exp $])
+AC_REVISION([$Id: configure.ac,v 1.25 2013/11/14 00:47:25 kkeys Exp $])
 
 AC_PREREQ(2.68)
 AC_INIT([DBATS], [0.1], [kkeys@caida.org])
@@ -17,7 +17,8 @@ AC_ARG_WITH(inclibdirs,
 AC_ARG_WITH(inclibprefix,
     [  --with-inclibprefix=DIR same as --with-incdirs=DIR/include --with-libdirs=DIR/lib])
 AC_ARG_ENABLE(apache,
-    [  --enable-apache         enable DBATS module for Apache httpd],
+    [  --enable-apache         enable DBATS module for Apache httpd (requires
+                          "make install-apache" to install)],
     , enable_apache=maybe)
 AC_ARG_ENABLE(developer,
     [  --enable-developer      enable developer options],
@@ -60,12 +61,6 @@ MY_DIRS(with_inclibprefix, CPPFLAGS, -I, /include)
 MY_DIRS(with_libdirs, LDFLAGS, -L)
 MY_DIRS(with_inclibdirs, LDFLAGS, -L)
 MY_DIRS(with_inclibprefix, LDFLAGS, -L, /lib)
-
-MY_DIRS(with_libdirs, LD_RUN_PATH, , , [:])
-MY_DIRS(with_inclibdirs, LD_RUN_PATH, , , [:])
-MY_DIRS(with_inclibprefix, LD_RUN_PATH, , /lib, [:])
-AC_SUBST(LD_RUN_PATH)
-export LD_RUN_PATH
 
 
 test "${enable_assert}" = "yes" || AC_DEFINE([NDEBUG], 1, [Define to disable assert()])
