@@ -1,4 +1,4 @@
-AC_REVISION([$Id: configure.ac,v 1.25 2013/11/14 00:47:25 kkeys Exp $])
+AC_REVISION([$Id: configure.ac,v 1.26 2013/11/14 02:10:20 kkeys Exp $])
 
 AC_PREREQ(2.68)
 AC_INIT([DBATS], [0.1], [kkeys@caida.org])
@@ -82,7 +82,6 @@ else
     AC_MSG_RESULT([no])
 fi
 
-AM_PROG_AR
 AM_MISSING_PROG([DOXYGEN], [doxygen])
 AC_SUBST(DOXYGEN)
 LT_INIT
@@ -123,7 +122,7 @@ CPPFLAGS="-I${abs_srcdir}/include ${CPPFLAGS}"; # for uint.h during configure an
 
 POSIX_HEADER="
 #define _POSIX_C_SOURCE 200809L
-#include <unistd.h>"
+"
 
 DB_HEADER="
 #include \"uint.h\"
@@ -131,6 +130,7 @@ DB_HEADER="
 
 AC_CHECK_HEADERS(db.h, , , [
 $POSIX_HEADER
+AC_INCLUDES_DEFAULT
 #include "uint.h"
 ])
 
@@ -147,12 +147,15 @@ AC_CHECK_FUNCS([fchmod])
 
 # Other.
 
+AC_CHECK_DECL(DB_VERSION_MAJOR, [], [AC_MSG_ERROR([db.h is too old])],
+    [$POSIX_HEADER AC_INCLUDES_DEFAULT $DB_HEADER])
+
 AC_MSG_CHECKING([Berkeley DB version])
 # Check version in <db.h> against our minimum requirements (linking with libdb
 # is not needed for this test).
 AC_RUN_IFELSE([AC_LANG_PROGRAM([
     $POSIX_HEADER
-    #include <stdlib.h>
+    AC_INCLUDES_DEFAULT
     #include <errno.h>
     $DB_HEADER
     ], [
@@ -177,7 +180,7 @@ dnl DBATS_CHECK_DB_FUNC(symbol, label, code, [action-if-not-found])
 AC_DEFUN([DBATS_CHECK_DB_FUNC], [
 AC_DEFINE($1, [0], [Define to 1 if you have $2])
 AC_MSG_CHECKING([for $2])
-AC_LINK_IFELSE([AC_LANG_PROGRAM([$POSIX_HEADER $DB_HEADER], $3)],
+AC_LINK_IFELSE([AC_LANG_PROGRAM([$POSIX_HEADER AC_INCLUDES_DEFAULT $DB_HEADER], $3)],
     [AC_MSG_RESULT([yes]); AC_DEFINE($1, [1])],
     [AC_MSG_RESULT([no]); $4])
 ])
