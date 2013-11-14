@@ -1,4 +1,4 @@
-AC_REVISION([$Id: configure.ac,v 1.26 2013/11/14 02:10:20 kkeys Exp $])
+AC_REVISION([$Id: configure.ac,v 1.27 2013/11/14 23:32:44 kkeys Exp $])
 
 AC_PREREQ(2.68)
 AC_INIT([DBATS], [0.1], [kkeys@caida.org])
@@ -153,14 +153,10 @@ AC_CHECK_DECL(DB_VERSION_MAJOR, [], [AC_MSG_ERROR([db.h is too old])],
 AC_MSG_CHECKING([Berkeley DB version])
 # Check version in <db.h> against our minimum requirements (linking with libdb
 # is not needed for this test).
-AC_RUN_IFELSE([AC_LANG_PROGRAM([
-    $POSIX_HEADER
-    AC_INCLUDES_DEFAULT
-    #include <errno.h>
-    $DB_HEADER
-    ], [
+AC_RUN_IFELSE([AC_LANG_PROGRAM([$POSIX_HEADER AC_INCLUDES_DEFAULT $DB_HEADER],
+    [
     FILE *out = fopen("conftest.out", "w");
-    if (!out) exit(errno);
+    if (!out) exit(1);
     fprintf(out, "dbh_major=%d\ndbh_minor=%d\ndbh_patch=%d\n",
 	DB_VERSION_MAJOR, DB_VERSION_MINOR, DB_VERSION_PATCH);
     exit(0);
