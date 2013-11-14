@@ -6,4 +6,4 @@ EXTRA_DIST      = test.data expected.out
 CLEANFILES      = test.out
 
 clean-local:
-	    -$(RM) -rf test.dbats
+	    -rm -rf test.dbats

@@ -13,7 +13,7 @@ libtool: $(LIBTOOL_DEPS)
 # should already exist, and Doxyfile can't handle it anyway).
 html html/index.html:
 	if test "$(srcdir)" = "$(builddir)"; then \
-	    $(RM) -rf html; \
+	    rm -rf html; \
 	    $(DOXYGEN) $(top_srcdir)/Doxyfile; \
 	fi
 
@@ -28,11 +28,11 @@ install-apache: Makefile
 	cd lib; $(MAKE) install-apache
 
 distclean-local:
-	-$(RM) -rf html
+	-rm -rf html
 
 # Replace "missing" with "missing-fail" to detect dependence on maintaner tools.
 distcheck-hook:
 	@chmod u+w $(distdir)
-	$(RM) $(distdir)/missing
+	-rm -f $(distdir)/missing
 	cp missing-fail $(distdir)/missing
 	@chmod u-w $(distdir)/missing $(distdir)
