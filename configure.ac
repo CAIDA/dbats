@@ -1,4 +1,4 @@
-AC_REVISION([$Id: configure.ac,v 1.28 2013/11/15 20:27:17 kkeys Exp $])
+AC_REVISION([$Id: configure.ac,v 1.29 2013/11/15 20:53:07 kkeys Exp $])
 
 AC_PREREQ(2.68)
 AC_INIT([DBATS], [0.1], [kkeys@caida.org])
@@ -119,7 +119,9 @@ AC_MSG_NOTICE([XXXXXXXXXXXXXXXX old CPPFLAGS=$CPPFLAGS])
 AC_MSG_NOTICE([XXXXXXXXXXXXXXXX old LIBDB=$LIBDB])
 AC_MSG_NOTICE([XXXXXXXXXXXXXXXX old LTLIBDB=$LTLIBDB])
 
+RUNFLAGS=""; # extra LDFLAGS needed to make configure's test programs runnable
 AC_LIB_LINKFLAGS([db])
+RUNFLAGS="$LIBDB $RUNFLAGS"
 
 AC_MSG_NOTICE([XXXXXXXXXXXXXXXX new LDFLAGS=$LDFLAGS])
 AC_MSG_NOTICE([XXXXXXXXXXXXXXXX new CPPFLAGS=$CPPFLAGS])
@@ -163,8 +165,9 @@ AC_CHECK_DECL(DB_VERSION_MAJOR, [], [AC_MSG_ERROR([db.h is too old])],
     [$POSIX_HEADER AC_INCLUDES_DEFAULT $DB_HEADER])
 
 AC_MSG_CHECKING([Berkeley DB version])
-# Check version in <db.h> against our minimum requirements (linking with libdb
-# is not needed for this test).
+# Check version in <db.h> against our minimum requirements.
+LDFLAGS_old="$LDFLAGS"
+LDFLAGS="$LDFLAGS $RUNFLAGS"; # $RUNFLAGS may be needed to run the test program
 AC_RUN_IFELSE([AC_LANG_PROGRAM([$POSIX_HEADER AC_INCLUDES_DEFAULT $DB_HEADER],
     [
     FILE *out = fopen("conftest.out", "w");
@@ -183,6 +186,7 @@ fi
 if test "$dbh_major" -lt 5 || { test "$dbh_major" -eq 5 && test "$dbh_minor" -lt 3; } then
     AC_MSG_WARN([DB version 5.3 or higher is recommended.])
 fi
+LDFLAGS="$LDFLAGS_old"
 
 dnl DBATS_CHECK_DB_FUNC(symbol, label, code, [action-if-not-found])
 AC_DEFUN([DBATS_CHECK_DB_FUNC], [
