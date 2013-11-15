@@ -26,10 +26,9 @@ To install the optional mod_dbats apache module:
 Most of the GNU standard configure options and make targets are also
 available.
 
-If libdb is a shared library and is installed in a nonstandard location $dir,
-you will need to pass the appropriate options to your linker so that mod_dbats
-can find libdb at runtime.  For example, adding "-Wl,-rpath -Wl,$dir" or
-"-rpath $dir" or "-R $dir" to LDFLAGS during ./configure, or setting
-LD_RUN_PATH="$dir" in the environment during "make".
+If your libdb is installed in a nonstandard location $dir/lib and
+the corresponding db.h header is in $dir/include, you should use the
+./configure option "--with-libdb-prefix=$dir".  This should work whether
+libdb is static or shared.
 
 ----------------------------------------------------------------------
