@@ -1,9 +1,13 @@
 Developer work requires these additional tools:
-    autoconf
-    automake
-    libtool
+    - autoconf
+    - automake
+    - libtool
 
-To build from a cvs checkout or after "make maintainer-clean":
+To build from a cvs checkout, after "make maintainer-clean", or after
+modifying configure.ac or any Makefile.am:
     autoreconf --install
-    ./configure
+    ./configure [options]
     make
+
+To build a distribution and make sure it works, use:
+    make distcheck
