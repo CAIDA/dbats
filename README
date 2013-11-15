@@ -14,7 +14,6 @@ The mod_dbats apache httpd module additionally requires:
 ----------------------------------------------------------------------
 Building
 
-DBATS follows the familiar GNU configure and make standards.
 To build and install dbats:
     ./configure [options]
     make
@@ -24,7 +23,7 @@ To build and install dbats:
 To install the optional mod_dbats apache module:
     make install-apache
 
-Most of the GNU Makefile standard configure options and make targets are
+Most of the GNU standard configure options and make targets are also
 available.
 
 If libdb is a shared library and is installed in a nonstandard location $dir,
