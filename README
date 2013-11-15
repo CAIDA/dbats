@@ -1,0 +1,36 @@
+DBATS - DataBase of Aggregated Time Series
+Version 0.1
+
+----------------------------------------------------------------------
+Requirements
+
+  - Berkeley DB 5.x (preferably 5.3 or later)
+
+The mod_dbats apache httpd module additionally requires:
+
+  - Apache httpd 2.2 or later
+  - apxs (should be included with Apache)
+
+----------------------------------------------------------------------
+Building
+
+DBATS follows the familiar GNU configure and make standards.
+To build and install dbats:
+    ./configure [options]
+    make
+    make check ;#(optional)
+    make install
+
+To install the optional mod_dbats apache module:
+    make install-apache
+
+Most of the GNU Makefile standard configure options and make targets are
+available.
+
+If libdb is a shared library and is installed in a nonstandard location $dir,
+you will need to pass the appropriate options to your linker so that mod_dbats
+can find libdb at runtime.  For example, adding "-Wl,-rpath -Wl,$dir" or
+"-rpath $dir" or "-R $dir" to LDFLAGS during ./configure, or setting
+LD_RUN_PATH="$dir" in the environment during "make".
+
+----------------------------------------------------------------------

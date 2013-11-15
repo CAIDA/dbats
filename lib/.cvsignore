@@ -9,3 +9,4 @@ config.h
 *.lo
 *.la
 .libs
+stamp-h1

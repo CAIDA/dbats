@@ -3,7 +3,7 @@ Developer work requires these additional tools:
     automake
     libtool
 
-To build from a cvs checkout:
+To build from a cvs checkout or after "make maintainer-clean":
     autoreconf --install
     ./configure
     make

@@ -8,8 +8,10 @@ Makefile
 *.stats
 *.gprof
 *.metrics
+*.metrics.*[0-9]
 *.keys
 .*.sw?
+dbats-*.tar.gz
 html
 aclocal.m4
 autom4te.cache
@@ -24,3 +26,5 @@ missing
 depcomp
 configure
 libtool
+tmp
+stuff
