@@ -1,4 +1,4 @@
-AC_REVISION([$Id: configure.ac,v 1.31 2013/11/16 02:05:58 kkeys Exp $])
+AC_REVISION([$Id: configure.ac,v 1.32 2013/11/16 02:41:53 kkeys Exp $])
 
 AC_PREREQ(2.68)
 AC_INIT([DBATS], [0.1], [kkeys@caida.org])
@@ -131,7 +131,7 @@ AC_DEFUN([WITH_LIBS], [
     m4_define([WITH_LIBS_N], decr(WITH_LIBS_N))
 ])
 
-WITH_LIBS([$LIBDB], [AC_CHECK_FUNCS([db_version], [], [AC_MSG_ERROR([missing required function])])])
+WITH_LIBS([$LIBDB], [AC_CHECK_FUNCS([db_version], [], [AC_MSG_FAILURE([error linking with libdb])])])
 
 AC_CHECK_FUNCS([fchmod])
 
