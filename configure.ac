@@ -1,4 +1,4 @@
-AC_REVISION([$Id: configure.ac,v 1.30 2013/11/15 22:45:29 kkeys Exp $])
+AC_REVISION([$Id: configure.ac,v 1.31 2013/11/16 02:05:58 kkeys Exp $])
 
 AC_PREREQ(2.68)
 AC_INIT([DBATS], [0.1], [kkeys@caida.org])
@@ -8,14 +8,6 @@ AC_CONFIG_HEADERS(lib/config.h)
 
 dnl m4_include([m4/ax_pthread.m4]) dnl
 
-AC_ARG_WITH(incdirs,
-    [  --with-incdirs=DIRS     search for include files in DIRS])
-AC_ARG_WITH(libdirs,
-    [  --with-libdirs=DIRS     search for libraries in DIRS])
-AC_ARG_WITH(inclibdirs,
-    [  --with-inclibdirs=DIRS  same as --with-incdirs=DIRS --with-libdirs=DIRS])
-AC_ARG_WITH(inclibprefix,
-    [  --with-inclibprefix=DIR same as --with-incdirs=DIR/include --with-libdirs=DIR/lib])
 AC_ARG_ENABLE(apache,
     [  --enable-apache         enable DBATS module for Apache httpd (requires
                           "make install-apache" to install)],
@@ -38,29 +30,6 @@ if test "${enable_developer}" = "yes"; then
 fi
 
 AM_INIT_AUTOMAKE([-Wall -Werror foreign])
-
-
-dnl MY_DIRS(src, dst[, prefix[, suffix[, separator]]])
-AC_DEFUN([MY_DIRS], [
-    sep="$5"
-    if test "${$1}" != "no" && test "${$1}" != ""; then
-        for dir in ${$1}; do
-	    if test "${$2}" = ""; then
-		$2="$3${dir}$4"
-	    else
-		$2="${$2}${sep:- }$3${dir}$4"
-	    fi
-        done
-    fi
-])
-
-MY_DIRS(with_incdirs, CPPFLAGS, -I)
-MY_DIRS(with_inclibdirs, CPPFLAGS, -I)
-MY_DIRS(with_inclibprefix, CPPFLAGS, -I, /include)
-
-MY_DIRS(with_libdirs, LDFLAGS, -L)
-MY_DIRS(with_inclibdirs, LDFLAGS, -L)
-MY_DIRS(with_inclibprefix, LDFLAGS, -L, /lib)
 
 
 test "${enable_assert}" = "yes" || AC_DEFINE([NDEBUG], 1, [Define to disable assert()])
@@ -105,15 +74,10 @@ fi
 
 
 # Checks for libraries.
-AC_CHECK_LIB([db], [db_version], , [
-    # Some instances of libdb depend on pthreads, so try that.
-    AX_PTHREAD()
-    LIBS="$PTHREAD_LIBS $LIBS"
-    CFLAGS="$CFLAGS $PTHREAD_CFLAGS"
-    CC="$PTHREAD_CC"
-    AC_CHECK_LIB([db], [db_version])
-])
 
+dnl Note: AC_LIB_LINKFLAGS doesn't have an ACTION-IF-NOT-FOUND option.  If
+dnl needed, we should also test for linkability of a function in the library
+dnl with WITH_LIBS(..., AC_CHECK_FUNC(...)).
 RUNFLAGS=""; # extra LDFLAGS needed to make configure's test programs runnable
 AC_LIB_LINKFLAGS([db])
 RUNFLAGS="$LIBDB $RUNFLAGS"
@@ -146,6 +110,29 @@ AC_TYPE_SIZE_T
 
 
 # Checks for library functions.
+
+# libdb depends on pthreads.
+AX_PTHREAD()
+LIBS="$PTHREAD_LIBS $LIBS"
+CFLAGS="$CFLAGS $PTHREAD_CFLAGS"
+CC="$PTHREAD_CC"
+
+dnl WITH_LIBS(OPTIONS, COMMAND)
+dnl Temporarily prepend OPTIONS to shell variable $LIBS, and execute COMMAND.
+dnl It is safe to nest calls to WITH_LIBS.
+dnl We use LIBS, not LDFLAGS, because LIBS will appear at the end of compiler
+dnl commands, which is important to some linkers.
+AC_DEFUN([WITH_LIBS], [
+    m4_define([WITH_LIBS_N], m4_ifdef([WITH_LIBS_N], [m4_incr(WITH_LIBS_N)], [1]))
+    [LIBS_old_]WITH_LIBS_N="$LIBS"
+    LIBS="$1 $LIBS"
+    $2
+    LIBS="$[LIBS_old_]WITH_LIBS_N"
+    m4_define([WITH_LIBS_N], decr(WITH_LIBS_N))
+])
+
+WITH_LIBS([$LIBDB], [AC_CHECK_FUNCS([db_version], [], [AC_MSG_ERROR([missing required function])])])
+
 AC_CHECK_FUNCS([fchmod])
 
 
@@ -156,17 +143,16 @@ AC_CHECK_DECL(DB_VERSION_MAJOR, [], [AC_MSG_ERROR([db.h is too old])],
 
 AC_MSG_CHECKING([Berkeley DB version])
 # Check version in <db.h> against our minimum requirements.
-LDFLAGS_old="$LDFLAGS"
-LDFLAGS="$LDFLAGS $RUNFLAGS"; # $RUNFLAGS may be needed to run the test program
-AC_RUN_IFELSE([AC_LANG_PROGRAM([$POSIX_HEADER AC_INCLUDES_DEFAULT $DB_HEADER],
-    [
-    FILE *out = fopen("conftest.out", "w");
-    if (!out) exit(1);
-    fprintf(out, "dbh_major=%d\ndbh_minor=%d\ndbh_patch=%d\n",
-	DB_VERSION_MAJOR, DB_VERSION_MINOR, DB_VERSION_PATCH);
-    exit(0);
-    ])],
-    [], [AC_MSG_FAILURE([can not run compiled program])])
+WITH_LIBS([$LIBDB], [
+    AC_RUN_IFELSE([AC_LANG_PROGRAM([$POSIX_HEADER AC_INCLUDES_DEFAULT $DB_HEADER],
+	[
+	FILE *out = fopen("conftest.out", "w");
+	if (!out) exit(1);
+	fprintf(out, "dbh_major=%d\ndbh_minor=%d\ndbh_patch=%d\n",
+	    DB_VERSION_MAJOR, DB_VERSION_MINOR, DB_VERSION_PATCH);
+	exit(0);
+	])],
+	[], [AC_MSG_FAILURE([can not run compiled program])])])
 . ./conftest.out
 dbh_version="$dbh_major.$dbh_minor.$dbh_patch"
 AC_MSG_RESULT([$dbh_major.$dbh_minor.$dbh_patch])
@@ -176,7 +162,6 @@ fi
 if test "$dbh_major" -lt 5 || { test "$dbh_major" -eq 5 && test "$dbh_minor" -lt 3; } then
     AC_MSG_WARN([DB version 5.3 or higher is recommended.])
 fi
-LDFLAGS="$LDFLAGS_old"
 
 dnl DBATS_CHECK_DB_FUNC(symbol, label, code, [action-if-not-found])
 AC_DEFUN([DBATS_CHECK_DB_FUNC], [
