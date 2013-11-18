@@ -11,7 +11,7 @@ libtool: $(LIBTOOL_DEPS)
 
 # Generate html/ only if this is not a VPATH build (if it is, $srcdir/html/
 # should already exist, and Doxyfile can't handle it anyway).
-html html/index.html:
+html html/index.html: include/dbats.h
 	if test "$(srcdir)" = "$(builddir)"; then \
 	    rm -rf html; \
 	    $(DOXYGEN) $(top_srcdir)/Doxyfile; \
