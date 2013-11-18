@@ -9,13 +9,9 @@ all-local: libtool html/index.html
 libtool: $(LIBTOOL_DEPS)
 	$(SHELL) ./config.status libtool
 
-# Generate html/ only if this is not a VPATH build (if it is, $srcdir/html/
-# should already exist, and Doxyfile can't handle it anyway).
-html html/index.html: include/dbats.h
-	if test "$(srcdir)" = "$(builddir)"; then \
-	    rm -rf html; \
-	    $(DOXYGEN) $(top_srcdir)/Doxyfile; \
-	fi
+html html/index.html: $(top_srcdir)/include/dbats.h
+	-rm -rf html
+	$(DOXYGEN) Doxyfile
 
 install-data-hook:
 	@if test -n "$(MOD_DBATS)"; then \

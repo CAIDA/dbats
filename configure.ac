@@ -1,4 +1,4 @@
-AC_REVISION([$Id: configure.ac,v 1.33 2013/11/18 20:52:21 kkeys Exp $])
+AC_REVISION([$Id: configure.ac,v 1.34 2013/11/18 23:02:02 kkeys Exp $])
 
 AC_PREREQ(2.68)
 AC_INIT([DBATS], [0.1], [kkeys@caida.org])
@@ -182,7 +182,8 @@ DBATS_CHECK_DB_FUNC([HAVE_DB_SET_PRIORITY], [DB_TXN->set_priority()],
 
 
 # Output.
-AC_CONFIG_FILES(Makefile include/Makefile lib/Makefile apps/Makefile tests/Makefile)
+AC_CONFIG_FILES(Makefile Doxyfile include/Makefile lib/Makefile apps/Makefile
+    tests/Makefile)
 AC_OUTPUT()
 
 AC_MSG_RESULT([])
