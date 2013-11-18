@@ -20,6 +20,7 @@ config.status
 config.guess
 config.sub
 install-sh
+ltmain.sh
 ar-lib
 missing
 depcomp

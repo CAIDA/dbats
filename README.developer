@@ -1,7 +1,7 @@
 Developer work requires these additional tools:
     - autoconf
     - automake
-    - libtool (required only if you want to update the libtool files in CVS)
+    - libtool
 
 After checking out from CVS, you must do:
     autoreconf --install
