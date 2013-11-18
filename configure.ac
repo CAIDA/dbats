@@ -1,4 +1,4 @@
-AC_REVISION([$Id: configure.ac,v 1.32 2013/11/16 02:41:53 kkeys Exp $])
+AC_REVISION([$Id: configure.ac,v 1.33 2013/11/18 20:52:21 kkeys Exp $])
 
 AC_PREREQ(2.68)
 AC_INIT([DBATS], [0.1], [kkeys@caida.org])
@@ -73,16 +73,6 @@ if test "${enable_apache}" != "no"; then
 fi
 
 
-# Checks for libraries.
-
-dnl Note: AC_LIB_LINKFLAGS doesn't have an ACTION-IF-NOT-FOUND option.  If
-dnl needed, we should also test for linkability of a function in the library
-dnl with WITH_LIBS(..., AC_CHECK_FUNC(...)).
-RUNFLAGS=""; # extra LDFLAGS needed to make configure's test programs runnable
-AC_LIB_LINKFLAGS([db])
-RUNFLAGS="$LIBDB $RUNFLAGS"
-
-
 # Checks for header files.
 
 abs_srcdir=`( cd "$srcdir"; pwd; )`; # absolute directory
@@ -109,6 +99,16 @@ AC_TYPE_MODE_T
 AC_TYPE_SIZE_T
 
 
+# Checks for libraries.
+
+dnl Note: AC_LIB_LINKFLAGS doesn't have an ACTION-IF-NOT-FOUND option.  If
+dnl needed, we should also test for linkability of a function in the library
+dnl with WITH_LIBS(..., AC_CHECK_FUNC(...)).
+RUNFLAGS=""; # extra LDFLAGS needed to make configure's test programs runnable
+AC_LIB_LINKFLAGS([db])
+RUNFLAGS="$LIBDB $RUNFLAGS"
+
+
 # Checks for library functions.
 
 # libdb depends on pthreads.
@@ -131,18 +131,12 @@ AC_DEFUN([WITH_LIBS], [
     m4_define([WITH_LIBS_N], decr(WITH_LIBS_N))
 ])
 
-WITH_LIBS([$LIBDB], [AC_CHECK_FUNCS([db_version], [], [AC_MSG_FAILURE([error linking with libdb])])])
-
-AC_CHECK_FUNCS([fchmod])
-
-
-# Other.
-
-AC_CHECK_DECL(DB_VERSION_MAJOR, [], [AC_MSG_ERROR([db.h is too old])],
+AC_CHECK_DECL(DB_VERSION_MAJOR, [], [AC_MSG_ERROR([db.h is too old; need at least version 4, preferably 5.3])],
     [$POSIX_HEADER AC_INCLUDES_DEFAULT $DB_HEADER])
 
 AC_MSG_CHECKING([Berkeley DB version])
 # Check version in <db.h> against our minimum requirements.
+# This depends on CPPFLAGS, so should run after AC_LIB_LINKFLAGS(db).
 WITH_LIBS([$LIBDB], [
     AC_RUN_IFELSE([AC_LANG_PROGRAM([$POSIX_HEADER AC_INCLUDES_DEFAULT $DB_HEADER],
 	[
@@ -162,6 +156,10 @@ fi
 if test "$dbh_major" -lt 5 || { test "$dbh_major" -eq 5 && test "$dbh_minor" -lt 3; } then
     AC_MSG_WARN([DB version 5.3 or higher is recommended.])
 fi
+
+WITH_LIBS([$LIBDB], [AC_CHECK_FUNCS([db_version], [], [AC_MSG_FAILURE([error linking with libdb])])])
+
+AC_CHECK_FUNCS([fchmod])
 
 dnl DBATS_CHECK_DB_FUNC(symbol, label, code, [action-if-not-found])
 AC_DEFUN([DBATS_CHECK_DB_FUNC], [
