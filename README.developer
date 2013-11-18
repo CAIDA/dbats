@@ -1,11 +1,15 @@
 Developer work requires these additional tools:
     - autoconf
     - automake
-    - libtool
+    - libtool (required only if you want to update the libtool files in CVS)
 
-To build from a cvs checkout, after "make maintainer-clean", or after
-modifying configure.ac or any Makefile.am:
+After checking out from CVS, you must do:
     autoreconf --install
+
+After modifying configure.ac or any Makefile.am, you should do:
+    autoreconf
+
+Then you can build with the usual commands:
     ./configure [options]
     make
 
