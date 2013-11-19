@@ -9,9 +9,9 @@ all-local: libtool html/index.html
 libtool: $(LIBTOOL_DEPS)
 	$(SHELL) ./config.status libtool
 
-html html/index.html: $(top_srcdir)/include/dbats.h
-	-rm -rf html
-	$(DOXYGEN) Doxyfile
+# html files are distributed, so they're built in $srcdir not $builddir.
+$(srcdir)/html $(srcdir)/html/index.html: include/dbats.h
+	cd $(srcdir) && rm -rf html && $(DOXYGEN) Doxyfile
 
 install-data-hook:
 	@if test -n "$(MOD_DBATS)"; then \
@@ -22,9 +22,6 @@ install-data-hook:
 
 install-apache: Makefile
 	cd lib; $(MAKE) install-apache
-
-distclean-local:
-	-rm -rf html
 
 # Replace "missing" with "missing-fail" to detect dependence on maintaner tools.
 distcheck-hook:
