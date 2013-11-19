@@ -73,6 +73,10 @@
 #ifndef DBATS_H
 #define DBATS_H
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #include "dbats_log.h"
 
 /* ************************************************** */
@@ -720,5 +724,9 @@ extern const dbats_bundle_info *dbats_get_bundle_info(dbats_handler *handler,
     int bid);
 
 extern void dbats_stat_print(const dbats_handler *handler);
+
+#ifdef __cplusplus
+} /* extern "C" */
+#endif
 
 #endif // DBATS_H
