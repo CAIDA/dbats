@@ -14,6 +14,7 @@
 #include <errno.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h> // strcasecmp()
 #include <limits.h>
 #include <sys/types.h>
 #include <sys/stat.h>
@@ -530,10 +531,9 @@ static int read_bundle_info(dbats_handler *dh, dbats_snapshot *ds, int bid,
 	sizeof(dh->bundle[bid]), NULL, flags);
 }
 
-static int write_bundle_info(dbats_handler *dh, dbats_snapshot *ds, int bid)
+static int write_bundle_info(dbats_handler *dh, DB_TXN *txn, int bid)
 {
     uint8_t key = bid;
-    DB_TXN *txn = ds ? ds->txn : dh->txn;
     return raw_db_set(dh->dbBundle, txn, &key, sizeof(key), &dh->bundle[bid],
 	sizeof(dh->bundle[bid]), 0);
 }
@@ -817,7 +817,7 @@ int dbats_open(dbats_handler **dhp,
 	dh->bundle[0].steps = 1;
 	dh->bundle[0].period = dh->cfg.period;
 	dh->cfg.num_bundles = 1;
-	rc = write_bundle_info(dh, NULL, 0);
+	rc = write_bundle_info(dh, dh->txn, 0);
 	if (rc != 0) goto abort;
 
 	// initialize other metadata
@@ -916,7 +916,7 @@ int dbats_aggregate(dbats_handler *dh, enum dbats_agg_func func, int steps)
     dh->bundle[bid].steps = steps;
     dh->bundle[bid].period = dh->bundle[0].period * steps;
 
-    rc = write_bundle_info(dh, NULL, bid);
+    rc = write_bundle_info(dh, dh->txn, bid);
     if (rc != 0) return rc;
 
     dh->cfg.num_bundles++;
@@ -927,7 +927,7 @@ enum dbats_agg_func dbats_find_agg_func(const char *name)
 {
     enum dbats_agg_func func;
     for (func = DBATS_AGG_DATA + 1; func < DBATS_AGG_N; func++) {
-	if (strcmp(dbats_agg_func_label[func], name) == 0)
+	if (strcasecmp(dbats_agg_func_label[func], name) == 0)
 	    return func;
     }
     return DBATS_AGG_NONE;
@@ -1172,7 +1172,7 @@ int dbats_series_limit(dbats_handler *dh, int bid, int keep)
     rc = truncate_bundle(dh, NULL, bid);
     if (rc != 0) goto abort;
 
-    rc = write_bundle_info(dh, NULL, bid); // write new keep
+    rc = write_bundle_info(dh, txn, bid); // write new keep
     if (rc != 0) goto abort;
 
     return commit_transaction(dh, txn); // "keep txn"
@@ -2478,6 +2478,10 @@ int dbats_set(dbats_snapshot *ds, uint32_t key_id, const dbats_value *valuep)
 	    aggstart + dh->bundle[bid].period - dh->bundle[0].period);
 
 	// Count the number of steps contributing to the aggregate.
+	// XXX TODO: AVG is the only func that actually needs n; MIN, MAX, and
+	// SUM just need to know if n==1, and LAST doesn't care about n at
+	// all.  So we could skip full counting (and instantiating?) in some
+	// cases.
 	int n = 0;
 	{
 	    int ti = (aggstart - ds->active_start) / dh->bundle[0].period;
