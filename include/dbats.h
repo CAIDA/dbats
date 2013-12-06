@@ -262,7 +262,7 @@ extern int dbats_close(dbats_handler *handler);
  */
 extern int dbats_aggregate(dbats_handler *handler, enum dbats_agg_func func, int steps);
 
-/** Look up an aggregate function by name.
+/** Look up an aggregate function by name (case insensitive).
  *  @param[in] name the name of an aggregate function
  *  @return the @ref dbats_agg_func function id, or @ref DBATS_AGG_NONE if
  *    no match is found
