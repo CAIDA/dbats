@@ -101,7 +101,6 @@ int main(int argc, char *argv[]) {
 	char colon = ':';
 	char dummy = '\0';
 	int n = sscanf(argv[i], "%9[A-Za-z0-9_]:%d%c%d%c", funcname, &aggsteps[i], &colon, &aggkeep[i], &dummy);
-	fprintf(stderr, "agg: \"%s\" colon=%x dummy=%x n=%d\n", argv[i], colon, dummy, n);
 	if ((n != 2 && n != 4) || colon != ':') {
 	    fprintf(stderr, "Syntax error in aggregate specification \"%s\"\n", argv[i]);
 	    help();
