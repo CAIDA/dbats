@@ -14,7 +14,8 @@ static uint32_t period = 60;
 static uint16_t values_per_entry = 1;
 
 static void help(void) {
-    fprintf(stderr, "%s [{options}] {dbats_path} [{func}:{steps}]...\n",
+    fprintf(stderr, "Usage:\n");
+    fprintf(stderr, "%s [{options}] {dbats_path} [{func}:{steps}[:{keep}]]...\n",
 	progname);
     fprintf(stderr, "Create a DBATS database and optionally define aggregates "
 	"and keys.\n");
@@ -29,6 +30,8 @@ static void help(void) {
     for (enum dbats_agg_func i = 1; i < DBATS_AGG_N; i++)
 	fprintf(stderr, "%s%s", i==1 ? "" : ", ", dbats_agg_func_label[i]);
     fprintf(stderr, ".\n");
+    fprintf(stderr, "{steps} is the number of primary data points contributing to one aggregate value.\n");
+    fprintf(stderr, "{keep} is the number of aggregate data points to keep.\n");
     exit(-1);
 }
 
@@ -60,14 +63,14 @@ int main(int argc, char *argv[]) {
 	case 'p':
 	    period = atoi(optarg);
 	    if (period <= 0) {
-		dbats_log(DBATS_LOG_ERR, "error: illegal -p value: %s", optarg);
+		fprintf(stderr, "error: illegal -p value: %s\n", optarg);
 		help();
 	    }
 	    break;
 	case 'e':
 	    values_per_entry = atoi(optarg);
 	    if (values_per_entry <= 0) {
-		dbats_log(DBATS_LOG_ERR, "error: illegal -e value: %s", optarg);
+		fprintf(stderr, "error: illegal -e value: %s\n", optarg);
 		help();
 	    }
 	    break;
@@ -83,7 +86,7 @@ int main(int argc, char *argv[]) {
     argc -= optind;
 
     if (argc < 1) {
-	dbats_log(DBATS_LOG_ERR, "error: missing dbats_path");
+	fprintf(stderr, "error: missing dbats_path\n");
 	help();
     }
     dbats_path = argv[0];
@@ -91,19 +94,22 @@ int main(int argc, char *argv[]) {
     argc--;
 
     char funcname[10];
-    char garbage[2];
     enum dbats_agg_func *aggfunc = malloc(argc * sizeof(enum dbats_agg_func));
     int *aggsteps = malloc(argc * sizeof(int));
+    int *aggkeep = malloc(argc * sizeof(int));
     for (int i = 0; i < argc; i++) {
-	int n = sscanf(argv[i], "%9[A-Za-z0-9_]:%d%1s",
-	    funcname, &aggsteps[i], garbage);
-	if (n != 2) {
-	    dbats_log(DBATS_LOG_ERR, "argv[%d]: \"%s\": n=%d", i, argv[i], n);
+	char colon = ':';
+	char dummy = '\0';
+	int n = sscanf(argv[i], "%9[A-Za-z0-9_]:%d%c%d%c", funcname, &aggsteps[i], &colon, &aggkeep[i], &dummy);
+	fprintf(stderr, "agg: \"%s\" colon=%x dummy=%x n=%d\n", argv[i], colon, dummy, n);
+	if ((n != 2 && n != 4) || colon != ':') {
+	    fprintf(stderr, "Syntax error in aggregate specification \"%s\"\n", argv[i]);
 	    help();
 	}
+	if (n < 4) aggkeep[i] = 0;
 	aggfunc[i] = dbats_find_agg_func(funcname);
 	if (aggfunc[i] == DBATS_AGG_NONE) {
-	    dbats_log(DBATS_LOG_ERR, "no such function: %s", funcname);
+	    fprintf(stderr, "no such function: %s\n", funcname);
 	    return -1;
 	}
     }
@@ -116,26 +122,41 @@ int main(int argc, char *argv[]) {
     const dbats_config *cfg = dbats_get_config(handler);
 
     for (int i = 0; i < argc; i++) {
-	int skip = 0;
-	for (int bid = 0; bid < cfg->num_bundles; bid++) {
-	    const dbats_bundle_info *bundle =
-		dbats_get_bundle_info(handler, bid);
+	int bid;
+	const dbats_bundle_info *bundle;
+	for (bid = 0; bid < cfg->num_bundles; bid++) {
+	    bundle = dbats_get_bundle_info(handler, bid);
 	    if (bundle->func == aggfunc[i] && bundle->steps == aggsteps[i]) {
-		dbats_log(DBATS_LOG_INFO, "skipping duplicate aggregate %s:%d",
-		    dbats_agg_func_label[bundle->func], bundle->steps);
-		goto skip;
+		break;
 	    }
 	}
-	if (skip) continue;
-	if ((dbats_aggregate(handler, aggfunc[i], aggsteps[i])) != 0)
+	if (bid == cfg->num_bundles) {
+	    // new aggregate
+	    dbats_log(DBATS_LOG_INFO, "defining aggregate #%d %s:%d:%d",
+		bid, dbats_agg_func_label[aggfunc[i]],
+		aggsteps[i], aggkeep[i]);
+	    if ((dbats_aggregate(handler, aggfunc[i], aggsteps[i])) != 0)
+		return -1;
+	} else if (aggkeep[i] == bundle->keep) {
+	    // duplicate existing aggregate
+	    dbats_log(DBATS_LOG_INFO, "skipping duplicate aggregate #%d %s:%d:%d",
+		bid, dbats_agg_func_label[bundle->func], bundle->steps, bundle->keep);
+	    continue;
+	} else {
+	    // changing {keep} of existing aggregate
+	    dbats_log(DBATS_LOG_INFO, "redefining aggregate #%d %s:%d:%d",
+		bid, dbats_agg_func_label[aggfunc[i]],
+		aggsteps[i], aggkeep[i]);
+	}
+	if (dbats_series_limit(handler, bid, aggkeep[i]) != 0)
 	    return -1;
-	skip: ;
+	bundle = dbats_get_bundle_info(handler, bid);
     }
 
     if (keyfile) {
 	FILE *f = fopen(keyfile, "r");
 	if (!f) {
-	    dbats_log(DBATS_LOG_ERR, "%s: %s", keyfile, strerror(errno));
+	    fprintf(stderr, "%s: %s\n", keyfile, strerror(errno));
 	    return -1;
 	}
 	char line[DBATS_KEYLEN+1];
@@ -143,21 +164,19 @@ int main(int argc, char *argv[]) {
 	while (fgets(line, sizeof(line), f)) {
 	    linenum++;
 	    if (n_keys >= MAX_KEYS) {
-		dbats_log(DBATS_LOG_ERR, "%s:%d: %s", keyfile, linenum,
-		    "too many keys");
+		fprintf(stderr, "%s:%d: %s\n", keyfile, linenum, "too many keys");
 		return -1;
 	    }
 	    int len = strlen(line);
 	    if (line[len-1] != '\n') {
-		dbats_log(DBATS_LOG_ERR, "%s:%d: %s", keyfile, linenum,
-		    "key too long");
+		fprintf(stderr, "%s:%d: %s\n", keyfile, linenum, "key too long");
 		return -1;
 	    }
 	    line[len-1] = '\0';
 	    keys[n_keys++] = strdup(line);
 	}
 	if (ferror(f)) {
-	    dbats_log(DBATS_LOG_ERR, "%s: %s", keyfile, strerror(errno));
+	    fprintf(stderr, "%s: %s\n", keyfile, strerror(errno));
 	    return -1;
 	}
 
