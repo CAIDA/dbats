@@ -7,6 +7,7 @@ EXTRA_DIST          = mod_dbats.c
 EXTRA_DIST         += $(top_srcdir)/./config.rpath
 CLEANFILES          = mod_dbats.la mod_dbats.slo
 libdbats_la_LIBADD  = $(LTLIBDB)
+libdbats_la_LDFLAGS = -version-info 0:0:0
 
 APXS                = @APXS@
 

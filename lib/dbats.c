@@ -668,7 +668,7 @@ int dbats_open(dbats_handler **dhp,
 	    // another process creating a dbats environment.
 	    char filename[PATH_MAX];
 	    struct stat statbuf;
-	    int tries_limit = 30;
+	    int tries_limit = 5;
 	    sprintf(filename, "%s/dbdata/config", path);
 	    while (stat(filename, &statbuf) != 0) {
 		if (errno != ENOENT) {
@@ -677,8 +677,9 @@ int dbats_open(dbats_handler **dhp,
 		    return errno;
 		}
 		if (--tries_limit <= 0) {
-		    dbats_log(DBATS_LOG_ERR, "Retry limit exceeded waiting for %s",
-			filename);
+		    dbats_log(DBATS_LOG_ERR,
+			"%s exists but does not contain a valid database",
+			path);
 		    return errno;
 		}
 		sleep(1);
