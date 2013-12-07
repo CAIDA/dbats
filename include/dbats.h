@@ -201,7 +201,8 @@ typedef struct dbats_keytree_iterator dbats_keytree_iterator; ///< Opaque handle
  *    - EINVAL if a parameter was invalid;
  *    - ENOMEM if out of memory;
  *    - ENOENT if the directory specified by @c path does not exist and
- *      @c flags did not contain DBATS_CREATE;
+ *      @c flags did not contain DBATS_CREATE, or if the directory does exist
+ *      but does not contain a valid database after waiting several seconds;
  *    - DB_VERSION_MISMATCH if the version of the BDB library or DBATS library
  *      is not compatible with that used to create the database;
  *    - other nonzero value for other errors.
