@@ -5,6 +5,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include "uint.h"
+#include <db.h>
 #include "dbats.h"
 
 static char *progname = 0;
@@ -136,8 +138,15 @@ int main(int argc, char *argv[]) {
 	if (dbats_glob_keyname_start(handler, NULL, &dki, keyglob) == 0) {
 	    uint32_t keyid;
 	    char keybuf[DBATS_KEYLEN];
-	    while (dbats_glob_keyname_next(dki, &keyid, keybuf) == 0) {
+	    while ((rc = dbats_glob_keyname_next(dki, &keyid, keybuf)) == 0) {
 		printf("  %10u: %s\n", keyid, keybuf);
+	    }
+	    if (rc == DB_NOTFOUND) {
+		rc = 0;
+	    } else {
+		dbats_log(DBATS_LOG_ERR,
+		    "internal error in dbats_glob_keyname_next: %s",
+		    db_strerror(rc));
 	    }
 	    dbats_glob_keyname_end(dki);
 	}
