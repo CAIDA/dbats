@@ -1999,6 +1999,8 @@ glob_result:
 
 	} else {
 	    // error
+	    dbats_log(DBATS_LOG_ERR, "dbats_glob_keyname_next: raw_cursor_get: (%d) %s",
+		rc, db_strerror(rc));
 	    return rc;
 	}
     }
@@ -2058,6 +2060,8 @@ next_level:
 
 	} else if (rc != DB_NOTFOUND) {
 	    // error
+	    dbats_log(DBATS_LOG_ERR, "dbats_glob_keyname_next: raw_db_get: (%d) %s",
+		rc, db_strerror(rc));
 	    return rc;
 
 	} else if (!(flags & DBATS_CREATE)) {
@@ -2104,7 +2108,12 @@ next_level:
 		node->id = htonl(seqnum) | KTID_IS_NODE;
 		rc = raw_db_set(dki->dh->dbKeytree, dki->txn,
 		    ktkey, ktkey_size, &node->id, sizeof(node->id), 0);
-		if (rc != 0) return rc;
+		if (rc != 0) {
+		    dbats_log(DBATS_LOG_ERR,
+			"Error creating node at level %d (%.*s) for %s: (%d) %s",
+			lvl, node->gnlen, node->start, dki->pattern, rc, db_strerror(rc));
+		    return rc;
+		}
 		dbats_log(DBATS_LOG_FINEST, "Created node #%x: %.*s",
 		    ntohl(node->id), node->gnlen, node->key.nodename);
 		goto found;
@@ -2129,7 +2138,11 @@ next_level:
 
 		rc = raw_db_set(dki->dh->dbKeytree, dki->txn, ktkey, ktkey_size,
 		    &node->id, sizeof(node->id), DB_NOOVERWRITE);
-		if (rc != 0) return rc;
+		if (rc != 0) {
+		    dbats_log(DBATS_LOG_ERR, "Error creating leaf for %s: %s",
+			dki->pattern, db_strerror(rc));
+		    return rc;
+		}
 
 		dbats_log(DBATS_LOG_FINEST, "Assigned key #%x: %s",
 		    ntohl(node->id), dki->pattern);
