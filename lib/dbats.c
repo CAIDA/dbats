@@ -1512,6 +1512,7 @@ static int load_isset(dbats_snapshot *ds, fragkey_t *dbkey, uint8_t **dest,
 	// vector was compressed to a 32-bit counter
 	uint32_t bits = ntohl(*((uint32_t*)buf));
 	memset(buf, 0xFF, bits/8);
+	memset(buf + bits/8, 0, vec_size(ENTRIES_PER_FRAG) - bits/8);
 	for (int i = bits - bits%8; i < bits; i++)
 	    vec_set(buf, i);
     }
