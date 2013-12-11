@@ -20,6 +20,7 @@ mod_dbats.c: Makefile
 mod_dbats.la: mod_dbats.c libdbats.la
 	$(APXS) -c $(APXS_DEBUG) $(AM_CPPFLAGS) $(CPPFLAGS) -L. $(AM_LDFLAGS) $(LDFLAGS) -ldbats mod_dbats.c $(LTLIBDB)
 
-install-apache: $(MOD_DBATS)
+# depends on "install" because mod_dbats will need to load INSTALLED libdbats.so
+install-apache: $(MOD_DBATS) install
 	$(APXS) -a -i mod_dbats.la
 
