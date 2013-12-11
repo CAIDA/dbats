@@ -81,7 +81,7 @@ extern "C" {
 
 /* ************************************************** */
 
-#define DBATS_DB_VERSION     9   ///< Version of db format written by this API
+#define DBATS_DB_VERSION     10  ///< Version of db format written by this API
 
 #define DBATS_KEYLEN         128 ///< max length of key name
 #define DBATS_KEY_IS_PREFIX  0x80000000
@@ -178,8 +178,8 @@ typedef struct dbats_keytree_iterator dbats_keytree_iterator; ///< Opaque handle
  *  @param[out] handlerp the address of a dbats_handler*; after the call,
  *    *handlerp will contain a pointer that must be passed to subsequent calls
  *    on this database.
- *  @param[in] path path of an existing directory containing a DBATS
- *    database or a nonexistant directory in which to create a new DBATS
+ *  @param[in] path path of an @b existing directory containing a DBATS
+ *    database or a @b nonexistant directory in which to create a new DBATS
  *    database.
  *  @param[in] values_per_entry number of dbats_values in the array read by
  *    dbats_get() or written by dbats_set()

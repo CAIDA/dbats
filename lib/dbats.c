@@ -33,9 +33,6 @@
 #define MAX_NUM_FRAGS       16384 // max number of fragments in a tslice
 #define MAX_NUM_BUNDLES        16 // max number of time series bundles
 
-#define DBATS_ISSET_ALL   1 // all bits of is_set are set
-#define DBATS_ISSET_NONE  2 // all bits of is_set are clear
-
 /*************************************************************************/
 // compile-time assertion (works anywhere a declaration is allowed)
 #define ct_assert(expr, label)  enum { ASSERT_ERROR__##label = 1/(!!(expr)) };
@@ -52,7 +49,10 @@ ct_assert((sizeof(double) == sizeof(uint64_t)), double_is_not_64_bits)
 #define vec_test(vec, i)  (vec && (vec[(i)/8] & (1<<((i)%8)))) // test ith bit
 
 #define valueptr(ds, bid, frag_id, offset) \
-    ((dbats_value*)(&ds->tslice[bid]->frag[frag_id]->data[offset * dh->cfg.entry_size]))
+    ((dbats_value*)(&ds->tslice[bid]->values[frag_id]->data[offset * dh->cfg.entry_size]))
+
+#define agginfoptr(ds, bid, frag_id, offset) \
+    ((uint32_t*)(&ds->tslice[bid]->agginfo[frag_id]->data[offset * sizeof(uint32_t)]))
 
 // "Fragment", containing a large subset of entries for a timeslice
 typedef struct dbats_frag {
@@ -69,12 +69,16 @@ typedef struct dbats_tslice {
     uint32_t time;                        // start time (unix seconds)
     uint32_t num_frags;                   // number of fragments
     uint8_t *is_set[MAX_NUM_FRAGS];       // bitvectors: which cols have values
-    dbats_frag *frag[MAX_NUM_FRAGS];      // blocks of values
+    dbats_frag *values[MAX_NUM_FRAGS];    // blocks of arrays of dbats_value
+    dbats_frag *agginfo[MAX_NUM_FRAGS];   // blocks of uint32_t
     uint8_t frag_changed[MAX_NUM_FRAGS];  // which fragments have changed
 } dbats_tslice;
 
 #define fragsize(dh) \
     (sizeof(dbats_frag) + ENTRIES_PER_FRAG * (dh)->cfg.entry_size)
+
+#define agginfo_size \
+    (sizeof(dbats_frag) + ENTRIES_PER_FRAG * sizeof(uint32_t))
 
 typedef struct {
     uint32_t bid;
@@ -127,14 +131,8 @@ const uint32_t KTID_IS_NODE      = chtonl(DBATS_KEY_IS_PREFIX);
 struct dbats_snapshot {
     dbats_handler *dh;
     dbats_tslice **tslice;     // a tslice for each time series bundle
-    uint32_t active_start;     // first timestamp in active period
-                               // (corresponding to is_set[0])
-    uint32_t active_end;       // last timestamp in active period
-    uint32_t active_last_data; // last timestamp in active period with data
     uint32_t end_time;         // latest time for which a value has been set
     uint32_t min_keep_time;    // earliest time for which a value can be set
-    uint8_t ***is_set;         // each is_set[timeindex][fragid] is a bitvector
-                               // indicating which cols have values
     DB_TXN *txn;               // transaction
     void *state_compress;
     void *state_decompress;
@@ -159,6 +157,7 @@ struct dbats_handler {
     DB *dbKeytree;             // {level, parent, nodename} -> node id or key id
     DB *dbKeyid;               // recno -> key name (note: keyid == recno - 1)
     DB *dbValues;              // {bid, time, frag_id} -> value fragment
+    DB *dbAgginfo;             // {bid, time, frag_id} -> agginfo fragment
     DB *dbIsSet;               // {bid, time, frag_id} -> is_set fragment
     DB *dbSequence;            // BDB sequences
     dbats_bundle_info *bundle; // parameters for each time series bundle
@@ -363,7 +362,7 @@ static void log_db_op(int level, const char *fname, int line, DB *db,
     char keybuf[DBATS_KEYLEN] = "";
     if (!key) {
 	// don't log key
-    } else if (db == dh->dbValues || db == dh->dbIsSet) {
+    } else if (db == dh->dbValues || db == dh->dbAgginfo || db == dh->dbIsSet) {
 	fragkey_t *fragkey = (fragkey_t*)key;
 	sprintf(keybuf, "bid=%d t=%u frag=%u",
 	    ntohl(fragkey->bid), ntohl(fragkey->time), ntohl(fragkey->frag_id));
@@ -788,7 +787,7 @@ int dbats_open(dbats_handler **dhp,
 	    dh->cfg.version, DBATS_DB_VERSION);
 	return DB_VERSION_MISMATCH;
     }
-    if (dh->cfg.version < 8) {
+    if (dh->cfg.version < 10) {
 	dbats_log(DBATS_LOG_ERR, "obsolete database version %d", dh->cfg.version);
 	return DB_VERSION_MISMATCH;
     }
@@ -797,6 +796,7 @@ int dbats_open(dbats_handler **dhp,
     if ((rc = open_db(dbKeytree, "keytree", DB_BTREE, 1) != 0)) goto abort;
     if ((rc = open_db(dbKeyid,   "keyid",   DB_RECNO, 1) != 0)) goto abort;
     if ((rc = open_db(dbValues,  "values",  DB_BTREE, 1) != 0)) goto abort;
+    if ((rc = open_db(dbAgginfo, "agginfo", DB_BTREE, 1) != 0)) goto abort;
     if ((rc = open_db(dbIsSet,   "is_set",  DB_BTREE, 1) != 0)) goto abort;
     if ((rc = open_db(dbSequence,"sequence",DB_BTREE, 1) != 0)) goto abort;
 #undef open_db
@@ -1136,6 +1136,10 @@ static int truncate_bundle(dbats_handler *dh, dbats_snapshot *ds, int bid)
     if (rc != 0) goto abort;
     rc = delete_frags(txn, dh->dbIsSet, bid, 0, new_start);
     if (rc != 0) goto abort;
+    if (bid > 0) {
+	rc = delete_frags(txn, dh->dbAgginfo, bid, 0, new_start);
+	if (rc != 0) goto abort;
+    }
     commit_transaction(dh, txn); // truncate txn
     return 0;
 
@@ -1202,9 +1206,13 @@ static int clear_tslice(dbats_snapshot *ds, int bid)
     dbats_log(DBATS_LOG_FINE, "Free tslice t=%u bid=%d", tslice->time, bid);
 
     for (int f = 0; f < tslice->num_frags; f++) {
-	if (tslice->frag[f]) {
-	    free(tslice->frag[f]);
-	    tslice->frag[f] = 0;
+	if (tslice->values[f]) {
+	    free(tslice->values[f]);
+	    tslice->values[f] = 0;
+	}
+	if (tslice->agginfo[f]) {
+	    free(tslice->agginfo[f]);
+	    tslice->agginfo[f] = 0;
 	}
 	if (tslice->is_set[f]) {
 	    free(tslice->is_set[f]);
@@ -1217,83 +1225,96 @@ static int clear_tslice(dbats_snapshot *ds, int bid)
     return 0;
 }
 
+static int write_bitvector_frag(DB *db, DB_TXN *txn, fragkey_t *dbkey, const uint8_t *vec)
+{
+    uint32_t ones = 0; // number of leading "1" bits
+    int zeroes = 0; // have any "0"s been seen?
+    int matches = 1; // bit string matches regexp "^1*0*$"?
+    for (int i = 0; i < vec_size(ENTRIES_PER_FRAG); i++) {
+	if (zeroes) { if (!(matches = !vec[i])) break; }
+	else if (vec[i] == 0xFF) { ones += 8; }
+	else if (vec[i] == 0x7F) { ones += 7; zeroes = 1; }
+	else if (vec[i] == 0x3F) { ones += 6; zeroes = 1; }
+	else if (vec[i] == 0x1F) { ones += 5; zeroes = 1; }
+	else if (vec[i] == 0x0F) { ones += 4; zeroes = 1; }
+	else if (vec[i] == 0x07) { ones += 3; zeroes = 1; }
+	else if (vec[i] == 0x03) { ones += 2; zeroes = 1; }
+	else if (vec[i] == 0x01) { ones += 1; zeroes = 1; }
+	else if (vec[i] == 0x00) { ones += 0; zeroes = 1; }
+	else { matches = 0; break; }
+    }
+    if (matches) {
+	// compression: write number of leading "1" bits
+	ones = htonl(ones);
+	return raw_db_set(db, txn, dbkey, sizeof(*dbkey),
+	    &ones, sizeof(ones), 0);
+    } else {
+	// write the whole is_set vector
+	return raw_db_set(db, txn, dbkey, sizeof(*dbkey),
+	    vec, vec_size(ENTRIES_PER_FRAG), 0);
+    }
+}
+
+static int write_int_frag(dbats_snapshot *ds, DB *db, fragkey_t *dbkey,
+    char *buf, dbats_frag *frag, size_t frag_size, const char *label)
+{
+    if (ds->dh->cfg.compress) {
+	if (!ds->state_compress) {
+	    ds->state_compress = ecalloc(1, sizeof(qlz_state_compress),
+		"state_compress");
+	    if (!ds->state_compress) return ENOMEM;
+	}
+	buf[0] = 1; // compression flag
+	frag->compressed = 1;
+	size_t compress_len = qlz_compress(frag,
+	    buf+1, frag_size, ds->state_compress);
+	dbats_log(DBATS_LOG_VFINE, "%s bid=%d frag=%d compression: %zu -> %zu "
+	    "(%.1f %%)", label, ntohl(dbkey->bid), ntohl(dbkey->frag_id),
+	    frag_size, compress_len, compress_len*100.0/frag_size);
+	return raw_db_set(db, ds->txn, dbkey, sizeof(*dbkey),
+	    buf, compress_len + 1, 0);
+    } else {
+	frag->compressed = 0;
+	dbats_log(DBATS_LOG_VFINE, "%s bid=%d frag=%d write: %zu", label,
+	    ntohl(dbkey->bid), ntohl(dbkey->frag_id), frag_size);
+	return raw_db_set(db, ds->txn, dbkey, sizeof(*dbkey),
+	    frag, frag_size, 0);
+    }
+}
+
 // Writes tslice to db.
 static int flush_tslice(dbats_snapshot *ds, int bid)
 {
     dbats_log(DBATS_LOG_FINE, "Flush t=%u bid=%d", ds->tslice[bid]->time, bid);
     size_t frag_size = fragsize(ds->dh);
-    char *buf = NULL;
     int rc;
+    // XXX TODO: store a permanent compression buffer on ds
+    char *buf = (char*)emalloc(1 + frag_size + QLZ_OVERHEAD, "compression buffer");
+    if (!buf) return errno ? errno : ENOMEM;
 
     // Write fragments to the DB
     fragkey_t dbkey = { htonl(bid), htonl(ds->tslice[bid]->time), 0};
     for (int f = 0; f < ds->tslice[bid]->num_frags; f++) {
-	if (!ds->tslice[bid]->frag[f]) continue;
+	if (!ds->tslice[bid]->values[f]) continue;
 	dbkey.frag_id = htonl(f);
 	if (!ds->tslice[bid]->frag_changed[f]) {
 	    dbats_log(DBATS_LOG_VFINE, "Skipping frag %d (unchanged)", f);
 	} else {
-	    if (ds->dh->cfg.compress) {
-		if (!ds->state_compress) {
-		    ds->state_compress = ecalloc(1, sizeof(qlz_state_compress),
-			"state_compress");
-		    if (!ds->state_compress) return ENOMEM;
-		}
-		if (!buf) {
-		    buf = (char*)emalloc(1 + frag_size + QLZ_OVERHEAD,
-			"compression buffer");
-		    if (!buf) return errno ? errno : ENOMEM;
-		}
-		buf[0] = 1; // compression flag
-		ds->tslice[bid]->frag[f]->compressed = 1;
-		size_t compress_len = qlz_compress(ds->tslice[bid]->frag[f],
-		    buf+1, frag_size, ds->state_compress);
-		dbats_log(DBATS_LOG_VFINE, "Frag %d compression: %zu -> %zu "
-		    "(%.1f %%)", f, frag_size, compress_len,
-		    compress_len*100.0/frag_size);
-		rc = raw_db_set(ds->dh->dbValues, ds->txn, &dbkey, sizeof(dbkey),
-		    buf, compress_len + 1, 0);
-		if (rc != 0) return rc;
-	    } else {
-		ds->tslice[bid]->frag[f]->compressed = 0;
-		dbats_log(DBATS_LOG_VFINE, "Frag %d write: %zu", f, frag_size);
-		rc = raw_db_set(ds->dh->dbValues, ds->txn, &dbkey, sizeof(dbkey),
-		    ds->tslice[bid]->frag[f], frag_size, 0);
-		if (rc != 0) return rc;
-	    }
-	    ds->tslice[bid]->frag_changed[f] = 0;
-
-	    uint32_t ones = 0; // # of leading "1" bits
-	    int zeroes = 0; // have any "0"s been seen?
-	    int matches = 1; // bit string matches regexp "^1*0*$"?
-	    for (int i = 0; i < vec_size(ENTRIES_PER_FRAG); i++) {
-		uint8_t byte = ds->tslice[bid]->is_set[f][i];
-		if (zeroes) { if (!(matches = !byte)) break; }
-		else if (byte == 0xFF) { ones += 8; }
-		else if (byte == 0x7F) { ones += 7; zeroes = 1; }
-		else if (byte == 0x3F) { ones += 6; zeroes = 1; }
-		else if (byte == 0x1F) { ones += 5; zeroes = 1; }
-		else if (byte == 0x0F) { ones += 4; zeroes = 1; }
-		else if (byte == 0x07) { ones += 3; zeroes = 1; }
-		else if (byte == 0x03) { ones += 2; zeroes = 1; }
-		else if (byte == 0x01) { ones += 1; zeroes = 1; }
-		else if (byte == 0x00) { ones += 0; zeroes = 1; }
-		else { matches = 0; break; }
-	    }
-	    if (matches) {
-		// write number of leading "1" bits
-		ones = htonl(ones);
-		rc = raw_db_set(ds->dh->dbIsSet, ds->txn, &dbkey, sizeof(dbkey),
-		    &ones, sizeof(ones), 0);
-	    } else {
-		// write the whole is_set vector
-		rc = raw_db_set(ds->dh->dbIsSet, ds->txn, &dbkey, sizeof(dbkey),
-		    ds->tslice[bid]->is_set[f], vec_size(ENTRIES_PER_FRAG), 0);
-	    }
+	    rc = write_int_frag(ds, ds->dh->dbValues, &dbkey, buf,
+		ds->tslice[bid]->values[f], frag_size, "values");
 	    if (rc != 0) return rc;
+	    if (bid > 0) {
+		rc = write_int_frag(ds, ds->dh->dbAgginfo, &dbkey, buf,
+		    ds->tslice[bid]->agginfo[f], agginfo_size, "agginfo");
+		if (rc != 0) return rc;
+	    }
+	    rc = write_bitvector_frag(ds->dh->dbIsSet, ds->txn, &dbkey,
+		ds->tslice[bid]->is_set[f]);
+	    if (rc != 0) return rc;
+	    ds->tslice[bid]->frag_changed[f] = 0;
 	}
     }
-    if (buf) free(buf);
+    free(buf);
 
     rc = truncate_bundle(ds->dh, ds, bid);
     if (rc != 0) return rc;
@@ -1302,28 +1323,6 @@ static int flush_tslice(dbats_snapshot *ds, int bid)
 }
 
 /*************************************************************************/
-
-static void free_isset(dbats_snapshot *ds)
-{
-    if (ds->is_set) {
-	int tn = (ds->active_end - ds->active_start) / ds->dh->bundle[0].period + 1;
-	for (int ti = 0; ti < tn; ti++) {
-	    if (ds->is_set[ti]) {
-		for (int f = 0; f < ds->tslice[0]->num_frags; f++) {
-		    if (ds->is_set[ti][f]) {
-			if (ds->tslice[0]->is_set[f] != ds->is_set[ti][f])
-			    free(ds->is_set[ti][f]); // shared; don't free twice
-			ds->is_set[ti][f] = 0;
-		    }
-		}
-		free(ds->is_set[ti]);
-		ds->is_set[ti] = 0;
-	    }
-	}
-	free(ds->is_set);
-	ds->is_set = 0;
-    }
-}
 
 int dbats_commit_open(dbats_handler *dh)
 {
@@ -1376,8 +1375,6 @@ int dbats_commit_snap(dbats_snapshot *ds)
     int rc = 0;
     dbats_log(DBATS_LOG_FINE, "dbats_commit_snap %u", ds->tslice[0]->time);
 
-    free_isset(ds);
-
     if (!ds->dh->serialize) {
 	// In dbats_select_snap(), we read min_keep_time with DB_READ_COMMITTED;
 	// it may have changed since then.
@@ -1428,8 +1425,6 @@ int dbats_abort_snap(dbats_snapshot *ds)
 {
     dbats_log(DBATS_LOG_FINE, "dbats_abort_snap %u", ds->tslice[0]->time);
 
-    free_isset(ds);
-
     int rc = abort_transaction(ds->dh, ds->txn);
     free_snapshot(ds);
     return rc;
@@ -1460,6 +1455,7 @@ int dbats_close(dbats_handler *dh)
     dh->dbKeytree->close(dh->dbKeytree, 0);
     dh->dbKeyid->close(dh->dbKeyid, 0);
     dh->dbValues->close(dh->dbValues, 0);
+    dh->dbAgginfo->close(dh->dbAgginfo, 0);
     dh->dbIsSet->close(dh->dbIsSet, 0);
     dh->dbSequence->close(dh->dbSequence, 0);
 
@@ -1522,10 +1518,63 @@ static int load_isset(dbats_snapshot *ds, fragkey_t *dbkey, uint8_t **dest,
 
     *dest = buf;
 
-    if (ntohl(dbkey->bid) == 0 && ds->active_last_data < ntohl(dbkey->time))
-	ds->active_last_data = ntohl(dbkey->time);
-
     return 0; // ok
+}
+
+static int read_int_frag(dbats_snapshot *ds, DB *db, fragkey_t *dbkey, size_t frag_size, void **ptrp, uint32_t flags)
+{
+    uint32_t value_len;
+    int rc;
+
+    if (ds->db_get_buf_len < frag_size + QLZ_OVERHEAD) {
+	if (ds->db_get_buf) free(ds->db_get_buf);
+	ds->db_get_buf_len = frag_size + QLZ_OVERHEAD;
+	ds->db_get_buf = emalloc(ds->db_get_buf_len, "get buffer");
+	if (!ds->db_get_buf) return errno ? errno : ENOMEM;
+    }
+
+    rc = raw_db_get(db, ds->txn, dbkey, sizeof(*dbkey),
+	ds->db_get_buf, ds->db_get_buf_len, &value_len, flags);
+    if (rc != 0) {
+	if (rc == DB_NOTFOUND) return 0; // no match
+	return rc; // error
+    }
+
+    int compressed = ((dbats_frag*)ds->db_get_buf)->compressed;
+    uint32_t len = !compressed ? frag_size :
+	qlz_size_decompressed((void*)(ds->db_get_buf+1));
+    *ptrp = malloc(len);
+    if (!*ptrp) {
+	rc = errno;
+	dbats_log(DBATS_LOG_ERR, "Can't allocate %u bytes for frag "
+	    "t=%u, bid=%u, frag_id=%u", len,
+	    ntohl(dbkey->time), ntohl(dbkey->bid), ntohl(dbkey->frag_id));
+	return rc; // error
+    }
+
+    if (compressed) {
+	// decompress fragment
+	if (!ds->state_decompress) {
+	    ds->state_decompress = ecalloc(1, sizeof(qlz_state_decompress),
+		"qlz_state_decompress");
+	    if (!ds->state_decompress) return errno ? errno : ENOMEM;
+	}
+	len = qlz_decompress((void*)(ds->db_get_buf+1), *ptrp, ds->state_decompress);
+	// assert(len == frag_size);
+	dbats_log(DBATS_LOG_VFINE, "decompressed frag t=%u, bid=%u, frag_id=%u: "
+	    "%u -> %u (%.1f%%)",
+	    ntohl(dbkey->time), ntohl(dbkey->bid), ntohl(dbkey->frag_id),
+	    value_len-1, len, 100.0*len/(value_len-1));
+
+    } else {
+	// copy fragment
+	// XXX TODO: don't memcpy; get directly into *ptrp
+	memcpy(*ptrp, ds->db_get_buf, len);
+	dbats_log(DBATS_LOG_VFINE, "copied frag t=%u, bid=%u, frag_id=%u",
+	    ntohl(dbkey->time), ntohl(dbkey->bid), ntohl(dbkey->frag_id));
+    }
+
+    return 0;
 }
 
 static int load_frag(dbats_snapshot *ds, uint32_t t, int bid,
@@ -1541,101 +1590,24 @@ static int load_frag(dbats_snapshot *ds, uint32_t t, int bid,
     if (rc == DB_NOTFOUND) return 0; // no match
     if (rc != 0) return rc; // error
 
-    if (ds->db_get_buf_len < fragsize(ds->dh) + QLZ_OVERHEAD) {
-	if (ds->db_get_buf) free(ds->db_get_buf);
-	ds->db_get_buf_len = fragsize(ds->dh) + QLZ_OVERHEAD;
-	ds->db_get_buf = emalloc(ds->db_get_buf_len, "get buffer");
-	if (!ds->db_get_buf) return errno ? errno : ENOMEM;
-    }
-
-    uint32_t value_len;
-    rc = raw_db_get(ds->dh->dbValues, ds->txn, &dbkey, sizeof(dbkey),
-	ds->db_get_buf, ds->db_get_buf_len, &value_len, flags);
+    void *ptr;
+    rc = read_int_frag(ds, ds->dh->dbValues, &dbkey, fragsize(ds->dh), &ptr, flags);
     if (rc != 0) {
 	if (rc == DB_NOTFOUND) return 0; // no match
 	return rc; // error
     }
+    ds->tslice[bid]->values[frag_id] = ptr;
+    if (ds->tslice[bid]->num_frags <= frag_id)
+	ds->tslice[bid]->num_frags = frag_id + 1;
 
-    int compressed = ((dbats_frag*)ds->db_get_buf)->compressed;
-    uint32_t len = !compressed ? fragsize(ds->dh) :
-	qlz_size_decompressed((void*)(ds->db_get_buf+1));
-    void *ptr = malloc(len);
-    if (!ptr) {
-	rc = errno;
-	dbats_log(DBATS_LOG_ERR, "Can't allocate %u bytes for frag "
-	    "t=%u, bid=%u, frag_id=%u", len, t, bid, frag_id);
-	return rc; // error
+    if (bid > 0 && !ds->readonly) {
+	rc = read_int_frag(ds, ds->dh->dbAgginfo, &dbkey, agginfo_size,
+	    &ptr, flags);
+	// DB_NOTFOUND is not allowed here, since there was a value above
+	if (rc != 0) return rc; // error
+	ds->tslice[bid]->agginfo[frag_id] = ptr;
     }
 
-    if (compressed) {
-	// decompress fragment
-	if (!ds->state_decompress) {
-	    ds->state_decompress = ecalloc(1, sizeof(qlz_state_decompress),
-		"qlz_state_decompress");
-	    if (!ds->state_decompress) return errno ? errno : ENOMEM;
-	}
-	len = qlz_decompress((void*)(ds->db_get_buf+1), ptr, ds->state_decompress);
-	// assert(len == fragsize(ds));
-	dbats_log(DBATS_LOG_VFINE, "decompressed frag t=%u, bid=%u, frag_id=%u: "
-	    "%u -> %u (%.1f%%)",
-	    t, bid, frag_id, value_len-1, len, 100.0*len/(value_len-1));
-
-    } else {
-	// copy fragment
-	// XXX TODO: don't memcpy; get directly into ptr
-	memcpy(ptr, ds->db_get_buf, len);
-	dbats_log(DBATS_LOG_VFINE, "copied frag t=%u, bid=%u, frag_id=%u",
-	    t, bid, frag_id);
-    }
-
-    ds->tslice[bid]->frag[frag_id] = ptr;
-
-    dbats_tslice *tslice = ds->tslice[bid];
-    if (tslice->num_frags <= frag_id)
-	tslice->num_frags = frag_id + 1;
-
-    return 0;
-}
-
-// Instantiate ds->is_set[*][frag_id]
-static int instantiate_isset_frags(dbats_snapshot *ds, int fid)
-{
-    if (ds->readonly)
-	return 0; // ds->is_set is never needed in readonly mode
-
-    int tn = (ds->active_end - ds->active_start) / ds->dh->bundle[0].period + 1;
-
-    if (!ds->is_set) {
-	ds->is_set = ecalloc(tn, sizeof(uint8_t**), "ds->is_set");
-	if (!ds->is_set) return errno ? errno : ENOMEM;
-    }
-
-    uint32_t t = ds->active_start;
-    for (int ti = 0; ti < tn; ti++, t += ds->dh->bundle[0].period) {
-	fragkey_t dbkey = { 0, htonl(t), 0 };
-	if (!ds->is_set[ti]) {
-	    ds->is_set[ti] = ecalloc(MAX_NUM_FRAGS, sizeof(uint8_t*),
-		"ds->is_set[ti]");
-	    if (!ds->is_set[ti]) return errno ? errno : ENOMEM;
-	}
-
-	if (t == ds->tslice[0]->time && ds->tslice[0]->is_set[fid]) {
-	    assert(!ds->is_set[ti][fid] || ds->is_set[ti][fid] == ds->tslice[0]->is_set[fid]);
-	    ds->is_set[ti][fid] = ds->tslice[0]->is_set[fid]; // share
-	} else if (!ds->is_set[ti][fid]) {
-	    dbkey.frag_id = htonl(fid);
-	    assert(!ds->is_set[ti][fid]);
-	    int is_current = (t == ds->tslice[0]->time);
-	    int rc = load_isset(ds, &dbkey, &ds->is_set[ti][fid],
-		is_current ? DB_RMW : 0);
-	    if (rc != 0 && rc != DB_NOTFOUND)
-		return rc; // error
-	    if (is_current) {
-		assert(!ds->tslice[0]->is_set[fid]);
-		ds->tslice[0]->is_set[fid] = ds->is_set[ti][fid]; // share
-	    }
-	}
-    }
     return 0;
 }
 
@@ -1676,8 +1648,6 @@ int dbats_select_snap(dbats_handler *dh, dbats_snapshot **dsp,
     uint32_t time_value, uint32_t flags)
 {
     int rc;
-    uint32_t min_time = 0;
-    uint32_t max_time = 0;
     int tries_limit = 60;
 
     dbats_log(DBATS_LOG_FINE, "select_snap %u", time_value);
@@ -1765,17 +1735,7 @@ restart:
 	}
 
 	tslice->time = t;
-	if (bid == 0)
-	    (*dsp)->active_last_data = t;
-
-	if (!min_time || t < min_time)
-	    min_time = t;
-	t += dh->bundle[bid].period - dh->bundle[0].period;
-	if (t > max_time)
-	    max_time = t;
     }
-    (*dsp)->active_start = min_time;
-    (*dsp)->active_end = max_time;
 
     if (!(*dsp)->readonly) {
 	// Make priority depend on time, so a writer of realtime data always
@@ -1804,21 +1764,11 @@ restart:
 		    time_value);
 	    }
 	    if (rc != 0) goto abort;
-	    if (tslice->frag[frag_id])
+	    if (tslice->values[frag_id])
 		loaded++;
 	}
 	dbats_log(DBATS_LOG_FINE, "select_snap %u: bid=%d, loaded %u/%u fragments",
 	    time_value, bid, loaded, tslice->num_frags);
-    }
-
-    for (int frag_id = 0; frag_id < (*dsp)->tslice[0]->num_frags; frag_id++) {
-	rc = instantiate_isset_frags((*dsp), frag_id);
-	if (rc == DB_LOCK_DEADLOCK) {
-	    if (--tries_limit > 0) goto retry;
-	    dbats_log(DBATS_LOG_ERR, "select_snap %u: too many deadlocks",
-		time_value);
-	}
-	if (rc != 0) goto abort;
     }
 
     return 0;
@@ -2384,11 +2334,8 @@ static int instantiate_frag_func(dbats_snapshot *ds, int bid, uint32_t frag_id)
 	rc = load_frag(ds, tslice->time, bid, frag_id);
 	if (rc != 0) // error
 	    return rc;
-	if (tslice->frag[frag_id]) { // found it
-	    if (bid == 0)
-		rc = instantiate_isset_frags(ds, frag_id);
-	    return rc;
-	}
+	if (tslice->values[frag_id]) // found it
+	    return 0;
 	if (ds->readonly) // didn't find it and can't create it
 	    return DB_NOTFOUND; // fragment not found
     }
@@ -2398,16 +2345,18 @@ static int instantiate_frag_func(dbats_snapshot *ds, int bid, uint32_t frag_id)
 	tslice->time, bid, frag_id);
 
     size_t len = fragsize(ds->dh);
-    if (!(tslice->frag[frag_id] = ecalloc(1, len, "tslice->frag[frag_id]"))) {
+    tslice->values[frag_id] = ecalloc(1, len, "tslice->values[frag_id]");
+    if (!tslice->values[frag_id])
 	return errno ? errno : ENOMEM;
+
+    if (bid > 0) {
+	tslice->agginfo[frag_id] = ecalloc(1, agginfo_size, "tslice->agginfo[frag_id]");
+	if (!tslice->agginfo[frag_id])
+	    return errno ? errno : ENOMEM;
     }
 
     if (tslice->num_frags <= frag_id)
 	tslice->num_frags = frag_id + 1;
-    if (bid == 0) {
-	rc = instantiate_isset_frags(ds, frag_id);
-	if (rc != 0) return rc;
-    }
 
     dbats_log(DBATS_LOG_VFINE, "Grew tslice to %u elements",
 	tslice->num_frags * ENTRIES_PER_FRAG);
@@ -2418,7 +2367,7 @@ static int instantiate_frag_func(dbats_snapshot *ds, int bid, uint32_t frag_id)
 // inline version handles the common case without a function call
 static inline int instantiate_frag(dbats_snapshot *ds, int bid, uint32_t frag_id)
 {
-    return ds->tslice[bid]->frag[frag_id] ?
+    return ds->tslice[bid]->values[frag_id] ?
 	0 : // We already have the fragment.
 	instantiate_frag_func(ds, bid, frag_id);
 }
@@ -2450,12 +2399,12 @@ int dbats_set(dbats_snapshot *ds, uint32_t key_id, const dbats_value *valuep)
 	return rc;
 
     uint8_t was_set = vec_test(ds->tslice[0]->is_set[frag_id], offset);
+    dbats_value *oldvaluep = valueptr(ds, 0, frag_id, offset);
     if (was_set & !dh->cfg.updatable) {
-	dbats_log(DBATS_LOG_ERR, "value is already set: t=%" PRIu32 " keyid=%d",
-	    ds->tslice[0]->time, key_id);
+	dbats_log(DBATS_LOG_ERR, "value is already set: %u #%u = %" PRIu64,
+	    ds->tslice[0]->time, key_id, oldvaluep[0].u64);
 	return DB_KEYEXIST;
     }
-    dbats_value *oldvaluep = valueptr(ds, 0, frag_id, offset);
 
     // For each bid, aggregate *valuep into tslice[bid].
     for (int bid = 1; bid < ds->num_bundles; bid++) {
@@ -2474,30 +2423,16 @@ int dbats_set(dbats_snapshot *ds, uint32_t key_id, const dbats_value *valuep)
 	uint8_t changed = 0;
 	uint8_t failed = 0;
 	dbats_value *aggval = valueptr(ds, bid, frag_id, offset);
-	uint32_t aggstart = ds->tslice[bid]->time;
-	uint32_t aggend = min(ds->active_last_data,
-	    aggstart + dh->bundle[bid].period - dh->bundle[0].period);
 
-	// Count the number of steps contributing to the aggregate.
-	// XXX TODO: AVG is the only func that actually needs n; MIN, MAX, and
-	// SUM just need to know if n==1, and LAST doesn't care about n at
-	// all.  So we could skip full counting (and instantiating?) in some
-	// cases.
-	int n = 0;
-	{
-	    int ti = (aggstart - ds->active_start) / dh->bundle[0].period;
-	    uint32_t t = aggstart;
-	    while (t <= aggend) {
-		if (t == ds->tslice[0]->time ||
-		    vec_test(ds->is_set[ti][frag_id], offset))
-			n++;
-		ti++;
-		t += dh->bundle[0].period;
-	    }
-	}
+	// MIN, MAX, AVG, and SUM need N, the number of PDPs contributing to
+	// the aggregate, which is stored in agginfo.
+	// LAST needs time_of_last_PDP_set_in_this_agg, which is stored
+	// in agginfo.
 
-	dbats_log(DBATS_LOG_FINEST, "agg %d: aggval=%" PRIu64 " n=%d",
-	    bid, aggval[0].u64, n); // XXX
+	dbats_log(DBATS_LOG_FINEST, "agg %d: aggval=%" PRIu64,
+	    bid, aggval[0].u64); // XXX
+
+	uint32_t *agginfo = agginfoptr(ds, bid, frag_id, offset);
 
 	for (int i = 0; i < dh->cfg.values_per_entry; i++) {
 	    if (was_set && valuep[i].u64 == oldvaluep[i].u64) {
@@ -2505,7 +2440,8 @@ int dbats_set(dbats_snapshot *ds, uint32_t key_id, const dbats_value *valuep)
 	    }
 	    switch (dh->bundle[bid].func) {
 	    case DBATS_AGG_MIN:
-		if (n == 1 || valuep[i].u64 <= aggval[i].u64) {
+		if (!was_set) ++*agginfo;
+		if (*agginfo == 1 || valuep[i].u64 <= aggval[i].u64) {
 		    aggval[i] = valuep[i];
 		    changed = 1;
 		} else if (was_set && oldvaluep[i].u64 == aggval[i].u64) {
@@ -2514,7 +2450,8 @@ int dbats_set(dbats_snapshot *ds, uint32_t key_id, const dbats_value *valuep)
 		}
 		break;
 	    case DBATS_AGG_MAX:
-		if (n == 1 || valuep[i].u64 >= aggval[i].u64) {
+		if (!was_set) ++*agginfo;
+		if (*agginfo == 1 || valuep[i].u64 >= aggval[i].u64) {
 		    aggval[i] = valuep[i];
 		    changed = 1;
 		} else if (was_set && oldvaluep[i].u64 == aggval[i].u64) {
@@ -2524,44 +2461,29 @@ int dbats_set(dbats_snapshot *ds, uint32_t key_id, const dbats_value *valuep)
 		break;
 	    case DBATS_AGG_AVG:
 		{
-		    if (n == 1) {
+		    if (!was_set) ++*agginfo;
+		    if (*agginfo == 1) {
 			aggval[i].d = valuep[i].u64;
 			changed = 1;
 		    } else {
 			double old_daggval = aggval[i].d;
 			if (was_set)
-			    aggval[i].d -= (oldvaluep[i].u64 - aggval[i].d) / n;
-			aggval[i].d += (valuep[i].u64 - aggval[i].d) / n;
+			    aggval[i].d -= (oldvaluep[i].u64 - aggval[i].d) / *agginfo;
+			aggval[i].d += (valuep[i].u64 - aggval[i].d) / *agginfo;
 			changed = (aggval[i].d != old_daggval);
 		    }
 		}
 		break;
 	    case DBATS_AGG_LAST:
-		if (ds->tslice[0]->time >= ds->active_last_data) {
-		    // common case: value is latest ever seen
+		if (ds->tslice[0]->time >= *agginfo) {
 		    aggval[i] = valuep[i];
 		    changed = 1;
-		} else {
-		    // find time of last sample for this key within agg period
-		    uint32_t t = aggend;
-		    int ti = (t - ds->active_start) / dh->bundle[0].period;
-		    while (t >= aggstart) {
-			if (t == ds->tslice[0]->time) {
-			    // the new value is the last
-			    aggval[i] = valuep[i];
-			    changed = 1;
-			    break;
-			}
-			if (vec_test(ds->is_set[ti][frag_id], offset))
-			    // an existing value is later than the new value
-			    break;
-			t -= dh->bundle[0].period;
-			ti--;
-		    }
+		    *agginfo = ds->tslice[0]->time;
 		}
 		break;
 	    case DBATS_AGG_SUM:
-		if (n == 1) {
+		if (!was_set) ++*agginfo;
+		if (*agginfo == 1) {
 		    aggval[i] = valuep[i];
 		    changed = 1;
 		} else if (was_set || valuep[i].u64 != 0) {
@@ -2610,7 +2532,7 @@ int dbats_set(dbats_snapshot *ds, uint32_t key_id, const dbats_value *valuep)
     }
     ds->tslice[0]->frag_changed[frag_id] = 1;
 
-    dbats_log(DBATS_LOG_VFINE, "Succesfully set value "
+    dbats_log(DBATS_LOG_VFINE, "Successfully set value "
 	"bid=%d frag_id=%u offset=%" PRIu32 " value_len=%u value=%" PRIu64,
 	0, frag_id, offset, dh->cfg.entry_size, valuep[0].u64);
 
@@ -2791,6 +2713,8 @@ void dbats_stat_print(const dbats_handler *dh) {
 	dbats_log(DBATS_LOG_ERR, "dumping Keyid stats: %s", db_strerror(rc));
     if ((rc = dh->dbValues->stat_print(dh->dbValues, DB_FAST_STAT)) != 0)
 	dbats_log(DBATS_LOG_ERR, "dumping Values stats: %s", db_strerror(rc));
+    if ((rc = dh->dbAgginfo->stat_print(dh->dbAgginfo, DB_FAST_STAT)) != 0)
+	dbats_log(DBATS_LOG_ERR, "dumping Agginfo stats: %s", db_strerror(rc));
     if ((rc = dh->dbIsSet->stat_print(dh->dbIsSet, DB_FAST_STAT)) != 0)
 	dbats_log(DBATS_LOG_ERR, "dumping IsSet stats: %s", db_strerror(rc));
     if ((rc = dh->dbSequence->stat_print(dh->dbSequence, DB_FAST_STAT)) != 0)
