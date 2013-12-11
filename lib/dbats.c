@@ -2434,14 +2434,13 @@ int dbats_set(dbats_snapshot *ds, uint32_t key_id, const dbats_value *valuep)
 	if ((rc = instantiate_frag(ds, bid, frag_id)) != 0)
 	    return rc;
 
-	uint8_t changed = 0;
+	uint8_t changed = 0; // change in aggval or agginfo?
 	uint8_t failed = 0;
 	dbats_value *aggval = valueptr(ds, bid, frag_id, offset);
 
-	// MIN, MAX, AVG, and SUM need N, the number of PDPs contributing to
-	// the aggregate, which is stored in agginfo.
-	// LAST needs time_of_last_PDP_set_in_this_agg, which is stored
-	// in agginfo.
+	// agginfo stores extra information needed by aggregate calculations:
+	// MIN, MAX, AVG, and SUM need the number of PDPs contributing to
+	// the aggregate; LAST needs time of last PDP set in this aggregate.
 
 	dbats_log(DBATS_LOG_FINEST, "agg %d: aggval=%" PRIu64,
 	    bid, aggval[0].u64); // XXX
@@ -2454,7 +2453,7 @@ int dbats_set(dbats_snapshot *ds, uint32_t key_id, const dbats_value *valuep)
 	    }
 	    switch (dh->bundle[bid].func) {
 	    case DBATS_AGG_MIN:
-		if (!was_set) ++*agginfo;
+		if (!was_set) { ++*agginfo; changed = 1; }
 		if (*agginfo == 1 || valuep[i].u64 <= aggval[i].u64) {
 		    aggval[i] = valuep[i];
 		    changed = 1;
@@ -2464,7 +2463,7 @@ int dbats_set(dbats_snapshot *ds, uint32_t key_id, const dbats_value *valuep)
 		}
 		break;
 	    case DBATS_AGG_MAX:
-		if (!was_set) ++*agginfo;
+		if (!was_set) { ++*agginfo; changed = 1; }
 		if (*agginfo == 1 || valuep[i].u64 >= aggval[i].u64) {
 		    aggval[i] = valuep[i];
 		    changed = 1;
@@ -2475,7 +2474,7 @@ int dbats_set(dbats_snapshot *ds, uint32_t key_id, const dbats_value *valuep)
 		break;
 	    case DBATS_AGG_AVG:
 		{
-		    if (!was_set) ++*agginfo;
+		    if (!was_set) { ++*agginfo; changed = 1; }
 		    if (*agginfo == 1) {
 			aggval[i].d = valuep[i].u64;
 			changed = 1;
@@ -2484,7 +2483,7 @@ int dbats_set(dbats_snapshot *ds, uint32_t key_id, const dbats_value *valuep)
 			if (was_set)
 			    aggval[i].d -= (oldvaluep[i].u64 - aggval[i].d) / *agginfo;
 			aggval[i].d += (valuep[i].u64 - aggval[i].d) / *agginfo;
-			changed = (aggval[i].d != old_daggval);
+			changed += (aggval[i].d != old_daggval);
 		    }
 		}
 		break;
@@ -2496,7 +2495,7 @@ int dbats_set(dbats_snapshot *ds, uint32_t key_id, const dbats_value *valuep)
 		}
 		break;
 	    case DBATS_AGG_SUM:
-		if (!was_set) ++*agginfo;
+		if (!was_set) { ++*agginfo; changed = 1; }
 		if (*agginfo == 1) {
 		    aggval[i] = valuep[i];
 		    changed = 1;
