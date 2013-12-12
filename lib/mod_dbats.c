@@ -212,9 +212,13 @@ static void metrics_find(request_rec *r, mod_dbats_reqstate *reqstate)
 static void metrics_index(request_rec *r, mod_dbats_reqstate *reqstate)
 {
     int rc;
-
     uint32_t keyid;
     char name[DBATS_KEYLEN];
+    uint32_t expected = -1;
+    int i;
+
+    dbats_num_keys(reqstate->dh, &expected);
+    apr_array_header_t *keys = apr_array_make(r->pool, expected, sizeof(char*));
 
     rc = dbats_glob_keyname_start(reqstate->dh, NULL, &reqstate->dki, NULL);
     if (rc != 0) {
@@ -223,25 +227,34 @@ static void metrics_index(request_rec *r, mod_dbats_reqstate *reqstate)
 	reqstate->dki = NULL;
 	return;
     }
-
-    ap_set_content_type(r, "application/json");
-    int n = 0;
-    ap_rprintf(r, "[");
     while ((rc = dbats_glob_keyname_next(reqstate->dki, &keyid, name)) == 0) {
-	ap_rprintf(r, "%s\n    \"%s\"",
-	    n ? "," : "", ap_escape_quotes(r->pool, name));
-	n++;
+	APR_ARRAY_PUSH(keys, char*) = apr_pstrdup(r->pool, name);
     }
-    ap_rprintf(r, "\n]\n");
-
-    if (rc != DB_NOTFOUND) {
-	log_rerror(APLOG_NOTICE, reqstate,
-	    "mod_dbats: dbats_glob_keyname_next: %s", db_strerror(rc));
-	reqstate->dbats_status = rc;
-    }
-
     dbats_glob_keyname_end(reqstate->dki);
     reqstate->dki = NULL;
+
+    // It seems that rc sometimes contains DB_PAGE_NOTFOUND, which should be
+    // impossible.  We abort only if we didn't get the expected number of keys.
+    if (rc != DB_NOTFOUND) {
+	if (keys->nelts != expected) {
+	    log_rerror(APLOG_ERR, reqstate,
+		"ERROR: dbats_glob_keyname_next: %d %s (got %d of %d keys)",
+		rc, db_strerror(rc), keys->nelts, expected);
+	    reqstate->dbats_status = rc;
+	    return;
+	}
+	log_rerror(APLOG_WARNING, reqstate,
+	    "unexpected but harmless? dbats_glob_keyname_next: %d %s",
+	    rc, db_strerror(rc));
+    }
+
+    ap_set_content_type(r, "application/json");
+    ap_rprintf(r, "[");
+    for (i = 0; i < keys->nelts; i++) {
+	ap_rprintf(r, "%s\n    \"%s\"", i > 0 ? "," : "",
+	    ap_escape_quotes(r->pool, APR_ARRAY_IDX(keys, i, char*)));
+    }
+    ap_rprintf(r, "\n]\n");
 }
 
 static void render(request_rec *r, mod_dbats_reqstate *reqstate)
