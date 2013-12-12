@@ -195,7 +195,10 @@ typedef struct dbats_keytree_iterator dbats_keytree_iterator; ///< Opaque handle
  *    -	DBATS_NO_TXN - do not use transactions (fast but unsafe)
  *    -	DBATS_UPDATABLE - allow updates to existing values
  *  @param[in] mode permissions for files created by this function (as defined
- *    by open(2)) and modified by the process's umask.
+ *    by open(2)) and modified by the process's umask.  A value of 0 is
+ *    treated as 0644. (This function will automatically add write permission
+ *    to certain transaction and locking related files as needed to allow
+ *    read-only access.)
  *  @return
  *    - 0 for success;
  *    - EINVAL if a parameter was invalid;

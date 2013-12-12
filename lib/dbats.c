@@ -539,7 +539,9 @@ static int write_bundle_info(dbats_handler *dh, DB_TXN *txn, int bid)
 
 /*************************************************************************/
 
-static int make_file_writable(const char *filename)
+// Set file's permission to mode, and if mode includes read permission for a
+// class of users, also give it write permission for that class.
+static int make_file_writable(const char *filename, mode_t mode)
 {
     int fd;
     struct stat statbuf;
@@ -554,16 +556,16 @@ static int make_file_writable(const char *filename)
 	dbats_log(DBATS_LOG_ERR, "fstat %s: %s", filename, strerror(errno));
 	return errno;
     }
-    mode_t newmode = statbuf.st_mode;
-    if (newmode & S_IRUSR) newmode |= S_IWUSR;
-    if (newmode & S_IRGRP) newmode |= S_IWGRP;
-    if (newmode & S_IROTH) newmode |= S_IWOTH;
-    if (newmode == statbuf.st_mode) return 0; // no change
-    dbats_log(DBATS_LOG_INFO, "%s mode %03o -> %03o", filename, statbuf.st_mode, newmode);
+    mode |= (statbuf.st_mode & ~0777);
+    if (mode & S_IRUSR) mode |= S_IWUSR;
+    if (mode & S_IRGRP) mode |= S_IWGRP;
+    if (mode & S_IROTH) mode |= S_IWOTH;
+    if (mode == statbuf.st_mode) return 0; // no change
+    dbats_log(DBATS_LOG_INFO, "%s mode %03o -> %03o", filename, statbuf.st_mode, mode);
 #if HAVE_FCHMOD
-    if (fchmod(fd, newmode) < 0)
+    if (fchmod(fd, mode) < 0)
 #else
-    if (chmod(filename, newmode) < 0)
+    if (chmod(filename, mode) < 0)
 #endif
     {
 	dbats_log(DBATS_LOG_ERR, "chmod %s: %s", filename, strerror(errno));
@@ -731,6 +733,11 @@ int dbats_open(dbats_handler **dhp,
 	fclose(file);
     }
 
+    if (mode == 0) mode = S_IWUSR | S_IRUSR | S_IRGRP | S_IROTH; // rw-r--r--
+    mode_t mask;
+    umask(mask=umask(0)); // can't get umask without changing it, so we must also restore it
+    mode = mode & ~mask;
+
     if ((rc = dh->dbenv->open(dh->dbenv, path, dbflags, mode)) != 0) {
 	dbats_log(DBATS_LOG_ERR, "Error opening DB %s: %s", path, db_strerror(rc));
 	return rc;
@@ -859,10 +866,10 @@ int dbats_open(dbats_handler **dhp,
 	char filename[PATH_MAX];
 	for (int i = 1; ; i++) {
 	    sprintf(filename, "%s/__db.%03d", path, i);
-	    if (make_file_writable(filename) != 0) break;
+	    if (make_file_writable(filename, mode) != 0) break;
 	}
 	sprintf(filename, "%s/__db.register", path);
-	make_file_writable(filename);
+	make_file_writable(filename, mode);
     }
 
     dh->is_open = 1;
