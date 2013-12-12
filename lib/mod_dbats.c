@@ -217,7 +217,12 @@ static void metrics_index(request_rec *r, mod_dbats_reqstate *reqstate)
     uint32_t expected = -1;
     int i;
 
-    dbats_num_keys(reqstate->dh, &expected);
+    rc = dbats_num_keys(reqstate->dh, &expected);
+    if (rc != 0) {
+	log_rerror(APLOG_NOTICE, reqstate, "mod_dbats: dbats_num_keys: %s", db_strerror(rc));
+	reqstate->dbats_status = rc;
+	return;
+    }
     apr_array_header_t *keys = apr_array_make(r->pool, expected, sizeof(char*));
 
     rc = dbats_glob_keyname_start(reqstate->dh, NULL, &reqstate->dki, NULL);
@@ -237,15 +242,15 @@ static void metrics_index(request_rec *r, mod_dbats_reqstate *reqstate)
     // impossible.  We abort only if we didn't get the expected number of keys.
     if (rc != DB_NOTFOUND) {
 	if (keys->nelts != expected) {
-	    log_rerror(APLOG_ERR, reqstate,
+	    log_rerror(APLOG_NOTICE, reqstate,
 		"ERROR: dbats_glob_keyname_next: %d %s (got %d of %d keys)",
 		rc, db_strerror(rc), keys->nelts, expected);
 	    reqstate->dbats_status = rc;
 	    return;
 	}
-	log_rerror(APLOG_WARNING, reqstate,
-	    "unexpected but harmless? dbats_glob_keyname_next: %d %s",
-	    rc, db_strerror(rc));
+	log_rerror(APLOG_NOTICE, reqstate,
+	    "dbats_glob_keyname_next: %d %s (got all %d keys)",
+	    rc, db_strerror(rc), expected);
     }
 
     ap_set_content_type(r, "application/json");
