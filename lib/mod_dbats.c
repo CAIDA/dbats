@@ -525,7 +525,7 @@ static int req_handler(request_rec *r)
     int level = r->server->loglevel;
     dbats_log_level =
 	level > APLOG_DEBUG ? DBATS_LOG_FINEST :
-	level >= APLOG_DEBUG ? DBATS_LOG_FINE :
+	level >= APLOG_DEBUG ? DBATS_LOG_FINEST :
 	level >= APLOG_INFO ? DBATS_LOG_CONFIG :
 	level >= APLOG_NOTICE ? DBATS_LOG_INFO :
 	level >= APLOG_WARNING ? DBATS_LOG_WARN :

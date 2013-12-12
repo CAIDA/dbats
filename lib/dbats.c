@@ -561,7 +561,7 @@ static int make_file_writable(const char *filename, mode_t mode)
     if (mode & S_IRGRP) mode |= S_IWGRP;
     if (mode & S_IROTH) mode |= S_IWOTH;
     if (mode == statbuf.st_mode) return 0; // no change
-    dbats_log(DBATS_LOG_INFO, "%s mode %03o -> %03o", filename, statbuf.st_mode, mode);
+    dbats_log(DBATS_LOG_FINE, "%s mode %03o -> %03o", filename, statbuf.st_mode, mode);
 #if HAVE_FCHMOD
     if (fchmod(fd, mode) < 0)
 #else
