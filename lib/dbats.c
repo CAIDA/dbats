@@ -22,6 +22,7 @@
 #include <db.h>
 #include <assert.h>
 #include <arpa/inet.h> // htonl() etc
+#include <signal.h>
 
 #include <db.h>
 #include "dbats.h"
@@ -2739,5 +2740,47 @@ void dbats_stat_print(const dbats_handler *dh) {
 	dbats_log(DBATS_LOG_ERR, "dumping IsSet stats: %s", db_strerror(rc));
     if ((rc = dh->dbSequence->stat_print(dh->dbSequence, DB_FAST_STAT)) != 0)
 	dbats_log(DBATS_LOG_ERR, "dumping Sequence stats: %s", db_strerror(rc));
+}
+
+/*************************************************************************/
+
+int dbats_caught_signal = 0;
+
+static void dbats_sighandler(int sig)
+{
+    dbats_caught_signal = sig;
+}
+
+void dbats_catch_signal(int sig)
+{
+    struct sigaction act;
+    sigaction(sig, NULL, &act);
+    if (act.sa_handler != SIG_DFL) return;
+    act.sa_handler = dbats_sighandler;
+    sigaction(sig, &act, NULL);
+}
+
+void dbats_catch_signals()
+{
+    dbats_catch_signal(SIGINT);
+    dbats_catch_signal(SIGHUP);
+    dbats_catch_signal(SIGTERM);
+    dbats_catch_signal(SIGPIPE);
+}
+
+void dbats_restore_signal(int sig)
+{
+    struct sigaction act;
+    sigaction(sig, NULL, &act);
+    if (act.sa_handler != dbats_sighandler) return;
+    act.sa_handler = SIG_DFL;
+    sigaction(sig, &act, NULL);
+}
+
+void dbats_deliver_signal(void)
+{
+    if (!dbats_caught_signal) return;
+    dbats_restore_signal(dbats_caught_signal);
+    raise(dbats_caught_signal);
 }
 

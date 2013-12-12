@@ -30,6 +30,7 @@
  *  for the same key in the aggregate bundle.
  *
  *  Typical usage:
+ *  - Configure signal handling with dbats_catch_signals().
  *  - Open a database with dbats_open().
  *  - If this is a new database, define aggregate time series with
  *    dbats_aggregate().
@@ -38,10 +39,13 @@
  *    - Select a working snapshot with dbats_select_snap().
  *    - Write primary values for multiple keys with dbats_set(), and/or
  *    - read primary and/or aggregate values for multiple keys with dbats_get().
+ *    - if an error occurs or @ref dbats_caught_signal is set,
+ *      call dbats_abort_snap() and break the loop.
  *    - dbats_commit_snap().
  *    - If either of dbats_set() or dbats_commit_snap() deadlock, repeat the
  *      loop with the same timestamp and data.
  *  - Close the database with dbats_close().
+ *  - Call dbats_deliver_signal() in case a signal had been caught.
  *
  *  Functions that return an int will return one of the following types of
  *  values:
@@ -609,7 +613,7 @@ extern int dbats_num_keys(dbats_handler *handler, uint32_t *num_keys);
  *  ...
  *  rc = dbats_glob_keyname_start(handler, snap, &dki, "*.*.uniq_*_ip");
  *  if (rc != 0) goto error_handling;
- *  while (dbats_glob_keyname_next(dki, &keyid, name) == 0) {
+ *  while (dbats_glob_keyname_next(dki, &keyid, name) == 0 && !dbats_caught_signal) {
  *      // do something with keyid and/or name
  *  }
  *  dbats_glob_keyname_end(dki);
@@ -675,7 +679,7 @@ extern int dbats_glob_keyname_end(dbats_keytree_iterator *dki);
  *  ...
  *  rc = dbats_walk_keyid_start(handler, snap, &dki);
  *  if (rc != 0) goto error_handling;
- *  while (dbats_walk_keyid_next(dki, &keyid, name) == 0) {
+ *  while (dbats_walk_keyid_next(dki, &keyid, name) == 0 && !dbats_caught_signal) {
  *      // do something with keyid and/or name
  *  }
  *  dbats_walk_keyid_end(dki);
@@ -728,6 +732,43 @@ extern const dbats_bundle_info *dbats_get_bundle_info(dbats_handler *handler,
     int bid);
 
 extern void dbats_stat_print(const dbats_handler *handler);
+
+
+/** @name signal handling convenience functions */
+///@{
+
+/** The last signal caught by the DBATS signal handler, or 0 if no signal has
+ *  been caught.
+ */
+extern int dbats_caught_signal;
+
+/** If signal @c sig is currently handled by SIG_DFL, change it to a
+ *  DBATS signal handler that sets @c dbats_caught_signal.
+ *  @param[in] sig the signal to handle
+ */
+extern void dbats_catch_signal(int sig);
+
+/** Shorthand for calling dbats_catch_signal() on the following signals
+ *  that are normally fatal:
+ *  SIGINT, SIGHUP, SIGTERM, and SIGPIPE.
+ */
+extern void dbats_catch_signals(void);
+
+/** If signal @c sig was configured with dbats_catch_signal(), reset it to
+ *  SIG_DFL.
+ *  @param[in] sig the signal to handle
+ */
+extern void dbats_restore_signal(int sig);
+
+/** If any signal configured with dbats_catch_signal() has been caught since
+ *  the handler was set, restore the SIG_DFL handler and raise the signal.
+ *  This is useful @b after cleanly closing the database to exit the process
+ *  with the same status that would have occurred if the signal had not been
+ *  caught.
+ */
+extern void dbats_deliver_signal(void);
+
+///@}
 
 #ifdef __cplusplus
 } /* extern "C" */
