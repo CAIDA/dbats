@@ -2780,7 +2780,10 @@ void dbats_restore_signal(int sig)
 void dbats_deliver_signal(void)
 {
     if (!dbats_caught_signal) return;
+    dbats_log(DBATS_LOG_INFO, "caught signal %d", dbats_caught_signal);
     dbats_restore_signal(dbats_caught_signal);
     raise(dbats_caught_signal);
+    // if signal wasn't fatal...
+    dbats_caught_signal = 0;
 }
 

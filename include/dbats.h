@@ -750,7 +750,7 @@ extern void dbats_catch_signal(int sig);
 
 /** Shorthand for calling dbats_catch_signal() on the following signals
  *  that are normally fatal:
- *  SIGINT, SIGHUP, SIGTERM, and SIGPIPE.
+ *  @c SIGINT, @c SIGHUP, @c SIGTERM, and @c SIGPIPE.
  */
 extern void dbats_catch_signals(void);
 
@@ -761,10 +761,10 @@ extern void dbats_catch_signals(void);
 extern void dbats_restore_signal(int sig);
 
 /** If any signal configured with dbats_catch_signal() has been caught since
- *  the handler was set, restore the SIG_DFL handler and raise the signal.
- *  This is useful @b after cleanly closing the database to exit the process
- *  with the same status that would have occurred if the signal had not been
- *  caught.
+ *  the handler was set, restore the SIG_DFL handler and @c raise the signal.
+ *  This is useful @b after cleanly aborting transactions and closing the
+ *  database, to exit the process with the same status that would have occurred
+ *  if the signal had not been caught.
  */
 extern void dbats_deliver_signal(void);
 
