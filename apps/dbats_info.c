@@ -97,6 +97,7 @@ int main(int argc, char *argv[]) {
 	help();
     dbats_path = argv[0];
 
+    dbats_catch_signals();
     if (dbats_open(&handler, dbats_path, 1, 0, open_flags, 0) != 0)
 	return -1;
     dbats_commit_open(handler);
@@ -111,7 +112,7 @@ int main(int argc, char *argv[]) {
 	printf("keys: %d\n", num_keys);
 	print_duration("period: ", cfg->period);
 
-	for (int bid = 0; bid < cfg->num_bundles; bid++) {
+	for (int bid = 0; bid < cfg->num_bundles && !dbats_caught_signal; bid++) {
 	    const dbats_bundle_info *bundle =
 		dbats_get_bundle_info(handler, bid);
 	    uint32_t start, end;
@@ -127,7 +128,7 @@ int main(int argc, char *argv[]) {
 	}
     }
 
-    if (keyglob) {
+    if (keyglob && !dbats_caught_signal) {
 	if (!*keyglob) {
 	    keyglob = NULL;
 	    printf("all keys (by name):\n");
@@ -140,8 +141,9 @@ int main(int argc, char *argv[]) {
 	    char keybuf[DBATS_KEYLEN];
 	    while ((rc = dbats_glob_keyname_next(dki, &keyid, keybuf)) == 0) {
 		printf("  %10u: %s\n", keyid, keybuf);
+		if (dbats_caught_signal) break;
 	    }
-	    if (rc == DB_NOTFOUND) {
+	    if (rc == 0 || rc == DB_NOTFOUND) {
 		rc = 0;
 	    } else {
 		dbats_log(DBATS_LOG_ERR,
@@ -152,19 +154,29 @@ int main(int argc, char *argv[]) {
 	}
     }
 
-    if (opt_keys) {
+    if (opt_keys && !dbats_caught_signal) {
 	printf("all keys (by id):\n");
 	dbats_keyid_iterator *dki;
-	dbats_walk_keyid_start(handler, NULL, &dki);
-	uint32_t keyid;
-	char keybuf[DBATS_KEYLEN];
-	while (dbats_walk_keyid_next(dki, &keyid, keybuf) == 0) {
-	    printf("  %10u: %s\n", keyid, keybuf);
+	if (dbats_walk_keyid_start(handler, NULL, &dki) == 0) {
+	    uint32_t keyid;
+	    char keybuf[DBATS_KEYLEN];
+	    while ((rc = dbats_walk_keyid_next(dki, &keyid, keybuf)) == 0) {
+		printf("  %10u: %s\n", keyid, keybuf);
+		if (dbats_caught_signal) break;
+	    }
+	    if (rc == 0 || rc == DB_NOTFOUND) {
+		rc = 0;
+	    } else {
+		dbats_log(DBATS_LOG_ERR,
+		    "internal error in dbats_walk_keyid_next: %s",
+		    db_strerror(rc));
+	    }
+	    dbats_walk_keyid_end(dki);
 	}
-	dbats_walk_keyid_end(dki);
     }
 
     dbats_close(handler);
 
-    return rc;
+    dbats_deliver_signal(); // if a signal was caught, exit as if it weren't
+    return rc ? 1 : 0;
 }

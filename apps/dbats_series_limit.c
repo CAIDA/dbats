@@ -51,6 +51,7 @@ int main(int argc, char *argv[]) {
     int keep = atoi(argv[2]);
 
     dbats_log(DBATS_LOG_INFO, "%s: open", progname);
+    dbats_catch_signals();
     if (dbats_open(&handler, dbats_path, 1, period, open_flags, 0) != 0)
 	return -1;
 
@@ -58,5 +59,6 @@ int main(int argc, char *argv[]) {
 
     dbats_close(handler);
 
-    return rc;
+    dbats_deliver_signal(); // if signal was caught, exit as if it was uncaught
+    return rc ? 1 : 0;
 }

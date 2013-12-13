@@ -115,6 +115,7 @@ int main(int argc, char *argv[]) {
 
     run_start = time(NULL);
     dbats_log(DBATS_LOG_INFO, "%s: open", progname);
+    dbats_catch_signals();
     if (dbats_open(&handler, dbats_path, values_per_entry, period, open_flags, 0644) != 0)
 	return -1;
 
@@ -160,7 +161,7 @@ int main(int argc, char *argv[]) {
 	}
 	char line[DBATS_KEYLEN+1];
 	int linenum = 0;
-	while (fgets(line, sizeof(line), f)) {
+	while (fgets(line, sizeof(line), f) && !dbats_caught_signal) {
 	    linenum++;
 	    if (n_keys >= MAX_KEYS) {
 		fprintf(stderr, "%s:%d: %s\n", keyfile, linenum, "too many keys");
@@ -187,7 +188,10 @@ int main(int argc, char *argv[]) {
 	}
 	fclose(f);
     }
-    dbats_commit_open(handler); // commit the txn started by dbats_open
+    if (dbats_caught_signal)
+	dbats_abort_open(handler);
+    else
+	dbats_commit_open(handler); // commit the txn started by dbats_open
 
     elapsed = time(NULL) - run_start;
 
@@ -195,6 +199,7 @@ int main(int argc, char *argv[]) {
     dbats_log(DBATS_LOG_INFO, "Closing %s", dbats_path);
     if (dbats_close(handler) != 0)
 	return -1;
+    dbats_deliver_signal(); // if signal was caught, exit as if it was uncaught
     dbats_log(DBATS_LOG_INFO, "Done");
     return rc;
 }

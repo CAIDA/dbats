@@ -138,6 +138,7 @@ int main(int argc, char *argv[]) {
 
     dbats_log(DBATS_LOG_INFO, "Opening %s", dbats_path);
 
+    dbats_catch_signals();
     if (dbats_open(&handler, dbats_path, 0, 0, open_flags, 0) != 0)
 	return(-1);
 
@@ -206,7 +207,7 @@ int main(int argc, char *argv[]) {
 	fprintf(out, "\n");
     }
 
-    for (int bid = 0; bid < cfg->num_bundles; bid++) {
+    for (int bid = 0; bid < cfg->num_bundles && !dbats_caught_signal; bid++) {
 	bundle = dbats_get_bundle_info(handler, bid);
 	uint32_t t;
 
@@ -214,7 +215,7 @@ int main(int argc, char *argv[]) {
 	if (begin == 0)
 	    dbats_get_start_time(handler, NULL, bid, &begin);
 
-	for (t = begin; t <= end; t += bundle->period) {
+	for (t = begin; t <= end && !dbats_caught_signal; t += bundle->period) {
 	    int rc;
 	    dbats_snapshot *snapshot;
 
@@ -224,7 +225,7 @@ int main(int argc, char *argv[]) {
 	    }
 
 	    const dbats_value *values;
-	    for (int k = 0; k < n_keys; k++) {
+	    for (int k = 0; k < n_keys && !dbats_caught_signal; k++) {
 		rc = dbats_get(snapshot, keys[k].keyid, &values, bid);
 		if (rc == DB_NOTFOUND)
 		    continue;
@@ -270,6 +271,7 @@ int main(int argc, char *argv[]) {
     dbats_log(DBATS_LOG_INFO, "Closing %s", dbats_path);
     if (dbats_close(handler) != 0)
 	return -1;
+    dbats_deliver_signal(); // if signal was caught, exit as if it was uncaught
     dbats_log(DBATS_LOG_INFO, "Done");
     return 0;
 }

@@ -4,6 +4,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <errno.h>
 #include "uint.h"
 #include <db.h> // for DB_LOCK_DEADLOCK
 #include "dbats.h"
@@ -36,6 +37,7 @@ static int write_data(dbats_handler *handler, int select_flags, uint32_t t)
     dbats_snapshot *snapshot;
 
 retry:
+    if (dbats_caught_signal) return EINTR;
     dbats_log(DBATS_LOG_INFO, "select time %u", t);
     rc = dbats_select_snap(handler, &snapshot, t, select_flags);
     if (rc != 0) {
@@ -50,6 +52,10 @@ retry:
     }
 
     for (int i = 0; i < n_keys; i++) {
+	if (dbats_caught_signal) {
+	    dbats_abort_snap(snapshot);
+	    return EINTR;
+	}
 	rc = dbats_set(snapshot, keyids[i], &data[i]);
 	if (rc != 0) {
 	    dbats_abort_snap(snapshot);
@@ -134,6 +140,7 @@ int main(int argc, char *argv[]) {
 
     run_start = time(NULL);
     dbats_log(DBATS_LOG_INFO, "report-in: open");
+    dbats_catch_signals();
     if (dbats_open(&handler, dbats_path, 1, period, open_flags, 0644) != 0)
 	return -1;
 
@@ -202,6 +209,7 @@ done:
     dbats_log(DBATS_LOG_INFO, "Closing %s", dbats_path);
     if (dbats_close(handler) != 0)
 	return -1;
+    dbats_deliver_signal(); // if signal was caught, exit as if it was uncaught
     dbats_log(DBATS_LOG_INFO, "Done");
-    return rc;
+    return rc ? 1 : 0;
 }

@@ -63,6 +63,7 @@ int main(int argc, char *argv[]) {
 	exit(-1);
     }
 
+    dbats_catch_signals();
     int rc = dbats_open(&handler, dbats_path, 0, 0, open_flags, 0);
     if (rc != 0) return -1;
     dbats_commit_open(handler);
@@ -72,5 +73,6 @@ int main(int argc, char *argv[]) {
 
     dbats_close(handler);
 
+    dbats_deliver_signal(); // if signal was caught, exit as if it was uncaught
     return 0;
 }

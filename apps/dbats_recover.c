@@ -44,15 +44,20 @@ int main(int argc, char *argv[]) {
     dbats_path = argv[0];
 
     run_start = time(NULL);
+    dbats_catch_signals();
     if (dbats_open(&handler, dbats_path, 1, 0, 0, 0644) != 0)
 	return -1;
-    dbats_commit_open(handler); // commit the txn started by dbats_open
+    if (dbats_caught_signal)
+	dbats_abort_open(handler); // abort the txn started by dbats_open
+    else
+	dbats_commit_open(handler); // commit the txn started by dbats_open
 
     elapsed = time(NULL) - run_start;
     dbats_log(DBATS_LOG_INFO, "Time elapsed: %u sec", elapsed);
     dbats_log(DBATS_LOG_INFO, "Closing %s", dbats_path);
     if (dbats_close(handler) != 0)
 	return -1;
+    dbats_deliver_signal(); // if signal was caught, exit as if it was uncaught
     dbats_log(DBATS_LOG_INFO, "Done");
     return rc;
 }
