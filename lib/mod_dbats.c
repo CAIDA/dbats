@@ -199,7 +199,9 @@ static void metrics_find(request_rec *r, mod_dbats_reqstate *reqstate)
 	ap_rprintf(r, "\n]\n");
     }
 
-    if (rc != DB_NOTFOUND) {
+    // DB_PAGE_NOTFOUND isn't possible according to docs, but it happens,
+    // and _seems_ to be the same as DB_NOTFOUND, so we treat it as such.
+    if (rc != DB_NOTFOUND && rc != DB_PAGE_NOTFOUND) {
 	log_rerror(APLOG_NOTICE, reqstate,
 	    "mod_dbats: dbats_glob_keyname_next: %s", db_strerror(rc));
 	reqstate->dbats_status = rc;
@@ -359,7 +361,9 @@ static void render(request_rec *r, mod_dbats_reqstate *reqstate)
 	    log_rerror(APLOG_DEBUG, reqstate, "mod_dbats: (%d/%d key #%u %s)",
 		chunks->nelts, chunks->nalloc, chunk->keyid, chunk->key);
 	}
-	if (rc != DB_NOTFOUND) {
+	// DB_PAGE_NOTFOUND isn't possible according to docs, but it happens,
+	// and _seems_ to be the same as DB_NOTFOUND, so we treat it as such.
+	if (rc != DB_NOTFOUND && rc != DB_PAGE_NOTFOUND) {
 	    log_rerror(APLOG_NOTICE, reqstate,
 		"mod_dbats: dbats_glob_keyname_next: %s", db_strerror(rc));
 	    reqstate->dbats_status = rc;
