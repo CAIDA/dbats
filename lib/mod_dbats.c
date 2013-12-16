@@ -144,15 +144,20 @@ static inline char *get_first_param(apr_table_t *queryparams, const char *key)
 static void metrics_find(request_rec *r, mod_dbats_reqstate *reqstate)
 {
     int rc;
+    int i;
+    uint32_t keyid;
+    char name[DBATS_KEYLEN];
+
+    typedef struct {
+	const char *name;
+	uint8_t isleaf;
+    } mfinfo_t;
 
     const char *query = get_first_param(reqstate->queryparams, "query");
     const char *format = get_first_param(reqstate->queryparams, "format");
     //const char *logLevel = get_first_param(reqstate->queryparams, "logLevel");
 
     log_rerror(APLOG_DEBUG, reqstate, "# query: %s", query);
-
-    uint32_t keyid;
-    char name[DBATS_KEYLEN];
 
     rc = dbats_glob_keyname_start(reqstate->dh, NULL, &reqstate->dki, query);
     if (rc != 0) {
@@ -162,42 +167,17 @@ static void metrics_find(request_rec *r, mod_dbats_reqstate *reqstate)
 	return;
     }
 
-    if (format && strcmp(format, "html") == 0) {
-	ap_set_content_type(r, "text/html");
-	ap_rprintf(r, "<!DOCTYPE html>\n");
-	ap_rprintf(r, "<html>\n");
-	ap_rprintf(r, "<head>\n");
-	ap_rprintf(r, "<title>DBATS key query</title>\n");
-	ap_rprintf(r, "</head>\n");
-	ap_rprintf(r, "<body>\n");
-	ap_rprintf(r, "<h1>DBATS key query</h1>\n");
-	ap_rprintf(r, "<ul>\n");
-	while ((rc = dbats_glob_keyname_next(reqstate->dki, &keyid, name)) == 0) {
-	    ap_rprintf(r, "<li>%s\n", ap_escape_html(r->pool, name));
-	}
-	ap_rprintf(r, "</ul>\n");
-	ap_rprintf(r, "</body>\n");
-	ap_rprintf(r, "</html>\n");
+    apr_array_header_t *metrics = apr_array_make(r->pool, 1, sizeof(mfinfo_t*));
 
-    } else { // default to json
-	ap_set_content_type(r, "application/json");
-	int n = 0;
-	ap_rprintf(r, "[");
-	while ((rc = dbats_glob_keyname_next(reqstate->dki, &keyid, name)) == 0) {
-	    const char *ename = ap_escape_quotes(r->pool, name);
-	    const char *lastpart = strrchr(ename, '.');
-	    lastpart = lastpart ? lastpart + 1 : ename;
-	    int isleaf = !(keyid & DBATS_KEY_IS_PREFIX);
-	    ap_rprintf(r, "%s\n    {", n ? "," : "");
-	    ap_rprintf(r, "\"text\": \"%s\", ", lastpart);
-	    ap_rprintf(r, "\"expandable\": %d, ", !isleaf);
-	    ap_rprintf(r, "\"leaf\": %d, ", isleaf);
-	    ap_rprintf(r, "\"id\": \"%s\", ", ename);
-	    ap_rprintf(r, "\"allowChildren\": %d}", !isleaf);
-	    n++;
-	}
-	ap_rprintf(r, "\n]\n");
+    while ((rc = dbats_glob_keyname_next(reqstate->dki, &keyid, name)) == 0) {
+	mfinfo_t *info = apr_palloc(r->pool, sizeof(mfinfo_t));
+	info->name = apr_pstrdup(r->pool, name);
+	info->isleaf = !(keyid & DBATS_KEY_IS_PREFIX);
+	APR_ARRAY_PUSH(metrics, mfinfo_t*) = info;
     }
+
+    dbats_glob_keyname_end(reqstate->dki);
+    reqstate->dki = NULL;
 
     // DB_PAGE_NOTFOUND isn't possible according to docs, but it happens,
     // and _seems_ to be the same as DB_NOTFOUND, so we treat it as such.
@@ -211,8 +191,43 @@ static void metrics_find(request_rec *r, mod_dbats_reqstate *reqstate)
 	return;
     }
 
-    dbats_glob_keyname_end(reqstate->dki);
-    reqstate->dki = NULL;
+    if (format && strcmp(format, "html") == 0) {
+	ap_set_content_type(r, "text/html");
+	ap_rprintf(r, "<!DOCTYPE html>\n");
+	ap_rprintf(r, "<html>\n");
+	ap_rprintf(r, "<head>\n");
+	ap_rprintf(r, "<title>DBATS key query</title>\n");
+	ap_rprintf(r, "</head>\n");
+	ap_rprintf(r, "<body>\n");
+	ap_rprintf(r, "<h1>DBATS key query</h1>\n");
+	ap_rprintf(r, "<ul>\n");
+	for (i = 0; i < metrics->nelts; i++) {
+	    mfinfo_t *info = APR_ARRAY_IDX(metrics, i, mfinfo_t*);
+	    ap_rprintf(r, "<li>%s\n", ap_escape_html(r->pool, info->name));
+	}
+	ap_rprintf(r, "</ul>\n");
+	ap_rprintf(r, "</body>\n");
+	ap_rprintf(r, "</html>\n");
+
+    } else { // default to json
+	ap_set_content_type(r, "application/json");
+	int n = 0;
+	ap_rprintf(r, "[");
+	for (i = 0; i < metrics->nelts; i++) {
+	    mfinfo_t *info = APR_ARRAY_IDX(metrics, i, mfinfo_t*);
+	    const char *ename = ap_escape_quotes(r->pool, info->name);
+	    const char *lastpart = strrchr(ename, '.');
+	    lastpart = lastpart ? lastpart + 1 : ename;
+	    ap_rprintf(r, "%s\n{", n ? "," : "");
+	    ap_rprintf(r, "\"text\": \"%s\", ", lastpart);
+	    ap_rprintf(r, "\"expandable\": %d, ", !info->isleaf);
+	    ap_rprintf(r, "\"leaf\": %d, ", info->isleaf);
+	    ap_rprintf(r, "\"id\": \"%s\", ", ename);
+	    ap_rprintf(r, "\"allowChildren\": %d}", !info->isleaf);
+	    n++;
+	}
+	ap_rprintf(r, "\n]\n");
+    }
 }
 
 static void metrics_index(request_rec *r, mod_dbats_reqstate *reqstate)
