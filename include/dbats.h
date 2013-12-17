@@ -32,18 +32,22 @@
  *  Typical usage:
  *  - Configure signal handling with dbats_catch_signals().
  *  - Open a database with dbats_open().
- *  - If this is a new database, define aggregate time series with
- *    dbats_aggregate().
+ *  - If this is a new database
+ *    - define aggregate time series with dbats_aggregate().
  *  - dbats_commit_open().
+ *  - If this is a new database
+ *    - define keys with dbats_bulk_get_key_id().
  *  - Loop:
  *    - Select a working snapshot with dbats_select_snap().
  *    - Write primary values for multiple keys with dbats_set(), and/or
  *    - read primary and/or aggregate values for multiple keys with dbats_get().
- *    - if an error occurs or @ref dbats_caught_signal is set,
- *      call dbats_abort_snap() and break the loop.
+ *    - If dbats_set() deadlocked,
+ *      - repeat the loop with the same timestamp and data.
+ *    - If another error occured or @ref dbats_caught_signal is set,
+ *      - call dbats_abort_snap() and break the loop.
  *    - dbats_commit_snap().
- *    - If either of dbats_set() or dbats_commit_snap() deadlock, repeat the
- *      loop with the same timestamp and data.
+ *    - If dbats_commit_snap() deadlocked,
+ *      - repeat the loop with the same timestamp and data.
  *  - Close the database with dbats_close().
  *  - Call dbats_deliver_signal() in case a signal had been caught.
  *
@@ -459,9 +463,18 @@ extern int dbats_get_key_id(dbats_handler *handler, dbats_snapshot *snap,
 
 /** Get the ids of a large number of new or existing keys.
  *  The keys must already exist unless the DBATS_CREATE flag is given.
+ *  When creating a large number (> 20000) of keys, it is recommended to
+ *  do so outside of a transaction to avoid excessive locking (this function
+ *  will create keys in efficiently-sized batches and use its own transactions).
  *  @param[in] handler A dbats_handler created by dbats_open().
  *  @param[in] snap A dbats_snapshot created by dbats_select_snap().
- *  @param[in] n_keys the number of keys
+ *  @param[in,out] *n_keys_p On input, should point to an integer containing
+ *    the number of keys in the @c keys array.  On output, that integer will
+ *    contain the number of ids written into @c key_ids.  If this function
+ *    returns 0, the output value of *n_keys_p will equal the input value;
+ *    otherwise, the output value may be anywhere between 0 and the input
+ *    value, indicating the number of keys that were successfully looked up or
+ *    created before the error occurred.
  *  @param[in] keys an array of key names
  *  @param[out] key_ids an array of uint32_t where the ids for
  *    keys will be written.
@@ -471,7 +484,7 @@ extern int dbats_get_key_id(dbats_handler *handler, dbats_snapshot *snap,
  *    DBATS_CREATE flag was not set, or other nonzero value for error.
  */
 extern int dbats_bulk_get_key_id(dbats_handler *handler, dbats_snapshot *snap,
-    uint32_t n_keys, const char * const *keys, uint32_t *key_ids,
+    uint32_t *n_keys_p, const char * const *keys, uint32_t *key_ids,
     uint32_t flags);
 
 /** Get the name of an existing key.
