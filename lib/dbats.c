@@ -2297,37 +2297,54 @@ int dbats_glob_keyname_end(dbats_keytree_iterator *dki)
 }
 
 int dbats_bulk_get_key_id(dbats_handler *dh, dbats_snapshot *ds,
-    uint32_t n_keys, const char * const *keys, uint32_t *key_ids, uint32_t flags)
+    uint32_t *nkeysp, const char * const *keys, uint32_t *key_ids, uint32_t flags)
 {
+    const int CHUNKSIZE = 20000; // large enough to mitigate txn overhead,
+				 // but small enough to not run out of locks
     int rc = 0;
+    int got = 0;
+    int nextchunk = 0;
 
-    dbats_keytree_iterator *dki;
-    rc = dbats_glob_keyname_new(dh, &dki, ds ? ds->txn : dh->txn);
-    if (rc != 0) return rc;
+    for (int chunk = 0; chunk < *nkeysp; chunk = nextchunk) {
+	nextchunk = min(chunk + CHUNKSIZE, *nkeysp);
+	dbats_keytree_iterator *dki;
+	rc = dbats_glob_keyname_new(dh, &dki, ds ? ds->txn : dh->txn);
+	if (rc != 0) return rc;
 
-    for (int i = 0; i < n_keys; i++) {
-	rc = dbats_glob_keyname_reset(dh, dki, keys[i]);
-	if (rc != 0) break;
-	rc = glob_keyname_next(dki, &key_ids[i], NULL, flags & ~DBATS_GLOB);
-	if (rc != 0) break;
-	if (key_ids[i] & DBATS_KEY_IS_PREFIX) {
-	    dbats_log(DBATS_LOG_ERR, "Key %s is only a prefix", keys[i]);
-	    rc = EISDIR;
-	    break;
+	for (int i = chunk; i < nextchunk; i++) {
+	    if (dbats_caught_signal) {
+		rc = EINTR;
+		break;
+	    }
+	    rc = dbats_glob_keyname_reset(dh, dki, keys[i]);
+	    if (rc != 0) break;
+	    rc = glob_keyname_next(dki, &key_ids[i], NULL, flags & ~DBATS_GLOB);
+	    if (rc != 0) break;
+	    if (key_ids[i] & DBATS_KEY_IS_PREFIX) {
+		dbats_log(DBATS_LOG_ERR, "Key %s is only a prefix", keys[i]);
+		rc = EISDIR;
+		break;
+	    }
+	    dbats_log(DBATS_LOG_FINEST, "Found key #%u: %s", key_ids[i],
+		keys[i]);
+	    dbats_glob_keyname_clear(dki);
 	}
-	dbats_log(DBATS_LOG_FINEST, "Found key #%u: %s", key_ids[i],
-	    keys[i]);
-	dbats_glob_keyname_clear(dki);
+
+	dbats_glob_keyname_end(dki);
+	if (rc != 0) break;
+	got = nextchunk;
+	dbats_log(DBATS_LOG_FINE, "got %d keys", got);
     }
 
-    dbats_glob_keyname_end(dki);
-    return rc;
+    *nkeysp = got;
+    return rc ? rc : dbats_caught_signal ? EINTR : 0;
 }
 
 int dbats_get_key_id(dbats_handler *dh, dbats_snapshot *ds, const char *key,
     uint32_t *key_id_p, uint32_t flags)
 {
-    return dbats_bulk_get_key_id(dh, ds, 1, &key, key_id_p, flags);
+    uint32_t n = 1;
+    return dbats_bulk_get_key_id(dh, ds, &n, &key, key_id_p, flags);
 }
 
 int dbats_get_key_name(dbats_handler *dh, dbats_snapshot *ds,

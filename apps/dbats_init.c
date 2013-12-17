@@ -153,7 +153,12 @@ int main(int argc, char *argv[]) {
 	bundle = dbats_get_bundle_info(handler, bid);
     }
 
-    if (keyfile) {
+    if (dbats_caught_signal)
+	dbats_abort_open(handler);
+    else
+	dbats_commit_open(handler); // commit the txn started by dbats_open
+
+    if (keyfile && !dbats_caught_signal) {
 	FILE *f = fopen(keyfile, "r");
 	if (!f) {
 	    fprintf(stderr, "%s: %s\n", keyfile, strerror(errno));
@@ -181,17 +186,12 @@ int main(int argc, char *argv[]) {
 	}
 
 	if (n_keys > 0) {
-	    rc = dbats_bulk_get_key_id(handler, NULL, n_keys,
+	    rc = dbats_bulk_get_key_id(handler, NULL, &n_keys,
 		(const char * const *)keys, keyids, DBATS_CREATE);
-	    if (rc == 0)
-		dbats_log(DBATS_LOG_INFO, "Initialized %d keys", n_keys);
+	    dbats_log(DBATS_LOG_INFO, "Initialized %d keys", n_keys);
 	}
 	fclose(f);
     }
-    if (dbats_caught_signal)
-	dbats_abort_open(handler);
-    else
-	dbats_commit_open(handler); // commit the txn started by dbats_open
 
     elapsed = time(NULL) - run_start;
 

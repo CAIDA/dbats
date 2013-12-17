@@ -152,6 +152,7 @@ int main(int argc, char *argv[]) {
 		return -1;
 	}
     }
+    dbats_commit_open(handler); // commit the txn started by dbats_open
 
     if (init_only) {
 	while (1) {
@@ -166,12 +167,12 @@ int main(int argc, char *argv[]) {
 	}
 
 	if (n_keys > 0) {
-	    rc = dbats_bulk_get_key_id(handler, NULL, n_keys, (const char * const *)keys, keyids, DBATS_CREATE);
+	    rc = dbats_bulk_get_key_id(handler, NULL, &n_keys,
+		(const char * const *)keys, keyids, DBATS_CREATE);
+	    dbats_log(DBATS_LOG_INFO, "Initialized %d keys", n_keys);
 	}
-	dbats_commit_open(handler); // commit the txn started by dbats_open
 
     } else {
-	dbats_commit_open(handler); // commit the txn started by dbats_open
 	while (1) {
 	    int n = scanf("%127s %" SCNu64 " %" SCNu32 "\n", key, &value.u64, &t);
 	    if (n != 3) break;
