@@ -5,4 +5,5 @@ bin_PROGRAMS   = dbats_init report-in report-out dbats_series_limit dbats_info d
 EXTRA_PROGRAMS = dbats_corrupt
 AM_CPPFLAGS    = -I$(srcdir)
 LDADD          = $(top_builddir)/lib/libdbats.la $(LIBDB)
+AM_LIBTOOLFLAGS= --silent
 
