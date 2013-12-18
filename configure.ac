@@ -1,4 +1,4 @@
-AC_REVISION([$Id: configure.ac,v 1.35 2013/11/19 00:04:15 kkeys Exp $])
+AC_REVISION([$Id: configure.ac,v 1.36 2013/12/18 01:05:19 kkeys Exp $])
 
 AC_PREREQ(2.68)
 AC_INIT([DBATS], [0.1], [kkeys@caida.org])
@@ -30,6 +30,7 @@ if test "${enable_developer}" = "yes"; then
 fi
 
 AM_INIT_AUTOMAKE([-Wall -Werror foreign])
+AM_SILENT_RULES()
 
 
 test "${enable_assert}" = "yes" || AC_DEFINE([NDEBUG], 1, [Define to disable assert()])
