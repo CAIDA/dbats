@@ -47,7 +47,7 @@ retry:
 
     if (n_unknown_keys > 0) {
 	dbats_log(DBATS_LOG_INFO, "dbats_bulk_get_key_id: %d unknown keys", n_unknown_keys);
-	rc = dbats_bulk_get_key_id(handler, snapshot, n_keys, (const char * const *)keys, keyids, DBATS_CREATE);
+	rc = dbats_bulk_get_key_id(handler, snapshot, &n_keys, (const char * const *)keys, keyids, DBATS_CREATE);
 	n_unknown_keys = 0;
     }
 
