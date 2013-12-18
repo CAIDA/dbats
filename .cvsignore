@@ -3,7 +3,9 @@ Makefile
 *.tsdb
 *.dbats
 *.out
+*.out.gz
 *.err
+*.err.gz
 *.stat
 *.stats
 *.gprof

@@ -9,4 +9,5 @@ dbats_series_limit
 dbats_best_bundle
 dbats_recover
 dbats_corrupt
+dbats_init
 .libs
