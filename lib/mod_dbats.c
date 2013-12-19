@@ -27,6 +27,7 @@ typedef struct {
     dbats_keytree_iterator *dki;
     int dbats_status;
     int http_status;
+    int retries;
 } mod_dbats_reqstate;
 
 struct {
@@ -417,6 +418,8 @@ static void render(request_rec *r, mod_dbats_reqstate *reqstate)
 		chunk->isset[i] = 1;
 		chunk->data[i] = v[0];
 	    } else {
+		log_rerror(APLOG_NOTICE, reqstate, "mod_dbats: dbats_get: %s",
+		    db_strerror(rc));
 		dbats_abort_snap(reqstate->snap);
 		reqstate->snap = NULL;
 		reqstate->dbats_status = rc;
@@ -621,19 +624,23 @@ static int req_handler(request_rec *r)
 	reqstate->http_status = HTTP_NOT_FOUND;
 	goto done;
 
-    } else if (reqstate->dbats_status == DB_RUNRECOVERY) {
+    } else if (reqstate->dbats_status == DB_RUNRECOVERY && reqstate->retries < 1) {
 	// Since we're readonly, we can't do the recovery, but if database was
 	// recovered externally, we have to reopen it to use it.
-	log_rerror(APLOG_WARNING, reqstate, "mod_dbats attempting to reopen %s", dbats_path);
+	log_rerror(APLOG_NOTICE, reqstate, "mod_dbats attempting to reopen %s", dbats_path);
 	if (reqstate->dh)
 	    apr_pool_cleanup_run(procstate.pool, reqstate->dh, mod_dbats_close);
 	apr_thread_mutex_lock(procstate.dht_mutex);
 	apr_hash_set(procstate.dht, dbats_path, APR_HASH_KEY_STRING, NULL);
 	reqstate->http_status = OK;
 	reqstate->dbats_status = 0;
+	reqstate->retries++;
 	goto reopen;
 
     } else {
+	log_rerror(APLOG_WARNING, reqstate,
+	    "mod_dbats aborting request due to internal error (%d) %s",
+	    reqstate->dbats_status, db_strerror(reqstate->dbats_status));
 	reqstate->http_status = HTTP_INTERNAL_SERVER_ERROR;
 	goto done;
     }
