@@ -1429,10 +1429,10 @@ end:
     return rc;
 }
 
-int dbats_abort_snap(dbats_snapshot *ds)
+int (dbats_abort_snap)(const char *fname, int line, dbats_snapshot *ds)
 {
-    dbats_log(DBATS_LOG_FINE, "dbats_abort_snap %u", ds->tslice[0]->time);
-
+    dbats_log_func(DBATS_LOG_FINE, fname, line,
+	"dbats_abort_snap %u", ds->tslice[0]->time);
     int rc = abort_transaction(ds->dh, ds->txn);
     free_snapshot(ds);
     return rc;

@@ -442,7 +442,10 @@ extern int dbats_commit_snap(dbats_snapshot *snap);
  *  @param[in] snap A dbats_snapshot created by dbats_select_snap().
  *  @return 0 for success, nonzero for error.
  */
-extern int dbats_abort_snap(dbats_snapshot *snap);
+#define dbats_abort_snap(snap) (dbats_abort_snap)(__FILE__, __LINE__, snap)
+/// @cond UNDOCUMENTED
+extern int (dbats_abort_snap)(const char *fname, int line, dbats_snapshot *ds);
+/// @endcond
 
 /** Get the id of a new or existing key.
  *  The key must already exist unless the DBATS_CREATE flag is given.
