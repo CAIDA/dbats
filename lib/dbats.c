@@ -1500,13 +1500,8 @@ static int load_isset(dbats_snapshot *ds, fragkey_t *dbkey, uint8_t **dest,
 	buf, vec_size(ENTRIES_PER_FRAG), &value_len, flags);
 
     if (rc == DB_NOTFOUND) {
-	if (ntohl(dbkey->time) == ds->tslice[ntohl(dbkey->bid)]->time) {
-	    memset(buf, 0, vec_size(ENTRIES_PER_FRAG));
-	    *dest = buf;
-	} else {
-	    free(buf);
-	    *dest = NULL;
-	}
+	memset(buf, 0, vec_size(ENTRIES_PER_FRAG));
+	*dest = buf;
 	return rc; // no match
     } else if (rc != 0) {
 	*dest = NULL;
@@ -1586,11 +1581,10 @@ static int read_int_frag(dbats_snapshot *ds, DB *db, fragkey_t *dbkey, size_t fr
     return 0;
 }
 
-static int load_frag(dbats_snapshot *ds, uint32_t t, int bid,
-    uint32_t frag_id)
+static int load_frag(dbats_snapshot *ds, int bid, uint32_t frag_id)
 {
     // load fragment
-    fragkey_t dbkey = { htonl(bid), htonl(t), htonl(frag_id) };
+    fragkey_t dbkey = { htonl(bid), htonl(ds->tslice[bid]->time), htonl(frag_id) };
     int rc;
     uint32_t flags = ds->readonly ? 0 : DB_RMW;
 
@@ -1761,12 +1755,11 @@ restart:
 
     for (int bid = 0; bid < (*dsp)->num_bundles; bid++) {
 	dbats_tslice *tslice = (*dsp)->tslice[bid];
-	uint32_t t = tslice->time;
 	int loaded = 0;
 
 	tslice->num_frags = div_ceil(num_keys, ENTRIES_PER_FRAG);
 	for (uint32_t frag_id = 0; frag_id < tslice->num_frags; frag_id++) {
-	    rc = load_frag((*dsp), t, bid, frag_id);
+	    rc = load_frag((*dsp), bid, frag_id);
 	    if (rc == DB_LOCK_DEADLOCK) {
 		if (--tries_limit > 0) goto retry;
 		dbats_log(DBATS_LOG_ERR, "select_snap %u: too many deadlocks",
@@ -2370,7 +2363,7 @@ static int instantiate_frag_func(dbats_snapshot *ds, int bid, uint32_t frag_id)
 
     if (!ds->preload || ds->readonly) {
 	// Try to load the fragment.
-	rc = load_frag(ds, tslice->time, bid, frag_id);
+	rc = load_frag(ds, bid, frag_id);
 	if (rc != 0) // error
 	    return rc;
 	if (tslice->values[frag_id]) // found it
@@ -2406,8 +2399,8 @@ static int instantiate_frag_func(dbats_snapshot *ds, int bid, uint32_t frag_id)
 // inline version handles the common case without a function call
 static inline int instantiate_frag(dbats_snapshot *ds, int bid, uint32_t frag_id)
 {
-    return ds->tslice[bid]->values[frag_id] ?
-	0 : // We already have the fragment.
+    return ds->tslice[bid]->is_set[frag_id] ?
+	0 : // We already have the fragment (or know it doesn't exist)
 	instantiate_frag_func(ds, bid, frag_id);
 }
 
