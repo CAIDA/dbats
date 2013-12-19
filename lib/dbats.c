@@ -2297,11 +2297,14 @@ int dbats_bulk_get_key_id(dbats_handler *dh, dbats_snapshot *ds,
     int rc = 0;
     int got = 0;
     int nextchunk = 0;
+    DB_TXN *txn = ds ? ds->txn : dh->txn;
 
     for (int chunk = 0; chunk < *nkeysp; chunk = nextchunk) {
-	nextchunk = min(chunk + CHUNKSIZE, *nkeysp);
+	nextchunk = *nkeysp;
+	if (!txn && nextchunk > chunk + CHUNKSIZE)
+	    nextchunk = chunk + CHUNKSIZE;
 	dbats_keytree_iterator *dki;
-	rc = dbats_glob_keyname_new(dh, &dki, ds ? ds->txn : dh->txn);
+	rc = dbats_glob_keyname_new(dh, &dki, txn);
 	if (rc != 0) return rc;
 
 	for (int i = chunk; i < nextchunk; i++) {
@@ -2459,9 +2462,6 @@ int dbats_set(dbats_snapshot *ds, uint32_t key_id, const dbats_value *valuep)
 	// agginfo stores extra information needed by aggregate calculations:
 	// MIN, MAX, AVG, and SUM need the number of PDPs contributing to
 	// the aggregate; LAST needs time of last PDP set in this aggregate.
-
-	dbats_log(DBATS_LOG_FINEST, "agg %d: aggval=%" PRIu64,
-	    bid, aggval[0].u64); // XXX
 
 	uint32_t *agginfo = agginfoptr(ds, bid, frag_id, offset);
 
