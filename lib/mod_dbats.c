@@ -158,6 +158,11 @@ static void metrics_find(request_rec *r, mod_dbats_reqstate *reqstate)
     const char *format = get_first_param(reqstate->queryparams, "format");
     //const char *logLevel = get_first_param(reqstate->queryparams, "logLevel");
 
+    if (!query) {
+	reqstate->http_status = HTTP_BAD_REQUEST;
+	return;
+    }
+
     log_rerror(APLOG_DEBUG, reqstate, "# query: %s", query);
 
     rc = dbats_glob_keyname_start(reqstate->dh, NULL, &reqstate->dki, query);
@@ -209,6 +214,33 @@ static void metrics_find(request_rec *r, mod_dbats_reqstate *reqstate)
 	ap_rprintf(r, "</ul>\n");
 	ap_rprintf(r, "</body>\n");
 	ap_rprintf(r, "</html>\n");
+
+    } else if (format && strcmp(format, "json-internal") == 0) {
+	uint32_t start, end, nstart, bstart;
+	const dbats_config *dbcfg = dbats_get_config(reqstate->dh);
+	int bid;
+	dbats_get_end_time(reqstate->dh, NULL, 0, &end);
+	dbats_get_start_time(reqstate->dh, NULL, 0, &start);
+	for (bid = 1; bid < dbcfg->num_bundles; bid++) {
+	    nstart = start;
+	    dbats_normalize_time(reqstate->dh, bid, &nstart);
+	    rc = dbats_get_start_time(reqstate->dh, NULL, 0, &bstart);
+	    if (bstart < nstart)
+		start = bstart;
+	}
+	ap_set_content_type(r, "application/json");
+	int n = 0;
+	ap_rprintf(r, "[");
+	for (i = 0; i < metrics->nelts; i++) {
+	    mfinfo_t *info = APR_ARRAY_IDX(metrics, i, mfinfo_t*);
+	    const char *ename = ap_escape_quotes(r->pool, info->name);
+	    ap_rprintf(r, "%s\n{", n ? "," : "");
+	    ap_rprintf(r, "\"path\": \"%s\", ", ename);
+	    ap_rprintf(r, "\"is_leaf\": %d, ", info->isleaf);
+	    ap_rprintf(r, "\"intervals\": [{\"start\": %u, \"end\": %u}]}", start, end);
+	    n++;
+	}
+	ap_rprintf(r, "\n]\n");
 
     } else { // default to json
 	ap_set_content_type(r, "application/json");
@@ -326,12 +358,11 @@ static void render(request_rec *r, mod_dbats_reqstate *reqstate)
     log_rerror(APLOG_DEBUG, reqstate, "# until:  %" PRIu32, until);
     log_rerror(APLOG_DEBUG, reqstate, "# max_points: %" PRIu32, max_points);
 
-    if (max_points > 0) {
-	bid = dbats_best_bundle(reqstate->dh, agg_func, from, until, max_points);
-    }
-
+    bid = dbats_best_bundle(reqstate->dh, agg_func, from, until, max_points, 1);
+    bundle = dbats_get_bundle_info(reqstate->dh, bid);
     dbats_normalize_time(reqstate->dh, bid, &from);
     dbats_normalize_time(reqstate->dh, bid, &until);
+    from += bundle->period;
 
     uint32_t starttime, endtime;
     rc = dbats_get_start_time(reqstate->dh, NULL, bid, &starttime);
@@ -347,7 +378,6 @@ static void render(request_rec *r, mod_dbats_reqstate *reqstate)
 	return;
     }
 
-    bundle = dbats_get_bundle_info(reqstate->dh, bid);
     nsamples = (until < from) ? 0 : (until - from) / bundle->period + 1;
 
     typedef struct {
@@ -466,27 +496,51 @@ static void render(request_rec *r, mod_dbats_reqstate *reqstate)
 	ap_rprintf(r, "</body>\n");
 	ap_rprintf(r, "</html>\n");
 
+    } else if (format && strcmp(format, "json-internal") == 0) {
+	ap_set_content_type(r, "application/json");
+	int n = 0;
+	ap_rprintf(r, "[\n");
+	int c;
+	for (c = 0; c < chunks->nelts; c++) {
+	    chunk_t *chunk = &APR_ARRAY_IDX(chunks, c, chunk_t);
+	    ap_rprintf(r, "%s{\"name\": \"%s\",\n  ",
+		(n>0 ? ",\n" : ""), ap_escape_quotes(r->pool, chunk->key));
+	    ap_rprintf(r, "\"start\": %u, \"step\": %u, \"end\": %u,\n  \"values\": [",
+		from, bundle->period, until + bundle->period);
+	    for (i = 0, t = from; i < nsamples; i++, t += bundle->period) {
+		if (i > 0) ap_rprintf(r, ", ");
+		if (!chunk->isset[i]) {
+		    ap_rprintf(r, "null");
+		} else if (bundle->func == DBATS_AGG_AVG) {
+		    ap_rprintf(r, "%.16g", chunk->data[i].d);
+		} else {
+		    ap_rprintf(r, "%" PRIu64, chunk->data[i].u64);
+		}
+	    }
+	    ap_rprintf(r, "]}");
+	    n++;
+	}
+	ap_rprintf(r, "\n]\n");
+
     } else { // default to json
 	ap_set_content_type(r, "application/json");
 	int n = 0;
-
 	ap_rprintf(r, "[\n");
 	int c;
 	for (c = 0; c < chunks->nelts; c++) {
 	    chunk_t *chunk = &APR_ARRAY_IDX(chunks, c, chunk_t);
 	    ap_rprintf(r, "%s{\"target\": \"%s\", \"datapoints\": [",
 		n>0 ? ",\n" : "", ap_escape_quotes(r->pool, chunk->key));
-	    t = from;
-	    int first = 1;
-	    for (i = 0; i < nsamples; i++) {
-		if (chunk->isset[i]) {
-		    if (bundle->func == DBATS_AGG_AVG)
-			ap_rprintf(r, "%s[%.16g, %u]", first ? "" : ", ", chunk->data[i].d, t);
-		    else
-			ap_rprintf(r, "%s[%" PRIu64 ", %u]", first ? "" : ", ", chunk->data[i].u64, t);
-		    first = 0;
+	    for (i = 0, t = from; i < nsamples; i++, t += bundle->period) {
+		char valbuf[64];
+		if (!chunk->isset[i]) {
+		    sprintf(valbuf, "null");
+		} else if (bundle->func == DBATS_AGG_AVG) {
+		    sprintf(valbuf, "%.16g", chunk->data[i].d);
+		} else {
+		    sprintf(valbuf, "%" PRIu64, chunk->data[i].u64);
 		}
-		t += bundle->period;
+		ap_rprintf(r, "%s[%s, %u]", (i==0 ? "" : ", "), valbuf, t);
 	    }
 	    ap_rprintf(r, "]}");
 	    n++;
