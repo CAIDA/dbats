@@ -68,7 +68,7 @@ int main(int argc, char *argv[]) {
     if (rc != 0) return -1;
     dbats_commit_open(handler);
 
-    int bid = dbats_best_bundle(handler, func, start, end, maxPoints);
+    int bid = dbats_best_bundle(handler, func, start, end, maxPoints, 0);
     printf("best bundle: %d\n", bid);
 
     dbats_close(handler);
