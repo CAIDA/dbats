@@ -351,13 +351,12 @@ extern void *dbats_get_userdata(dbats_handler *handler);
  *  <code>start</code>.
  *  Only the primary bundle (0) and bundles with aggregation function
  *  <code>func</code> are considered.
- *  - A bundle that starts at or before <code>start</code>
- *    is better than one that doesn't; if two bundles both start after
- *    <code>start</code>, the one that starts earlier is better.
+ *  - If one bundle covers significantly less of the time range than another,
+ *    the one with better coverage is preferred.
  *  - In the event of a tie above, if either bundle has more than @c max_points
- *    points, the bundle with fewer points is better.
+ *    points, the bundle with fewer points is preferred.
  *  - In the event of a tie above, if neither bundle has more than @c max_points
- *    points, the bundle with more points is better.
+ *    points, the bundle with more points is preferred.
  *
  *  Note that it is possible for the selected bundle to have more than @c
  *  max_points points if there is no other bundle that covers as much of the
@@ -368,10 +367,12 @@ extern void *dbats_get_userdata(dbats_handler *handler);
  *  @param[in] end end of the time range
  *  @param[in] max_points maximum number of data points wanted.  If @c
  *    max_points is 0, it is treated as infinite.
+ *  @param[in] exclude the first sample should or should not include the @c from
+ *    value if @c exclude is 0 or 1, respectively.
  *  @return the bundle id of the best bundle
  */
 extern int dbats_best_bundle(dbats_handler *handler, enum dbats_agg_func func,
-    uint32_t start, uint32_t end, int max_points);
+    uint32_t start, uint32_t end, int max_points, int exclude);
 
 /** Round a time value down to a multiple of a bundle's period.
  *  @param[in] handler A dbats_handler created by dbats_open().

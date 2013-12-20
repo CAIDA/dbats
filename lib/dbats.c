@@ -1014,42 +1014,49 @@ int dbats_get_end_time(dbats_handler *dh, dbats_snapshot *ds, int bid, uint32_t 
 }
 
 int dbats_best_bundle(dbats_handler *dh, enum dbats_agg_func func,
-    uint32_t start, uint32_t end, int max_points)
+    uint32_t start, uint32_t end, int max_points, int exclude)
 {
     typedef struct {
 	int bid;
-	uint32_t start;    // start time of overlap between request and bundle
-	uint32_t npoints;  // # of points in bundle within time range
+	uint32_t missing; // amount of requested data before bundle's start
+	uint32_t npoints; // # of points in bundle within time range
+	uint32_t period;  // bundle's period
     } info;
 
-    info best = { -1, UINT32_MAX, UINT32_MAX };
-    info current;
-    uint32_t max_end;
+    info best, current;
+    uint32_t max_end, current_end, current_start;
 
     dbats_get_end_time(dh, NULL, 0, &max_end);
     if (end > max_end) end = max_end;
 
     for (int bid = 0; bid < dh->cfg.num_bundles; bid++) {
-	if (bid != 0 && dh->bundle[bid].func != func) continue;
+	dbats_bundle_info *bundle = &dh->bundle[bid];
+	if (bid != 0 && bundle->func != func) continue;
 	current.bid = bid;
-	dbats_get_start_time(dh, NULL, bid, &current.start);
-	current.start = max(current.start, start);
-
-	{
-	    uint32_t nstart = current.start;
-	    dbats_normalize_time(dh, bid, &nstart);
-	    uint32_t nend = end;
-	    dbats_normalize_time(dh, bid, &nend);
-	    current.npoints = (nend - nstart) / dh->bundle[bid].period + 1;
-	}
-
-	if (current.start != best.start) {
-	    // pick the one that better covers the time range
-	    if (current.start < best.start) best = current;
+	dbats_get_end_time(dh, NULL, 0, &current_end);
+	current_start = bundle->keep ? current_end - bundle->period * (bundle->keep-1) : 0;
+	current.missing = current_start > start ? current_start - start : 0;
+	current.period = bundle->period;
+	uint32_t nstart = start;
+	if (exclude) nstart += bundle->period;
+	nstart = max(current_start, nstart);
+	dbats_normalize_time(dh, bid, &nstart);
+	current.npoints = (current_end - nstart) / bundle->period + 1;
+	if (bid == 0) {
+	    best = current;
 	    continue;
 	}
 
-	if (max_points > 0 && (best.npoints > max_points || current.npoints > max_points)) {
+	uint32_t period = max(current.period, best.period);
+
+	if (best.missing > current.missing + period) {
+	    // best is missing significantly more than current; pick current.
+	    best = current;
+	} else if (current.missing > best.missing + period) {
+	    // current is missing significantly more than best; stick with best.
+	} else if (max_points > 0 &&
+	    (best.npoints > max_points || current.npoints > max_points))
+	{
 	    // one or both have too many points; pick the one with fewer points
 	    if (current.npoints < best.npoints) best = current;
 	} else {
