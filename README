@@ -21,7 +21,12 @@ To build and install dbats:
     make install
 
 To install the optional mod_dbats apache module:
-    make install-apache
+    As root (or other user with permission to restart apache), run
+    "make install-apache" in the dbats build tree.  This will do the
+    following:
+    1. if an old dbats module is already loaded, disable it and restart server
+    2. install and enable the new dbats module
+    3. restart apache server
 
 Most of the GNU standard configure options and make targets are also
 available.
