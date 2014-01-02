@@ -1,4 +1,4 @@
-AC_REVISION([$Id: configure.ac,v 1.36 2013/12/18 01:05:19 kkeys Exp $])
+AC_REVISION([$Id: configure.ac,v 1.37 2014/01/02 19:51:12 kkeys Exp $])
 
 AC_PREREQ(2.68)
 AC_INIT([DBATS], [0.1], [kkeys@caida.org])
@@ -66,6 +66,9 @@ if test "${enable_apache}" != "no"; then
     MSG="can't build apache module without apxs"
     if test -n "${APXS}"; then
 	AC_SUBST(MOD_DBATS, mod_dbats.la)
+	AC_CHECK_PROGS(APACHECTL, apache2ctl apachectl)
+	# a2dismod is a Debian extension
+	AC_CHECK_PROGS(A2DISMOD, a2dismod)
     elif test "${enable_apache}" = "yes"; then
 	AC_MSG_ERROR([$MSG])
     else
