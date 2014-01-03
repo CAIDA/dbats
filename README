@@ -37,3 +37,30 @@ the corresponding db.h header is in $dir/include, you should use the
 libdb is static or shared.
 
 ----------------------------------------------------------------------
+Programs
+
+Run any program with the "-?" option for a list of options.
+
+* dbats_init
+  Create a DBATS database and optionally define aggregates and keys.
+
+* dbats_info
+  Display information about a DBATS database.
+
+* dbats_recover
+  Recover a damaged DBATS database.  This is useful when any app reports
+  "dbats_open: BDB0087 DB_RUNRECOVERY: Fatal error, run database recovery",
+  which can occur after an app is killed without cleanly closing the db.
+
+* dbats_series_limit
+  Set the maximum number of data points to store in a timeseries.
+
+* dbats_best_bundle
+  Find the bundle that best covers the specified time range.
+
+* report-in
+* report-out
+  Example programs that write to and read from a DBATS database.
+
+----------------------------------------------------------------------
+Documentation for the C API is in the "html" directory.
