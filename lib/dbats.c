@@ -2528,6 +2528,8 @@ int dbats_set(dbats_snapshot *ds, uint32_t key_id, const dbats_value *valuep)
 		    if (was_set)
 			aggval[i].u64 -= oldvaluep[i].u64;
 		    aggval[i].u64 += valuep[i].u64;
+		    if (aggval[i].u64 < valuep[i].u64) // overflow?
+			aggval[i].u64 = UINT64_MAX;
 		    changed = 1;
 		}
 		break;

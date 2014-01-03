@@ -114,8 +114,8 @@ enum dbats_agg_func {
     DBATS_AGG_MAX,       ///< maximum value
     DBATS_AGG_AVG,       ///< average of values (double)
     DBATS_AGG_LAST,      ///< last value (i.e., with greatest timestamp)
-    DBATS_AGG_SUM,       ///< sum of values
-    DBATS_AGG_N          // size of enum dbats_agg_func
+    DBATS_AGG_SUM,       ///< sum of values (capped at 2e64-1)
+    DBATS_AGG_N          // count of agg function identifiers
 };
 
 /// Labels for aggregation functions (e.g. dbats_agg_func_label[@ref DBATS_AGG_MIN] is "min")
