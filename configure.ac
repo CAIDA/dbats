@@ -1,4 +1,4 @@
-AC_REVISION([$Id: configure.ac,v 1.37 2014/01/02 19:51:12 kkeys Exp $])
+AC_REVISION([$Id: configure.ac,v 1.38 2014/01/03 23:34:27 kkeys Exp $])
 
 AC_PREREQ(2.68)
 AC_INIT([DBATS], [0.1], [kkeys@caida.org])
@@ -108,9 +108,7 @@ AC_TYPE_SIZE_T
 dnl Note: AC_LIB_LINKFLAGS doesn't have an ACTION-IF-NOT-FOUND option.  If
 dnl needed, we should also test for linkability of a function in the library
 dnl with WITH_LIBS(..., AC_CHECK_FUNC(...)).
-RUNFLAGS=""; # extra LDFLAGS needed to make configure's test programs runnable
 AC_LIB_LINKFLAGS([db])
-RUNFLAGS="$LIBDB $RUNFLAGS"
 
 
 # Checks for library functions.
@@ -152,7 +150,6 @@ WITH_LIBS([$LIBDB], [
 	])],
 	[], [AC_MSG_FAILURE([can not run compiled program])])])
 . ./conftest.out
-dbh_version="$dbh_major.$dbh_minor.$dbh_patch"
 AC_MSG_RESULT([$dbh_major.$dbh_minor.$dbh_patch])
 if test "$dbh_major" -lt 4; then
     AC_MSG_ERROR([DB version 4 or higher is required.])
