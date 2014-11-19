@@ -2625,10 +2625,12 @@ int dbats_get(dbats_snapshot *ds, uint32_t key_id,
 
     if ((rc = instantiate_frag(ds, bid, frag_id)) == 0) {
 	if (!vec_test(tslice->is_set[frag_id], offset)) {
-	    char keyname[DBATS_KEYLEN] = "";
-	    dbats_get_key_name(dh, ds, key_id, keyname);
-	    dbats_log(DBATS_LOG_FINE, "Value unset (v): %u %d %s",
-		tslice->time, bid, keyname);
+	    if (dbats_log_level >= DBATS_LOG_FINE) {
+		char keyname[DBATS_KEYLEN] = "";
+		dbats_get_key_name(dh, ds, key_id, keyname);
+		dbats_log(DBATS_LOG_FINE, "Value unset (v): %u %d %s",
+		    tslice->time, bid, keyname);
+	    }
 	    *valuepp = NULL;
 	    return DB_NOTFOUND;
 	}
@@ -2650,10 +2652,12 @@ int dbats_get(dbats_snapshot *ds, uint32_t key_id,
 	return 0;
 
     } else if (rc == DB_NOTFOUND) {
-	char keyname[DBATS_KEYLEN] = "";
-	dbats_get_key_name(dh, ds, key_id, keyname);
-	dbats_log(DBATS_LOG_FINE, "Value unset (f): %u %d %s",
-	    tslice->time, bid, keyname);
+	if (dbats_log_level >= DBATS_LOG_FINE) {
+	    char keyname[DBATS_KEYLEN] = "";
+	    dbats_get_key_name(dh, ds, key_id, keyname);
+	    dbats_log(DBATS_LOG_FINE, "Value unset (f): %u %d %s",
+		tslice->time, bid, keyname);
+	}
 	*valuepp = NULL;
 	return DB_NOTFOUND;
 
