@@ -321,8 +321,9 @@ static void render(request_rec *r, mod_dbats_reqstate *reqstate)
     int rc;
     int bid = 0;
     int i;
-    uint32_t from, until, max_points = 0;
+    uint32_t q_from, from, q_until, until, max_points = 0;
     enum dbats_agg_func agg_func = DBATS_AGG_AVG;
+    int no_pad = 0;
     int nsamples = 0;
     const dbats_bundle_info *bundle = NULL;
 
@@ -332,6 +333,7 @@ static void render(request_rec *r, mod_dbats_reqstate *reqstate)
     const char *str_max_points = get_first_param(reqstate->queryparams, "maxDataPoints");
     const char *str_agg_func = get_first_param(reqstate->queryparams, "aggFunc");
     const char *format = get_first_param(reqstate->queryparams, "format");
+    const char *str_no_pad = get_first_param(reqstate->queryparams, "noPad");
     //const char *logLevel = get_first_param(reqstate->queryparams, "logLevel");
 
     reqstate->http_status = HTTP_BAD_REQUEST;
@@ -349,6 +351,10 @@ static void render(request_rec *r, mod_dbats_reqstate *reqstate)
 	agg_func = dbats_find_agg_func(str_agg_func);
 	if (agg_func == DBATS_AGG_NONE) return;
     }
+    if (str_no_pad) {
+        no_pad = strtol(str_no_pad, &p, 10);
+        if (!*str_no_pad || *p) no_pad = 1; //noPad specified without arg
+    }
     reqstate->http_status = OK;
 
     for (i = 0; i < targets->nelts; i++)
@@ -362,7 +368,8 @@ static void render(request_rec *r, mod_dbats_reqstate *reqstate)
     bundle = dbats_get_bundle_info(reqstate->dh, bid);
     dbats_normalize_time(reqstate->dh, bid, &from);
     dbats_normalize_time(reqstate->dh, bid, &until);
-    from += bundle->period;
+    q_from = from += bundle->period;
+    q_until = until;
 
     uint32_t starttime, endtime;
     rc = dbats_get_start_time(reqstate->dh, NULL, bid, &starttime);
@@ -501,22 +508,30 @@ static void render(request_rec *r, mod_dbats_reqstate *reqstate)
 	int n = 0;
 	ap_rprintf(r, "[\n");
 	int c;
+        uint32_t p_from = (no_pad) ? from : q_from;
+        uint32_t p_until = (no_pad) ? until : q_until;
 	for (c = 0; c < chunks->nelts; c++) {
 	    chunk_t *chunk = &APR_ARRAY_IDX(chunks, c, chunk_t);
 	    ap_rprintf(r, "%s{\"name\": \"%s\",\n  ",
 		(n>0 ? ",\n" : ""), ap_escape_quotes(r->pool, chunk->key));
 	    ap_rprintf(r, "\"start\": %u, \"step\": %u, \"end\": %u,\n  \"values\": [",
-		from, bundle->period, until + bundle->period);
-	    for (i = 0, t = from; i < nsamples; i++, t += bundle->period) {
-		if (i > 0) ap_rprintf(r, ", ");
-		if (!chunk->isset[i]) {
-		    ap_rprintf(r, "null");
-		} else if (bundle->func == DBATS_AGG_AVG) {
-		    ap_rprintf(r, "%.16g", chunk->data[i].d);
-		} else {
-		    ap_rprintf(r, "%" PRIu64, chunk->data[i].u64);
-		}
-	    }
+		p_from, bundle->period, p_until + bundle->period);
+            for (i = 0, t = p_from; t <= p_until; t += bundle->period) {
+                if (t > p_from) ap_rprintf(r, ", ");
+
+                if (t >= from && t <= until) { // there could be a value
+                    if (!chunk->isset[i]) {
+                        ap_rprintf(r, "null");
+                    } else if (bundle->func == DBATS_AGG_AVG) {
+                        ap_rprintf(r, "%.16g", chunk->data[i].d);
+                    } else {
+                        ap_rprintf(r, "%" PRIu64, chunk->data[i].u64);
+                    }
+                    i++;
+                } else { // this is padding
+                    ap_rprintf(r, "null");
+                }
+            }
 	    ap_rprintf(r, "]}");
 	    n++;
 	}
