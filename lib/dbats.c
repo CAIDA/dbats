@@ -1026,6 +1026,12 @@ int dbats_best_bundle(dbats_handler *dh, enum dbats_agg_func func,
     info best, current;
     uint32_t max_end, current_end, current_start;
 
+    /* init to keep gcc happy */
+    best.bid = 0;
+    best.missing = 0;
+    best.npoints = 0;
+    best.period = 0;
+
     dbats_get_end_time(dh, NULL, 0, &max_end);
     if (end > max_end) end = max_end;
 
@@ -1040,8 +1046,9 @@ int dbats_best_bundle(dbats_handler *dh, enum dbats_agg_func func,
 	uint32_t nstart = start;
 	if (exclude) nstart += bundle->period;
 	nstart = max(current_start, nstart);
+	current_end = min(current_end, end);
 	dbats_normalize_time(dh, bid, &nstart);
-	current.npoints = (current_end - nstart) / bundle->period + 1;
+	current.npoints = (current_end >= nstart) ? (current_end - nstart) / bundle->period + 1 : 0;
 	if (bid == 0) {
 	    best = current;
 	    continue;
@@ -1054,7 +1061,7 @@ int dbats_best_bundle(dbats_handler *dh, enum dbats_agg_func func,
 	    best = current;
 	} else if (current.missing > best.missing + period) {
 	    // current is missing significantly more than best; stick with best.
-	} else if (max_points > 0 &&
+	} else if (max_points > 0 && current.npoints > 0 &&
 	    (best.npoints > max_points || current.npoints > max_points))
 	{
 	    // one or both have too many points; pick the one with fewer points
