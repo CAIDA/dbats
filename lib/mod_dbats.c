@@ -510,12 +510,19 @@ static void render(request_rec *r, mod_dbats_reqstate *reqstate)
 	int c;
         uint32_t p_from = (no_pad) ? from : q_from;
         uint32_t p_until = (no_pad) ? until : q_until;
+        uint32_t native_period;
+        if (bid == 0) {
+            native_period = bundle->period;
+        } else {
+            const dbats_bundle_info *native_bundle = dbats_get_bundle_info(reqstate->dh, 0);
+            native_period = native_bundle->period;
+        }
 	for (c = 0; c < chunks->nelts; c++) {
 	    chunk_t *chunk = &APR_ARRAY_IDX(chunks, c, chunk_t);
 	    ap_rprintf(r, "%s{\"name\": \"%s\",\n  ",
 		(n>0 ? ",\n" : ""), ap_escape_quotes(r->pool, chunk->key));
-	    ap_rprintf(r, "\"start\": %u, \"step\": %u, \"end\": %u,\n  \"values\": [",
-		p_from, bundle->period, p_until + bundle->period);
+	    ap_rprintf(r, "\"start\": %u, \"step\": %u, \"nativeStep\": %u, \"end\": %u,\n  \"values\": [",
+                p_from, bundle->period, native_period, p_until + bundle->period);
             for (i = 0, t = p_from; t <= p_until; t += bundle->period) {
                 if (t > p_from) ap_rprintf(r, ", ");
 
