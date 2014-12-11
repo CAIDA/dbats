@@ -66,9 +66,9 @@ static void log_callback(int level, const char *file, int line, const char *msg)
 	APLOG_ERR;
     if (r) {
 	mod_dbats_reqstate *reqstate = (mod_dbats_reqstate*)ap_get_module_config(r->request_config, &dbats_module);
-	ap_log_rerror(file, line, level, 0, reqstate->r, "%u#%lu: " "%s", getpid(), reqstate->id, msg);
+	ap_log_rerror(APLOG_MARK, level, 0, reqstate->r, "%u#%lu: " "%s", getpid(), reqstate->id, msg);
     } else { // e.g., during init or cleanup
-	ap_log_error(file, line, level, 0, main_server, "%s", msg);
+	ap_log_error(APLOG_MARK, level, 0, main_server, "%s", msg);
     }
 }
 
@@ -623,7 +623,7 @@ static int req_handler(request_rec *r)
     args_to_table(r, &reqstate->queryparams);
 
     // We should have a log level per virtual server, but does anybody care?
-    int level = r->server->loglevel;
+    int level = r->server->log.level;
     dbats_log_level =
 	level > APLOG_DEBUG ? DBATS_LOG_FINEST :
 	level >= APLOG_DEBUG ? DBATS_LOG_FINEST :
