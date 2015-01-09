@@ -530,7 +530,12 @@ static void render(request_rec *r, mod_dbats_reqstate *reqstate)
                     if (!chunk->isset[i]) {
                         ap_rprintf(r, "null");
                     } else if (bundle->func == DBATS_AGG_AVG) {
-                        ap_rprintf(r, "%.16g", chunk->data[i].d);
+                        // handle buggy apache printf
+                        // given 0.3 it prints .3 which breaks JSON parsers
+                        // (similarly for -0.3 -> -.3)
+                        char buf[64];
+                        snprintf(buf, 64, "%.16g", chunk->data[i].d);
+                        ap_rprintf(r, "%s", buf);
                     } else {
                         ap_rprintf(r, "%" PRIu64, chunk->data[i].u64);
                     }
