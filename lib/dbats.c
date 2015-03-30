@@ -34,6 +34,10 @@
 #define MAX_NUM_FRAGS       16384 // max number of fragments in a tslice
 #define MAX_NUM_BUNDLES        16 // max number of time series bundles
 
+#if ENTRIES_PER_FRAG * MAX_NUM_FRAGS >= DBATS_KEY_IS_PREFIX
+#error ENTRIES_PER_FRAG * MAX_NUM_FRAGS must be < DBATS_KEY_IS_PREFIX
+#endif
+
 /*************************************************************************/
 // compile-time assertion (works anywhere a declaration is allowed)
 #define ct_assert(expr, label)  enum { ASSERT_ERROR__##label = 1/(!!(expr)) };
