@@ -140,7 +140,11 @@ int main(int argc, char *argv[]) {
 	    uint32_t keyid;
 	    char keybuf[DBATS_KEYLEN];
 	    while ((rc = dbats_glob_keyname_next(dki, &keyid, keybuf)) == 0) {
-		printf("  %10u: %s\n", keyid, keybuf);
+		if (keyid & DBATS_KEY_IS_PREFIX) {
+		    printf("  node %10u: %s\n", keyid & ~DBATS_KEY_IS_PREFIX, keybuf);
+		} else {
+		    printf("  key  %10u: %s\n", keyid, keybuf);
+		}
 		if (dbats_caught_signal) break;
 	    }
 	    if (rc == 0 || rc == DB_NOTFOUND) {
