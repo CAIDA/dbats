@@ -601,10 +601,10 @@ extern int dbats_get_by_key(dbats_snapshot *snap, const char *key,
  */
 extern int dbats_num_keys(dbats_handler *handler, uint32_t *num_keys);
 
-/** Prepare to iterate over the list of keys that match pattern, ordered by
- *  name.
- *  If pattern is NULL, all keys will be iterated over.
- *  Otherwise, only keys matching pattern will be iterated over.
+/** Prepare to iterate over the list of keys and keytree nodes that match
+ *  pattern, ordered by name.
+ *  If pattern is NULL, all keys (but not nodes) will be iterated over.
+ *  Otherwise, keys and nodes matching the pattern will be iterated over.
  *  The pattern is similar to shell filename globbing, except that
  *  hierarchical components are separated by '.' instead of '/'.
  *    - * matches any zero or more characters (except '.')
