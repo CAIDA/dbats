@@ -410,6 +410,7 @@ static void render(request_rec *r, mod_dbats_reqstate *reqstate)
 	    return;
 	}
 	while ((rc = dbats_glob_keyname_next(reqstate->dki, &keyid, key)) == 0) {
+	    if (keyid & DBATS_KEY_IS_PREFIX) continue;
 	    chunk_t *chunk = (chunk_t*)apr_array_push(chunks);
 	    chunk->keyid = keyid;
 	    chunk->key = apr_pstrdup(r->pool, key);
