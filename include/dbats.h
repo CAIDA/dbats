@@ -92,7 +92,7 @@ extern "C" {
 #define DBATS_DB_VERSION     10  ///< Version of db format written by this API
 
 #define DBATS_KEYLEN         128 ///< max length of key name
-#define DBATS_KEY_IS_PREFIX  0x80000000
+#define DBATS_KEY_IS_PREFIX  0x80000000 ///< keyid describes a node, not a key
 
 /** @name Flags */
 ///@{
@@ -631,7 +631,11 @@ extern int dbats_num_keys(dbats_handler *handler, uint32_t *num_keys);
  *  rc = dbats_glob_keyname_start(handler, snap, &dki, "*.*.uniq_*_ip");
  *  if (rc != 0) goto error_handling;
  *  while (dbats_glob_keyname_next(dki, &keyid, name) == 0 && !dbats_caught_signal) {
- *      // do something with keyid and/or name
+ *      if (keyid & DBATS_KEY_IS_PREFIX) {
+ *          // do something with node described by keyid and name
+ *      } else {
+ *          // do something with key described by keyid and name
+ *      }
  *  }
  *  dbats_glob_keyname_end(dki);
  *  \endcode
@@ -660,6 +664,8 @@ extern int dbats_glob_keyname_start(dbats_handler *handler,
  *  @param[in] dki A dbats_keytree_iterator created by
  *    dbats_glob_keyname_start().
  *  @param[out] key_id_p A pointer to a uint32_t where the key_id will be written.
+ *    If (keyid & DBATS_KEY_IS_PREFIX) is true, the result describes a keytree
+ *    node; otherwise, it describes a keytree leaf (i.e., an actual key).
  *  @param[out] namebuf a pointer to an array of at least DBATS_KEYLEN
  *    characters where the key's name will be written, or NULL if you do not
  *    need the name.
