@@ -651,7 +651,12 @@ static int req_handler(request_rec *r)
     args_to_table(r, &reqstate->queryparams);
 
     // We should have a log level per virtual server, but does anybody care?
-    int level = r->server->log.level;
+    int level =
+#if AP_SERVER_MAJORVERSION_NUMBER == 2 && AP_SERVER_MINORVERSION_NUMBER < 4
+	r->server->loglevel;
+#else // 2.4 and above
+	r->server->log.level;
+#endif
     dbats_log_level =
 	level > APLOG_DEBUG ? DBATS_LOG_FINEST :
 	level >= APLOG_DEBUG ? DBATS_LOG_FINEST :
