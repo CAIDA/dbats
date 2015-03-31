@@ -2726,7 +2726,7 @@ int dbats_walk_keyid_next(dbats_keyid_iterator *dki, uint32_t *key_id_p,
 	if (rc != DB_NOTFOUND)
 	    dbats_log(DBATS_LOG_ERR, "Error in dbats_walk_keyid_next: %s",
 		db_strerror(rc));
-	return -1;
+	return rc;
     }
     *key_id_p = recno - 1;
     if (namebuf)
