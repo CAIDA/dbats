@@ -1258,7 +1258,7 @@ static void log_hex(const char *label, const uint8_t *data, size_t n)
     if (logbuf) {
 	for (size_t i = 0; i < n; i++)
 	    sprintf(logbuf + i*3, "%02x ", data[i]);
-	dbats_log(DBATS_LOG_WARN, "%s: %s", label, logbuf);
+	dbats_log(DBATS_LOG_FINEST, "%s: %s", label, logbuf);
 	free(logbuf);
     }
 }
@@ -2624,6 +2624,14 @@ static int delete_data(dbats_handler *dh, const uint32_t *keyids, int n)
 		    log_hex("cleared", ds->tslice[bid]->is_set[frag_id], 100);
 		    ds->tslice[bid]->frag_changed[frag_id] = 1;
 		    ds->changed = 1;
+
+		    // zero the data (not necessary, but improves compression)
+		    dbats_value *values = valueptr(ds, bid, frag_id, offset);
+		    memset(values, 0, sizeof(dbats_value) * dh->cfg.values_per_entry);
+		    if (bid > 0) {
+			uint32_t *agginfo = agginfoptr(ds, bid, frag_id, offset);
+			*agginfo = 0;
+		    }
 		}
 	    }
 
