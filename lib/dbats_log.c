@@ -32,7 +32,7 @@ void dbats_log_func(int level, const char *file, int line, const char *fmt, ...)
 
     if (level <= dbats_log_level) {
 
-	char msgbuf[2048];
+	char msgbuf[4096];
 	va_start(va_ap, fmt);
 	vsnprintf(msgbuf, sizeof(msgbuf)-1, fmt, va_ap);
 	msgbuf[sizeof(msgbuf)-1] = '\0';
