@@ -89,7 +89,7 @@ extern "C" {
 
 /* ************************************************** */
 
-#define DBATS_DB_VERSION     10  ///< Version of db format written by this API
+#define DBATS_DB_VERSION     11  ///< Version of db format written by this API
 
 #define DBATS_KEYLEN         128 ///< max length of key name
 #define DBATS_KEY_IS_PREFIX  0x80000000 ///< keyid describes a node, not a key
@@ -103,7 +103,8 @@ extern "C" {
 #define DBATS_EXCLUSIVE    0x0020 ///< obtain exclusive lock on whole db
 #define DBATS_NO_TXN       0x0040 ///< don't use transactions (fast but unsafe)
 #define DBATS_UPDATABLE    0x0080 ///< allow updates to existing values
-#define DBATS_GLOB         0x0200 // allow glob
+#define DBATS_GLOB         0x0200 ///< (internal use)
+#define DBATS_DELETE       0x0400 ///< (internal use)
 ///@}
 
 /** Aggregation function identifiers */
@@ -501,6 +502,16 @@ extern int dbats_bulk_get_key_id(dbats_handler *handler, dbats_snapshot *snap,
  */
 extern int dbats_get_key_name(dbats_handler *handler, dbats_snapshot *snap,
     uint32_t key_id, char *namebuf);
+
+/** For each metric key that matches pattern, delete the key and all its data.
+ *  There must not be a snapshot open when this function is called.
+ *  @param[in] handler A dbats_handler created by dbats_open().
+ *  @param[in] pattern A fileglob-like pattern as described under
+ *    dbats_glob_keyname_start().
+ *  @return 0 for success, EINVAL if the pattern is invalid, or other
+ *    nonzero value for other error.
+ */
+extern int dbats_delete_keys(dbats_handler *dh, const char *pattern);
 
 /** Write a value to the primary time series for the specified key and
  *  snapshot (time).

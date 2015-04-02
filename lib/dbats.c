@@ -1251,13 +1251,92 @@ static int clear_tslice(dbats_snapshot *ds, int bid)
     return 0;
 }
 
+static void log_hex(const char *label, const uint8_t *data, size_t n)
+{
+    if (dbats_log_level < DBATS_LOG_FINEST) return;
+    char *logbuf = emalloc(3*n+1, "logbuf");
+    if (logbuf) {
+	for (size_t i = 0; i < n; i++)
+	    sprintf(logbuf + i*3, "%02x ", data[i]);
+	dbats_log(DBATS_LOG_WARN, "%s: %s", label, logbuf);
+	free(logbuf);
+    }
+}
+
+// Run-length encoding, optimized for long runs of 0x00 or 0xff.
+// A uint8 value 0x00 or 0xff followed by a uint8 N means the 0x00 or 0xff
+// is repeated N+1 times.  Any other value is a byte of raw bit vector.
+// On input, *rlesize must contain max allowed length of RLE output.
+// On output, *rlesize will contain the actual length of RLE output.
+static uint8_t *run_length_encode(const uint8_t *data, size_t datasize, size_t *rlesize)
+{
+    uint8_t *rle = emalloc(*rlesize, "run_length_encode");
+    if (!rle) return NULL;
+    size_t di = 0, ri = 0;
+    while (di < datasize) {
+	if (ri >= *rlesize) { // encoding is too long
+	    free(rle);
+	    return NULL;
+	}
+	// encode any byte as itself
+	rle[ri++] = data[di++];
+	if (rle[ri-1] == 0xff || rle[ri-1] == 0x00) {
+	    // encoding 0xff or 0x00 is followed by an additional run length
+	    rle[ri] = 0;
+	    while (di < datasize && data[di] == rle[ri-1] && rle[ri] < 0xFF) {
+		di++;
+		rle[ri]++;
+	    }
+	    ri++;
+	}
+    }
+    *rlesize = ri;
+    return rle;
+}
+
+// On input, *datasize must contain max allowed length of data output.
+// On output, *datasize will contain the actual length of data output.
+static uint8_t *run_length_decode(const uint8_t *rle, size_t rlesize, size_t *datasize)
+{
+    uint8_t *data = emalloc(*datasize, "run_length_decode");
+    if (!data) return NULL;
+    size_t ri = 0, di = 0;
+    while (ri < rlesize) {
+	if (di >= *datasize) goto fail; // data is too long
+	// decode any byte as itself
+	data[di++] = rle[ri++];
+	if (rle[ri-1] == 0xff || rle[ri-1] == 0x00) {
+	    // encoding 0xff or 0x00 is followed by an additional run length
+	    if (ri >= rlesize) {
+		dbats_log(DBATS_LOG_ERR, "internal error: missing run-length");
+		goto fail;
+	    }
+	    unsigned n = rle[ri];
+	    while (n--) {
+		if (di >= *datasize) goto fail; // data is too long
+		data[di++] = rle[ri-1];
+	    }
+	    ri++;
+	}
+    }
+    *datasize = di;
+    return data;
+fail:
+    free(data);
+    return NULL;
+}
+
 static int write_bitvector_frag(DB *db, DB_TXN *txn, fragkey_t *dbkey, const uint8_t *vec)
 {
+    uint8_t *buf = NULL;
     uint32_t ones = 0; // number of leading "1" bits
     int zeroes = 0; // have any "0"s been seen?
-    int matches = 1; // bit string matches regexp "^1*0*$"?
+    int countable = 1; // bit string matches regexp "^1*0*$"?
+
+    // v9 compression:  a 32-bit count of the number of leading "1" bits.
+    // This is the most common case, and the most compact.
     for (int i = 0; i < vec_size(ENTRIES_PER_FRAG); i++) {
-	if (zeroes) { if (!(matches = !vec[i])) break; }
+	if (zeroes) { if (!(countable = !vec[i])) break; }
 	else if (vec[i] == 0xFF) { ones += 8; }
 	else if (vec[i] == 0x7F) { ones += 7; zeroes = 1; }
 	else if (vec[i] == 0x3F) { ones += 6; zeroes = 1; }
@@ -1267,18 +1346,47 @@ static int write_bitvector_frag(DB *db, DB_TXN *txn, fragkey_t *dbkey, const uin
 	else if (vec[i] == 0x03) { ones += 2; zeroes = 1; }
 	else if (vec[i] == 0x01) { ones += 1; zeroes = 1; }
 	else if (vec[i] == 0x00) { ones += 0; zeroes = 1; }
-	else { matches = 0; break; }
+	else { countable = 0; break; }
     }
-    if (matches) {
-	// compression: write number of leading "1" bits
+    if (countable) {
 	ones = htonl(ones);
+	dbats_log(DBATS_LOG_FINE, "write_bitvector_frag: leading-1-count");
 	return raw_db_set(db, txn, dbkey, sizeof(*dbkey),
 	    &ones, sizeof(ones), 0);
-    } else {
-	// write the whole is_set vector
-	return raw_db_set(db, txn, dbkey, sizeof(*dbkey),
-	    vec, vec_size(ENTRIES_PER_FRAG), 0);
     }
+
+    // v11 compression: run-length encoding.
+    size_t rlesize = vec_size(ENTRIES_PER_FRAG) - 1; // any longer would be confused with raw
+    buf = run_length_encode(vec, vec_size(ENTRIES_PER_FRAG), &rlesize);
+    if (!buf) goto raw; // not an error; we'll just write the raw vector
+    if (rlesize <= sizeof(uint32_t)) { // would be confused with leading-1-count
+	goto raw;
+    }
+
+    // Write the run-length encoding
+    dbats_handler *dh = (dbats_handler*)db->app_private;
+    if (dh->cfg.version < 11) { // Bump the db version if necessary.
+	uint32_t newversion = 11;
+	int rc;
+	if ((rc = CFG_SET(dh, txn, "version", newversion)) != 0) {
+	    dbats_log(DBATS_LOG_ERR, "Error changing db version: %s", db_strerror(rc));
+	    goto raw;
+	}
+	dh->cfg.version = newversion;
+    }
+    dbats_log(DBATS_LOG_FINE, "write_bitvector_frag: run-length, %u bytes", rlesize);
+    log_hex("vec", vec, vec_size(ENTRIES_PER_FRAG));
+    log_hex("rle", buf, rlesize);
+    int rc = raw_db_set(db, txn, dbkey, sizeof(*dbkey), buf, rlesize, 0);
+    free(buf);
+    return rc;
+
+raw:
+    // Write the whole is_set vector
+    if (buf) free(buf);
+    dbats_log(DBATS_LOG_FINE, "write_bitvector_frag: raw vector, %u bytes", vec_size(ENTRIES_PER_FRAG));
+    return raw_db_set(db, txn, dbkey, sizeof(*dbkey),
+	vec, vec_size(ENTRIES_PER_FRAG), 0);
 }
 
 static int write_int_frag(dbats_snapshot *ds, DB *db, fragkey_t *dbkey,
@@ -1530,15 +1638,33 @@ static int load_isset(dbats_snapshot *ds, fragkey_t *dbkey, uint8_t **dest,
 #error ENTRIES_PER_FRAG must be > 32
 #endif
     if (value_len == sizeof(uint32_t)) {
-	// vector was compressed to a 32-bit counter
+	// vector was compressed to a 32-bit leading-1-count
 	uint32_t bits = ntohl(*((uint32_t*)buf));
 	memset(buf, 0xFF, bits/8);
 	memset(buf + bits/8, 0, vec_size(ENTRIES_PER_FRAG) - bits/8);
 	for (int i = bits - bits%8; i < bits; i++)
 	    vec_set(buf, i);
+	*dest = buf;
+
+    } else if (value_len < vec_size(ENTRIES_PER_FRAG)) {
+	// vector was compressed with run-length encoding
+	size_t datasize = vec_size(ENTRIES_PER_FRAG);
+	*dest = run_length_decode(buf, value_len, &datasize);
+	if (!*dest) return errno ? errno : -1; // error
+	if (datasize != vec_size(ENTRIES_PER_FRAG)) {
+	    dbats_log(DBATS_LOG_ERR,
+		"internal error: decoded RLE length %u != vec size %u",
+		datasize, vec_size(ENTRIES_PER_FRAG));
+	    free(*dest);
+	    return -1;
+	}
+
+    } else {
+	// vector is raw
+	*dest = buf;
     }
 
-    *dest = buf;
+    log_hex("loaded", *dest, vec_size(ENTRIES_PER_FRAG));
 
     return 0; // ok
 }
@@ -2171,34 +2297,41 @@ next_level:
     }
 
 found:
-    if (dki->pattern) {
-	if (node->start[node->gnlen] == '.') {
-	    if (!(node->id & KTID_IS_NODE)) {
-		// expecting node, found leaf
-		if (!(flags & DBATS_GLOB)) {
-		    dbats_log(DBATS_LOG_ERR, "Found leaf at level %d (%.*s) in key %s",
-			lvl, node->gnlen, node->start, dki->pattern);
-		    return ENOTDIR;
-		}
-		while (lvl > 0 && !node->cursor.dbc) {
-		    glob_keyname_prev_level(dki);
-		}
-		goto next_key;
-	    }
-	    // go to next level
+    if (!dki->pattern) { // We're doing a leaf walk
+	if (node->id & KTID_IS_NODE) {
+	    // This is a node.  Go to next level.
 	    ++lvl;
-	    node->start = dki->nodes[lvl-1].start + dki->nodes[lvl-1].gnlen + 1;
 	    node->cursor.dbc = NULL;
 	    goto next_level;
 	}
 
-    } else {
-	if (node->id & KTID_IS_NODE) {
-	    // We're doing a leaf walk, but this is a node.  Go to next level.
-	    ++lvl;
-	    node->cursor.dbc = NULL;
-	    goto next_level;
+    } else if (node->start[node->gnlen] == '.') { // expecting a node
+	if (!(node->id & KTID_IS_NODE)) { // found leaf
+	    if (!(flags & DBATS_GLOB)) {
+		dbats_log(DBATS_LOG_ERR, "Found leaf at level %d (%.*s) in key %s",
+		    lvl, node->gnlen, node->start, dki->pattern);
+		return ENOTDIR;
+	    }
+	    while (lvl > 0 && !node->cursor.dbc) {
+		glob_keyname_prev_level(dki);
+	    }
+	    goto next_key;
 	}
+	// go to next level
+	++lvl;
+	node->start = dki->nodes[lvl-1].start + dki->nodes[lvl-1].gnlen + 1;
+	node->cursor.dbc = NULL;
+	goto next_level;
+
+    } else if (flags && DBATS_DELETE && (node->id & KTID_IS_NODE)) {
+	// expecting a leaf, and we're trying to delete, but found node
+	// TODO: recursively delete everything below (or maybe add a "**" glob
+	// syntax that matches nodes recursively)
+	// For now: skip it
+	while (lvl > 0 && !node->cursor.dbc) {
+	    glob_keyname_prev_level(dki);
+	}
+	goto next_key;
     }
 
     // generate result
@@ -2210,6 +2343,32 @@ found:
 	}
     }
     *key_id_p = ntohl(node->id);
+
+    if (flags & DBATS_DELETE) {
+	dbats_log(DBATS_LOG_FINE, "delete keytree by %s: %u %s",
+	    node->cursor.dbc ? "cursor" : "key", *key_id_p, keynamebuf);
+	if (node->cursor.dbc) {
+	    rc = node->cursor.dbc->del(node->cursor.dbc, 0);
+	} else {
+	    DBT_init_in(dbt_ktkey, &node->key, sizeof(keytree_key));
+	    rc = dki->dh->dbKeytree->del(dki->dh->dbKeytree, dki->txn, &dbt_ktkey, 0);
+	}
+	if (rc != 0) {
+	    dbats_log(DBATS_LOG_ERR, "delete keytree by %s: %u %s: %s",
+		node->cursor.dbc ? "cursor" : "key", *key_id_p, keynamebuf,
+		db_strerror(rc));
+	    return rc;
+	}
+
+	db_recno_t recno = *key_id_p + 1;
+	DBT_in(dbt_recno, (void*)&recno, sizeof(recno));
+	rc = dki->dh->dbKeyid->del(dki->dh->dbKeyid, dki->txn, &dbt_recno, 0);
+	if (rc != 0) {
+	    dbats_log(DBATS_LOG_ERR, "delete keyid: %u: %s",
+		*key_id_p, db_strerror(rc));
+	    return rc;
+	}
+    }
 
     // prepare for next call
     while (lvl > 0 && !node->cursor.dbc) {
@@ -2423,6 +2582,101 @@ static inline int instantiate_frag(dbats_snapshot *ds, int bid, uint32_t frag_id
     return ds->tslice[bid]->is_set[frag_id] ?
 	0 : // We already have the fragment (or know it doesn't exist)
 	instantiate_frag_func(ds, bid, frag_id);
+}
+
+/*************************************************************************/
+
+// Delete (actually, just clear the is_set flag of) all data belonging to the
+// listed key ids.
+static int delete_data(dbats_handler *dh, const uint32_t *keyids, int n)
+{
+    uint32_t begin, end, t;
+
+    dbats_get_end_time(dh, NULL, 0, &end);
+    dbats_log(DBATS_LOG_FINE, "delete_data: start");
+    for (int bid = 0; bid < dh->cfg.num_bundles; bid++) {
+	const dbats_bundle_info *bundle = dbats_get_bundle_info(dh, bid);
+	dbats_get_start_time(dh, NULL, bid, &begin);
+	dbats_log(DBATS_LOG_FINE, "delete_data: bid=%d begin=%u end=%u", bid, begin, end);
+
+        for (t = begin; t <= end; t += bundle->period) {
+	    dbats_log(DBATS_LOG_FINE, "delete_data bid=%d t=%u", bid, t);
+            int rc;
+            dbats_snapshot *ds;
+
+            if ((rc = dbats_select_snap(dh, &ds, t, 0)) != 0) {
+                dbats_log(DBATS_LOG_FINE, "Unable to find time %u", t);
+                continue;
+	    }
+
+	    for (int i = 0; i < n; i++) {
+		uint32_t frag_id = keyfrag(keyids[i]);
+		uint32_t offset = keyoff(keyids[i]);
+
+		if ((rc = instantiate_frag(ds, bid, frag_id)) != 0) {
+		    dbats_abort_snap(ds);
+		    return rc;
+		}
+
+                dbats_log(DBATS_LOG_FINEST, "clearing %u (%u:%u)", keyids[i], frag_id, offset);
+		if (vec_test(ds->tslice[bid]->is_set[frag_id], offset)) {
+		    vec_reset(ds->tslice[bid]->is_set[frag_id], offset);
+		    log_hex("cleared", ds->tslice[bid]->is_set[frag_id], 100);
+		    ds->tslice[bid]->frag_changed[frag_id] = 1;
+		    ds->changed = 1;
+		}
+	    }
+
+	    dbats_commit_snap(ds);
+	}
+    }
+    dbats_log(DBATS_LOG_FINE, "delete_data: end");
+    return 0;
+}
+
+int dbats_delete_keys(dbats_handler *dh, const char *pattern)
+{
+    DB_TXN *txn;
+    int rc;
+
+    if (dh->cfg.readonly || !dh->cfg.updatable)
+	return EPERM;
+
+    rc = begin_transaction(dh, dh->txn, &txn, "delete_keys");
+    if (rc != 0) return rc;
+
+    dbats_keytree_iterator *dki;
+    rc = dbats_glob_keyname_new(dh, &dki, txn);
+    if (rc != 0) goto abort;
+    rc = dbats_glob_keyname_reset(dh, dki, pattern);
+    if (rc != 0) goto abort;
+
+#define N 1000
+    int n = 0;
+    uint32_t keyids[N];
+    char namebuf[DBATS_KEYLEN];
+    while (1) {
+	rc = glob_keyname_next(dki, &keyids[n], namebuf,
+	    DBATS_GLOB | DBATS_DELETE);
+	if (rc == DB_NOTFOUND) {
+	    if (n > 0) delete_data(dh, keyids, n);
+	    break;
+	} else if (rc != 0) {
+	    goto abort;
+	}
+	if (++n >= N) {
+	    delete_data(dh, keyids, n);
+	    n = 0;
+	}
+    }
+
+    rc = commit_transaction(dh, txn);
+    if (rc != 0) goto abort;
+    return 0;
+
+abort:
+    abort_transaction(dh, txn);
+    return rc;
 }
 
 /*************************************************************************/
