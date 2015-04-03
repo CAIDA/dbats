@@ -2595,11 +2595,11 @@ static int delete_data(dbats_handler *dh, uint32_t **keyids, int n)
     uint32_t begin, end, t;
 
     dbats_get_end_time(dh, NULL, 0, &end);
-    dbats_log(DBATS_LOG_WARN, "delete_data: start");
+    dbats_log(DBATS_LOG_FINE, "delete_data: start");
     for (int bid = 0; bid < dh->cfg.num_bundles; bid++) {
 	const dbats_bundle_info *bundle = dbats_get_bundle_info(dh, bid);
 	dbats_get_start_time(dh, NULL, bid, &begin);
-	dbats_log(DBATS_LOG_WARN, "delete_data: bid=%d begin=%u end=%u", bid, begin, end);
+	dbats_log(DBATS_LOG_FINE, "delete_data: bid=%d begin=%u end=%u", bid, begin, end);
 
         for (t = begin; t <= end; t += bundle->period) {
 	    dbats_log(DBATS_LOG_FINE, "delete_data bid=%d t=%u", bid, t);
@@ -2641,7 +2641,7 @@ static int delete_data(dbats_handler *dh, uint32_t **keyids, int n)
 	    dbats_commit_snap(ds);
 	}
     }
-    dbats_log(DBATS_LOG_WARN, "delete_data: end");
+    dbats_log(DBATS_LOG_FINE, "delete_data: end");
     return 0;
 }
 
