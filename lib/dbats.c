@@ -2638,6 +2638,7 @@ static int delete_data(dbats_handler *dh, uint32_t **keyids, int n)
 		}
 	    }
 
+	    dbats_log(DBATS_LOG_INFO, "deleted %u keys at bid=%u, t=%u", n, bid, t);
 	    dbats_commit_snap(ds);
 	}
     }
