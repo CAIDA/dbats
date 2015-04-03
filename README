@@ -58,6 +58,9 @@ Run any program with the "-?" option for a list of options.
 * dbats_best_bundle
   Find the bundle that best covers the specified time range.
 
+* dbats_delete_key
+  Delete a set of keys from a DBATS database.
+  
 * report-in
 * report-out
   Example programs that write to and read from a DBATS database.
