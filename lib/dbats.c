@@ -255,7 +255,7 @@ static void *emalloc(size_t sz, const char *msg)
     if (!ptr) {
 	int err = errno;
 	dbats_log(DBATS_LOG_WARN, "Can't allocate %zu bytes for %s", sz, msg);
-	errno = err;
+	errno = err ? err : ENOMEM;
     }
     return ptr;
 }
@@ -266,7 +266,7 @@ static void *ecalloc(size_t n, size_t sz, const char *msg)
     if (!ptr) {
 	int err = errno;
 	dbats_log(DBATS_LOG_WARN, "Can't alloc %zu*%zu bytes for %s", n, sz, msg);
-	errno = err;
+	errno = err ? err : ENOMEM;
     }
     return ptr;
 }
@@ -624,7 +624,7 @@ int dbats_open(dbats_handler **dhp,
     int is_new = 0;
 
     dbats_handler *dh = ecalloc(1, sizeof(dbats_handler), "dh");
-    if (!dh) return ENOMEM;
+    if (!dh) return errno;
     dh->cfg.readonly = !!(flags & DBATS_READONLY);
     dh->cfg.updatable = !!(flags & DBATS_UPDATABLE);
     dh->cfg.compress = !(flags & DBATS_UNCOMPRESSED);
@@ -815,7 +815,7 @@ int dbats_open(dbats_handler **dhp,
 #undef initcfg
 
     dh->bundle = emalloc(MAX_NUM_BUNDLES * sizeof(*dh->bundle), "dh->bundle");
-    if (!dh->bundle) { rc = ENOMEM; goto abort; }
+    if (!dh->bundle) { rc = errno; goto abort; }
 
     dh->cfg.entry_size = dh->cfg.values_per_entry * sizeof(dbats_value);
 
@@ -1396,7 +1396,7 @@ static int write_int_frag(dbats_snapshot *ds, DB *db, fragkey_t *dbkey,
 	if (!ds->state_compress) {
 	    ds->state_compress = ecalloc(1, sizeof(qlz_state_compress),
 		"state_compress");
-	    if (!ds->state_compress) return ENOMEM;
+	    if (!ds->state_compress) return errno;
 	}
 	buf[0] = 1; // compression flag
 	frag->compressed = 1;
@@ -1424,7 +1424,7 @@ static int flush_tslice(dbats_snapshot *ds, int bid)
     int rc;
     // XXX TODO: store a permanent compression buffer on ds
     char *buf = (char*)emalloc(1 + frag_size + QLZ_OVERHEAD, "compression buffer");
-    if (!buf) return errno ? errno : ENOMEM;
+    if (!buf) return errno;
 
     // Write fragments to the DB
     fragkey_t dbkey = { htonl(bid), htonl(ds->tslice[bid]->time), 0};
@@ -1620,7 +1620,7 @@ static int load_isset(dbats_snapshot *ds, fragkey_t *dbkey, uint8_t **dest,
     uint32_t value_len;
 
     if (!(buf = emalloc(vec_size(ENTRIES_PER_FRAG), "is_set")))
-	return errno ? errno : ENOMEM; // error
+	return errno; // error
 
     rc = raw_db_get(ds->dh->dbIsSet, ds->txn, dbkey, sizeof(*dbkey),
 	buf, vec_size(ENTRIES_PER_FRAG), &value_len, flags);
@@ -1678,7 +1678,7 @@ static int read_int_frag(dbats_snapshot *ds, DB *db, fragkey_t *dbkey, size_t fr
 	if (ds->db_get_buf) free(ds->db_get_buf);
 	ds->db_get_buf_len = frag_size + QLZ_OVERHEAD;
 	ds->db_get_buf = emalloc(ds->db_get_buf_len, "get buffer");
-	if (!ds->db_get_buf) return errno ? errno : ENOMEM;
+	if (!ds->db_get_buf) return errno;
     }
 
     rc = raw_db_get(db, ds->txn, dbkey, sizeof(*dbkey),
@@ -1705,7 +1705,7 @@ static int read_int_frag(dbats_snapshot *ds, DB *db, fragkey_t *dbkey, size_t fr
 	if (!ds->state_decompress) {
 	    ds->state_decompress = ecalloc(1, sizeof(qlz_state_decompress),
 		"qlz_state_decompress");
-	    if (!ds->state_decompress) return errno ? errno : ENOMEM;
+	    if (!ds->state_decompress) return errno;
 	}
 	len = qlz_decompress((void*)(ds->db_get_buf+1), *ptrp, ds->state_decompress);
 	// assert(len == frag_size);
@@ -1806,7 +1806,7 @@ int dbats_select_snap(dbats_handler *dh, dbats_snapshot **dsp,
 
 restart:
     (*dsp) = emalloc(sizeof(dbats_snapshot), "snapshot");
-    if (!*dsp) return ENOMEM;
+    if (!*dsp) return errno;
 
     memset(*dsp, 0, sizeof(**dsp));
     (*dsp)->dh = dh;
@@ -1843,7 +1843,7 @@ restart:
 
     (*dsp)->tslice = ecalloc((*dsp)->num_bundles, sizeof(*(*dsp)->tslice), "ds->tslice");
     if (!(*dsp)->tslice) {
-	rc = ENOMEM;
+	rc = errno;
 	goto abort;
     }
 
@@ -1865,7 +1865,7 @@ restart:
 	if (!(*dsp)->tslice[bid])
 	    (*dsp)->tslice[bid] = ecalloc(1, sizeof(dbats_tslice), "ds->tslice[bid]");
 	if (!(*dsp)->tslice[bid]) {
-	    rc = ENOMEM;
+	    rc = errno;
 	    goto abort;
 	}
 	dbats_tslice *tslice = (*dsp)->tslice[bid];
@@ -2389,7 +2389,7 @@ static inline int dbats_glob_keyname_new(dbats_handler *dh,
     dbats_keytree_iterator **dkip, DB_TXN *txn)
 {
     *dkip = emalloc(sizeof(dbats_keytree_iterator), "iterator");
-    if (!*dkip) return ENOMEM;
+    if (!*dkip) return errno;
     (*dkip)->ktseq = NULL;
     if (!((*dkip)->txn_is_mine = !txn)) {
 	(*dkip)->txn = txn;
@@ -2559,12 +2559,12 @@ static int instantiate_frag_func(dbats_snapshot *ds, int bid, uint32_t frag_id)
     size_t len = fragsize(ds->dh);
     tslice->values[frag_id] = ecalloc(1, len, "tslice->values[frag_id]");
     if (!tslice->values[frag_id])
-	return errno ? errno : ENOMEM;
+	return errno;
 
     if (bid > 0) {
 	tslice->agginfo[frag_id] = ecalloc(1, agginfo_size, "tslice->agginfo[frag_id]");
 	if (!tslice->agginfo[frag_id])
-	    return errno ? errno : ENOMEM;
+	    return errno;
     }
 
     if (tslice->num_frags <= frag_id)
@@ -2586,18 +2586,20 @@ static inline int instantiate_frag(dbats_snapshot *ds, int bid, uint32_t frag_id
 
 /*************************************************************************/
 
-// Delete (actually, just clear the is_set flag of) all data belonging to the
-// listed key ids.
-static int delete_data(dbats_handler *dh, const uint32_t *keyids, int n)
+#define N_DEL_CHUNKS    MAX_NUM_FRAGS
+#define DEL_CHUNK_SIZE  ENTRIES_PER_FRAG
+
+// Delete all data belonging to the listed key ids.
+static int delete_data(dbats_handler *dh, uint32_t **keyids, int n)
 {
     uint32_t begin, end, t;
 
     dbats_get_end_time(dh, NULL, 0, &end);
-    dbats_log(DBATS_LOG_FINE, "delete_data: start");
+    dbats_log(DBATS_LOG_WARN, "delete_data: start");
     for (int bid = 0; bid < dh->cfg.num_bundles; bid++) {
 	const dbats_bundle_info *bundle = dbats_get_bundle_info(dh, bid);
 	dbats_get_start_time(dh, NULL, bid, &begin);
-	dbats_log(DBATS_LOG_FINE, "delete_data: bid=%d begin=%u end=%u", bid, begin, end);
+	dbats_log(DBATS_LOG_WARN, "delete_data: bid=%d begin=%u end=%u", bid, begin, end);
 
         for (t = begin; t <= end; t += bundle->period) {
 	    dbats_log(DBATS_LOG_FINE, "delete_data bid=%d t=%u", bid, t);
@@ -2610,15 +2612,16 @@ static int delete_data(dbats_handler *dh, const uint32_t *keyids, int n)
 	    }
 
 	    for (int i = 0; i < n; i++) {
-		uint32_t frag_id = keyfrag(keyids[i]);
-		uint32_t offset = keyoff(keyids[i]);
+		uint32_t keyid = keyids[i/DEL_CHUNK_SIZE][i%DEL_CHUNK_SIZE];
+		uint32_t frag_id = keyfrag(keyid);
+		uint32_t offset = keyoff(keyid);
 
 		if ((rc = instantiate_frag(ds, bid, frag_id)) != 0) {
 		    dbats_abort_snap(ds);
 		    return rc;
 		}
 
-                dbats_log(DBATS_LOG_FINEST, "clearing %u (%u:%u)", keyids[i], frag_id, offset);
+                dbats_log(DBATS_LOG_FINEST, "clearing %u (%u:%u)", keyid, frag_id, offset);
 		if (vec_test(ds->tslice[bid]->is_set[frag_id], offset)) {
 		    vec_reset(ds->tslice[bid]->is_set[frag_id], offset);
 		    log_hex("cleared", ds->tslice[bid]->is_set[frag_id], 100);
@@ -2638,7 +2641,7 @@ static int delete_data(dbats_handler *dh, const uint32_t *keyids, int n)
 	    dbats_commit_snap(ds);
 	}
     }
-    dbats_log(DBATS_LOG_FINE, "delete_data: end");
+    dbats_log(DBATS_LOG_WARN, "delete_data: end");
     return 0;
 }
 
@@ -2646,6 +2649,9 @@ int dbats_delete_keys(dbats_handler *dh, const char *pattern)
 {
     DB_TXN *txn;
     int rc;
+    int n = -1;
+    uint32_t **keyids; // array of arrays of ids
+    char namebuf[DBATS_KEYLEN];
 
     if (dh->cfg.readonly || !dh->cfg.updatable)
 	return EPERM;
@@ -2655,35 +2661,33 @@ int dbats_delete_keys(dbats_handler *dh, const char *pattern)
 
     dbats_keytree_iterator *dki;
     rc = dbats_glob_keyname_new(dh, &dki, txn);
-    if (rc != 0) goto abort;
+    if (rc != 0) goto end;
     rc = dbats_glob_keyname_reset(dh, dki, pattern);
-    if (rc != 0) goto abort;
+    if (rc != 0) goto end;
 
-#define N 1000
-    int n = 0;
-    uint32_t keyids[N];
-    char namebuf[DBATS_KEYLEN];
-    while (1) {
-	rc = glob_keyname_next(dki, &keyids[n], namebuf,
-	    DBATS_GLOB | DBATS_DELETE);
-	if (rc == DB_NOTFOUND) {
-	    if (n > 0) delete_data(dh, keyids, n);
-	    break;
-	} else if (rc != 0) {
-	    goto abort;
+    keyids = ecalloc(N_DEL_CHUNKS, sizeof(uint32_t*), "delete_keys");
+    if (!keyids) { rc = errno; goto end; }
+    do {
+	if (++n % DEL_CHUNK_SIZE == 0) { // need a new chunk
+	    keyids[n/DEL_CHUNK_SIZE] =
+		emalloc(DEL_CHUNK_SIZE * sizeof(uint32_t), "delete_keys");
+	    if (!keyids[n/DEL_CHUNK_SIZE]) { rc = errno; goto end; }
 	}
-	if (++n >= N) {
-	    delete_data(dh, keyids, n);
-	    n = 0;
-	}
+	rc = glob_keyname_next(dki, &keyids[n/DEL_CHUNK_SIZE][n%DEL_CHUNK_SIZE],
+	    namebuf, DBATS_GLOB | DBATS_DELETE);
+    } while (rc == 0);
+    if (rc == DB_NOTFOUND) { // reached end without error
+	if (n > 0) delete_data(dh, keyids, n);
+	rc = commit_transaction(dh, txn);
     }
 
-    rc = commit_transaction(dh, txn);
-    if (rc != 0) goto abort;
-    return 0;
-
-abort:
-    abort_transaction(dh, txn);
+end:
+    if (rc != 0) abort_transaction(dh, txn);
+    if (keyids) {
+	for (int i = 0; i < N_DEL_CHUNKS && keyids[i]; i++)
+	    free(keyids[i]);
+	free(keyids);
+    }
     return rc;
 }
 
@@ -2872,7 +2876,7 @@ static inline int alloc_valbuf(dbats_snapshot *ds)
 	ds->valbuf = emalloc(ds->dh->cfg.entry_size * ds->dh->cfg.values_per_entry,
 	    "valbuf");
 	if (!ds->valbuf)
-	    return errno ? errno : ENOMEM;
+	    return errno;
     }
     return 0;
 }
@@ -2958,7 +2962,7 @@ int dbats_walk_keyid_start(dbats_handler *dh, dbats_snapshot *ds,
     dbats_keyid_iterator **dkip)
 {
     *dkip = emalloc(sizeof(dbats_keyid_iterator), "iterator");
-    if (!*dkip) return ENOMEM;
+    if (!*dkip) return errno;
     DB_TXN *txn = ds ? ds->txn : dh->txn;
     int rc = raw_cursor_open(dh->dbKeyid, txn, &(*dkip)->cursor, 0);
     if (rc != 0) {
