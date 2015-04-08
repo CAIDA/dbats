@@ -296,6 +296,7 @@ static inline int begin_transaction(dbats_handler *dh, DB_TXN *parent,
 
 static inline int commit_transaction(dbats_handler *dh, DB_TXN *txn)
 {
+    if (dh->cfg.no_txn) return 0;
     int rc;
     const char *name;
     txn->get_name(txn, &name);
@@ -310,6 +311,12 @@ static inline int commit_transaction(dbats_handler *dh, DB_TXN *txn)
 
 static int abort_transaction(dbats_handler *dh, DB_TXN *txn)
 {
+    if (dh->cfg.no_txn) {
+	dbats_log(DBATS_LOG_ERR, "Attempted to abort transaction while "
+	    "transactions are disabled.  The database may be permanently "
+	    "corrupted.");
+	return ENOTSUP;
+    }
     int rc;
     const char *name;
     txn->get_name(txn, &name);
@@ -1774,8 +1781,9 @@ int dbats_num_keys(dbats_handler *dh, uint32_t *num_keys)
     return 0;
 }
 
-static void set_priority(dbats_snapshot *ds, uint32_t priority)
+static int set_priority(dbats_snapshot *ds, uint32_t priority)
 {
+    if (ds->dh->cfg.no_txn) return ENOTSUP;
 #if HAVE_DB_SET_PRIORITY
     int rc = ds->txn->set_priority(ds->txn, priority);
     if (rc != 0) {
@@ -1783,11 +1791,13 @@ static void set_priority(dbats_snapshot *ds, uint32_t priority)
     } else {
 	dbats_log(DBATS_LOG_FINE, "set_priority %u", priority);
     }
+    return rc;
 #else
     static int warned = 0;
     if (!warned)
 	dbats_log(DBATS_LOG_WARN, "can't set_priority with this version of BDB");
     warned = 1;
+    return ENOTSUP;
 #endif
 }
 

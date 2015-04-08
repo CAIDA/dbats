@@ -201,7 +201,9 @@ typedef struct dbats_keytree_iterator dbats_keytree_iterator; ///< Opaque handle
  *      performance)
  *    -	DBATS_UNCOMPRESSED - do not compress written time series data
  *    -	DBATS_EXCLUSIVE - do not allow any other process to access the database
- *    -	DBATS_NO_TXN - do not use transactions (fast but unsafe)
+ *    -	DBATS_NO_TXN - do not use transactions (faster, but may corrupt the
+ *      database if other processes or threads try to access the database or
+ *      if the process exits uncleanly)
  *    -	DBATS_UPDATABLE - allow updates to existing values
  *  @param[in] mode permissions for files created by this function (as defined
  *    by open(2)) and modified by the process's umask.  A value of 0 is
