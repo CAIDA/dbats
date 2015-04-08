@@ -2336,7 +2336,7 @@ found:
 	node->cursor.dbc = NULL;
 	goto next_level;
 
-    } else if (flags && DBATS_DELETE && (node->id & KTID_IS_NODE)) {
+    } else if ((flags & DBATS_DELETE) && (node->id & KTID_IS_NODE)) {
 	// expecting a leaf, and we're trying to delete, but found node
 	// TODO: recursively delete everything below (or maybe add a "**" glob
 	// syntax that matches nodes recursively)
