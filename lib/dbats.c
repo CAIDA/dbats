@@ -282,7 +282,10 @@ static void *ecalloc(size_t n, size_t sz, const char *msg)
 static inline int begin_transaction(dbats_handler *dh, DB_TXN *parent,
     DB_TXN **childp, const char *name)
 {
-    if (dh->cfg.no_txn) return 0;
+    if (dh->cfg.no_txn) {
+	*childp = NULL;
+	return 0;
+    }
     dbats_log(DBATS_LOG_FINE, "begin txn: %s", name);
     int rc;
     rc = dh->dbenv->txn_begin(dh->dbenv, parent, childp, 0);
