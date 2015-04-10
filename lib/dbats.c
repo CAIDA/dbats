@@ -2796,10 +2796,11 @@ int dbats_set(dbats_snapshot *ds, uint32_t key_id, const dbats_value *valuep)
 			changed = 1;
 		    } else {
 			double old_daggval = aggval[i].d;
-			if (was_set)
-			    aggval[i].d += (valuep[i].u64 - oldvaluep[i].u64) / *agginfo;
-			else
+			if (was_set) {
+			    aggval[i].d += (valuep[i].u64 - (double)oldvaluep[i].u64) / *agginfo;
+			} else {
 			    aggval[i].d += (valuep[i].u64 - old_daggval) / *agginfo;
+			}
 			changed += (aggval[i].d != old_daggval);
 		    }
 		}
