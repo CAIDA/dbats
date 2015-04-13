@@ -254,7 +254,7 @@ static void *emalloc(size_t sz, const char *msg)
     void *ptr = malloc(sz);
     if (!ptr) {
 	int err = errno;
-	dbats_log(DBATS_LOG_WARN, "Can't allocate %zu bytes for %s", sz, msg);
+	dbats_log(DBATS_LOG_WARN, "Can't malloc %zu bytes for %s", sz, msg);
 	errno = err ? err : ENOMEM;
     }
     return ptr;
@@ -265,7 +265,7 @@ static void *ecalloc(size_t n, size_t sz, const char *msg)
     void *ptr = calloc(n, sz);
     if (!ptr) {
 	int err = errno;
-	dbats_log(DBATS_LOG_WARN, "Can't alloc %zu*%zu bytes for %s", n, sz, msg);
+	dbats_log(DBATS_LOG_WARN, "Can't calloc %zu*%zu bytes for %s", n, sz, msg);
 	errno = err ? err : ENOMEM;
     }
     return ptr;
@@ -1567,8 +1567,8 @@ end:
 
 int (dbats_abort_snap)(const char *fname, int line, dbats_snapshot *ds)
 {
-    dbats_log_func(DBATS_LOG_FINE, fname, line,
-	"dbats_abort_snap %u", ds->tslice[0]->time);
+    dbats_log_func(DBATS_LOG_FINE, fname, line, "dbats_abort_snap %u",
+	ds->tslice && ds->tslice[0] ? ds->tslice[0]->time : 0);
     int rc = abort_transaction(ds->dh, ds->txn);
     free_snapshot(ds);
     return rc;
@@ -1818,10 +1818,9 @@ int dbats_select_snap(dbats_handler *dh, dbats_snapshot **dsp,
     }
 
 restart:
-    (*dsp) = emalloc(sizeof(dbats_snapshot), "snapshot");
+    (*dsp) = ecalloc(1, sizeof(dbats_snapshot), "snapshot");
     if (!*dsp) return errno;
 
-    memset(*dsp, 0, sizeof(**dsp));
     (*dsp)->dh = dh;
     (*dsp)->preload = !!(flags & DBATS_PRELOAD);
     (*dsp)->readonly = dh->cfg.readonly || !!(flags & DBATS_READONLY);
@@ -2757,9 +2756,25 @@ int dbats_set(dbats_snapshot *ds, uint32_t key_id, const dbats_value *valuep)
 	uint8_t failed = 0;
 	dbats_value *aggval = valueptr(ds, bid, frag_id, offset);
 
-	// agginfo stores extra information needed by aggregate calculations:
+	// *agginfo stores extra information needed by aggregate calculations:
 	// MIN, MAX, AVG, and SUM need the number of PDPs contributing to
 	// the aggregate; LAST needs time of last PDP set in this aggregate.
+	// TODO: MIN and MAX could store in *agginfo the count of PDPs equal
+	// to the aggregate; then it would need to recalculate only if that
+	// count falls to 0:
+	//     if (new value is more extreme than the old agg value) {
+	//         agg value = new value;
+	//         *agginfo = 1;
+	//         changed = 1;
+	//     } else if (new value == old agg value) {
+	//         ++*agginfo;
+	//         changed = 1;
+	//     } else if (was_set && old value == old agg value) {
+	//         if (--*agginfo == 0)
+	//             scan all steps to find the new extreme
+	//         changed = 1;
+	//     }
+	// (Requires a non-backward-compatible change in DBATS_DB_VERSION.)
 
 	uint32_t *agginfo = agginfoptr(ds, bid, frag_id, offset);
 
