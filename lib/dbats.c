@@ -2594,9 +2594,13 @@ static int instantiate_frag_func(dbats_snapshot *ds, int bid, uint32_t frag_id)
 static inline int instantiate_frag(dbats_snapshot *ds, int bid,
     uint32_t frag_id, int force)
 {
-    // Call the func only if forced or we haven't already tried 
-    return (force || !ds->tslice[bid]->is_set[frag_id]) ?
-	instantiate_frag_func(ds, bid, frag_id) : 0;
+    if (ds->tslice[bid]->values[frag_id])
+	return 0; // we already have it
+    // If is_set exists, we've already tried to load the fragment.  There's no
+    // reason to try again, unless the force flag is on.
+    if (!force && ds->tslice[bid]->is_set[frag_id])
+	return 0;
+    return instantiate_frag_func(ds, bid, frag_id);
 }
 
 /*************************************************************************/
