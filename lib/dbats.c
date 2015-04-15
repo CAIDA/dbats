@@ -813,6 +813,11 @@ int dbats_open(dbats_handler **dhp,
 	dbats_log(DBATS_LOG_ERR, "obsolete database version %d", dh->cfg.version);
 	return DB_VERSION_MISMATCH;
     }
+    if (dh->cfg.values_per_entry != 1) {
+	dbats_log(DBATS_LOG_ERR, "(values_per_entry != 1) is not implemented");
+	// XXX we'll have to make agginfo store arrays
+	return ENOTSUP;
+    }
 
     if ((rc = open_db(dbBundle,  "bundle",  DB_BTREE, 1) != 0)) goto abort;
     if ((rc = open_db(dbKeytree, "keytree", DB_BTREE, 1) != 0)) goto abort;
