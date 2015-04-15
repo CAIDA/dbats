@@ -2588,12 +2588,15 @@ static int instantiate_frag_func(dbats_snapshot *ds, int bid, uint32_t frag_id)
     return 0;
 }
 
-// inline version handles the common case without a function call
-static inline int instantiate_frag(dbats_snapshot *ds, int bid, uint32_t frag_id)
+// Inline version handles the common case without a function call.
+// The force flag will cause the fragment to be allocated in memory even if
+// it's empty/nonexistant in db.
+static inline int instantiate_frag(dbats_snapshot *ds, int bid,
+    uint32_t frag_id, int force)
 {
-    return ds->tslice[bid]->is_set[frag_id] ?
-	0 : // We already have the fragment (or know it doesn't exist)
-	instantiate_frag_func(ds, bid, frag_id);
+    // Call the func only if forced or we haven't already tried 
+    return (force || !ds->tslice[bid]->is_set[frag_id]) ?
+	instantiate_frag_func(ds, bid, frag_id) : 0;
 }
 
 /*************************************************************************/
@@ -2628,7 +2631,7 @@ static int delete_data(dbats_handler *dh, uint32_t **keyids, int n)
 		uint32_t frag_id = keyfrag(keyid);
 		uint32_t offset = keyoff(keyid);
 
-		if ((rc = instantiate_frag(ds, bid, frag_id)) != 0) {
+		if ((rc = instantiate_frag(ds, bid, frag_id, 0)) != 0) {
 		    dbats_abort_snap(ds);
 		    return rc;
 		}
@@ -2727,7 +2730,7 @@ int dbats_set(dbats_snapshot *ds, uint32_t key_id, const dbats_value *valuep)
 	return -1;
     }
 
-    if ((rc = instantiate_frag(ds, 0, frag_id)) != 0)
+    if ((rc = instantiate_frag(ds, 0, frag_id, 1)) != 0)
 	return rc;
 
     uint8_t was_set = vec_test(ds->tslice[0]->is_set[frag_id], offset);
@@ -2749,7 +2752,7 @@ int dbats_set(dbats_snapshot *ds, uint32_t key_id, const dbats_value *valuep)
 		    continue;
 	}
 
-	if ((rc = instantiate_frag(ds, bid, frag_id)) != 0)
+	if ((rc = instantiate_frag(ds, bid, frag_id, 1)) != 0)
 	    return rc;
 
 	uint8_t changed = 0; // change in aggval or agginfo?
@@ -2931,7 +2934,7 @@ int dbats_get(dbats_snapshot *ds, uint32_t key_id,
     uint32_t frag_id = keyfrag(key_id);
     uint32_t offset = keyoff(key_id);
 
-    if ((rc = instantiate_frag(ds, bid, frag_id)) == 0) {
+    if ((rc = instantiate_frag(ds, bid, frag_id, 0)) == 0) {
 	if (!vec_test(tslice->is_set[frag_id], offset)) {
 	    if (dbats_log_level >= DBATS_LOG_FINE) {
 		char keyname[DBATS_KEYLEN] = "";
