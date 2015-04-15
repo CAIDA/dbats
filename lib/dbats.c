@@ -54,10 +54,10 @@ ct_assert((sizeof(double) == sizeof(uint64_t)), double_is_not_64_bits)
 #define vec_test(vec, i)  (vec && (vec[(i)/8] & (1<<((i)%8)))) // test ith bit
 
 #define valueptr(ds, bid, frag_id, offset) \
-    ((dbats_value*)(&ds->tslice[bid]->values[frag_id]->data[offset * dh->cfg.entry_size]))
+    ((dbats_value*)(&(ds)->tslice[bid]->values[frag_id]->data[(offset) * (ds)->dh->cfg.entry_size]))
 
 #define agginfoptr(ds, bid, frag_id, offset) \
-    ((uint32_t*)(&ds->tslice[bid]->agginfo[frag_id]->data[offset * sizeof(uint32_t)]))
+    ((uint32_t*)(&(ds)->tslice[bid]->agginfo[frag_id]->data[(offset) * sizeof(uint32_t)]))
 
 // "Fragment", containing a large subset of entries for a timeslice
 typedef struct dbats_frag {
@@ -1735,6 +1735,8 @@ static int read_int_frag(dbats_snapshot *ds, DB *db, fragkey_t *dbkey, size_t fr
     return 0;
 }
 
+// Whether DB_NOTFOUND is an error is up to the caller.  Inconsistent data in
+// db will result in returning -1.
 static int load_frag(dbats_snapshot *ds, int bid, uint32_t frag_id)
 {
     // load fragment
@@ -1744,15 +1746,11 @@ static int load_frag(dbats_snapshot *ds, int bid, uint32_t frag_id)
 
     assert(!ds->tslice[bid]->is_set[frag_id]);
     rc = load_isset(ds, &dbkey, &ds->tslice[bid]->is_set[frag_id], flags);
-    if (rc == DB_NOTFOUND) return 0; // no match
-    if (rc != 0) return rc; // error
+    if (rc != 0) return rc; // no data, or error
 
     void *ptr;
     rc = read_int_frag(ds, ds->dh->dbValues, &dbkey, fragsize(ds->dh), &ptr, flags);
-    if (rc != 0) {
-	if (rc == DB_NOTFOUND) return 0; // no match
-	return rc; // error
-    }
+    if (rc != 0) return rc; // no data, or error
     ds->tslice[bid]->values[frag_id] = ptr;
     if (ds->tslice[bid]->num_frags <= frag_id)
 	ds->tslice[bid]->num_frags = frag_id + 1;
@@ -1760,8 +1758,8 @@ static int load_frag(dbats_snapshot *ds, int bid, uint32_t frag_id)
     if (bid > 0 && !ds->readonly) {
 	rc = read_int_frag(ds, ds->dh->dbAgginfo, &dbkey, agginfo_size,
 	    &ptr, flags);
-	// DB_NOTFOUND is not allowed here, since there was a value above
-	if (rc != 0) return rc; // error
+	if (rc == DB_NOTFOUND) return -1; // values w/o agginfo: internal error
+	if (rc != 0) return rc; // other error
 	ds->tslice[bid]->agginfo[frag_id] = ptr;
     }
 
@@ -1921,9 +1919,9 @@ restart:
 		dbats_log(DBATS_LOG_ERR, "select_snap %u: too many deadlocks",
 		    time_value);
 	    }
-	    if (rc != 0) goto abort;
-	    if (tslice->values[frag_id])
-		loaded++;
+	    if (rc == DB_NOTFOUND) continue; // no data (not an error)
+	    if (rc != 0) goto abort; // error
+	    loaded++;
 	}
 	dbats_log(DBATS_LOG_FINE, "select_snap %u: bid=%d, loaded %u/%u fragments",
 	    time_value, bid, loaded, tslice->num_frags);
@@ -2548,23 +2546,10 @@ int dbats_get_key_name(dbats_handler *dh, dbats_snapshot *ds,
 
 /*************************************************************************/
 
-static int instantiate_frag_func(dbats_snapshot *ds, int bid, uint32_t frag_id)
+static int alloc_frag(dbats_snapshot *ds, int bid, uint32_t frag_id)
 {
-    int rc;
     dbats_tslice *tslice = ds->tslice[bid];
 
-    if (!ds->preload || ds->readonly) {
-	// Try to load the fragment.
-	rc = load_frag(ds, bid, frag_id);
-	if (rc != 0) // error
-	    return rc;
-	if (tslice->values[frag_id]) // found it
-	    return 0;
-	if (ds->readonly) // didn't find it and can't create it
-	    return DB_NOTFOUND; // fragment not found
-    }
-
-    // Allocate a new fragment.
     dbats_log(DBATS_LOG_VFINE, "grow tslice for time %u, bid %d, frag_id %u",
 	tslice->time, bid, frag_id);
 
@@ -2574,7 +2559,8 @@ static int instantiate_frag_func(dbats_snapshot *ds, int bid, uint32_t frag_id)
 	return errno;
 
     if (bid > 0) {
-	tslice->agginfo[frag_id] = ecalloc(1, agginfo_size, "tslice->agginfo[frag_id]");
+	tslice->agginfo[frag_id] =
+	    ecalloc(1, agginfo_size, "tslice->agginfo[frag_id]");
 	if (!tslice->agginfo[frag_id])
 	    return errno;
     }
@@ -2588,19 +2574,29 @@ static int instantiate_frag_func(dbats_snapshot *ds, int bid, uint32_t frag_id)
     return 0;
 }
 
-// Inline version handles the common case without a function call.
-// The force flag will cause the fragment to be allocated in memory even if
-// it's empty/nonexistant in db.
-static inline int instantiate_frag(dbats_snapshot *ds, int bid,
-    uint32_t frag_id, int force)
+static inline int instantiate_existing_frag(dbats_snapshot *ds, int bid,
+    uint32_t frag_id)
 {
-    if (ds->tslice[bid]->values[frag_id])
-	return 0; // we already have it
-    // If is_set exists, we've already tried to load the fragment.  There's no
-    // reason to try again, unless the force flag is on.
-    if (!force && ds->tslice[bid]->is_set[frag_id])
+    if (ds->tslice[bid]->is_set[frag_id]) { // Handle the common case inline.
+	// We've already tried to load the fragment, and either got it or know
+	// that it doesn't exist.  There's no reason to try again.
 	return 0;
-    return instantiate_frag_func(ds, bid, frag_id);
+    }
+    return load_frag(ds, bid, frag_id);
+}
+
+static inline int instantiate_settable_frag(dbats_snapshot *ds, int bid,
+    uint32_t frag_id)
+{
+    if (ds->tslice[bid]->values[frag_id]) // Handle the common case inline.
+	return 0; // we already have it
+    if (!ds->tslice[bid]->is_set[frag_id]) {
+	// We've never tried to load this fragment; try now.
+	int rc = load_frag(ds, bid, frag_id);
+	if (rc != DB_NOTFOUND) return rc; // found it, or error
+    }
+    // Fragment not found.  Allocate one so caller can write to it.
+    return alloc_frag(ds, bid, frag_id);
 }
 
 /*************************************************************************/
@@ -2635,7 +2631,8 @@ static int delete_data(dbats_handler *dh, uint32_t **keyids, int n)
 		uint32_t frag_id = keyfrag(keyid);
 		uint32_t offset = keyoff(keyid);
 
-		if ((rc = instantiate_frag(ds, bid, frag_id, 0)) != 0) {
+		rc = instantiate_existing_frag(ds, bid, frag_id);
+		if (rc != 0 && rc != DB_NOTFOUND) { // error
 		    dbats_abort_snap(ds);
 		    return rc;
 		}
@@ -2648,11 +2645,11 @@ static int delete_data(dbats_handler *dh, uint32_t **keyids, int n)
 		    ds->changed = 1;
 
 		    // zero the data (not necessary, but improves compression)
-		    dbats_value *values = valueptr(ds, bid, frag_id, offset);
-		    memset(values, 0, sizeof(dbats_value) * dh->cfg.values_per_entry);
-		    if (bid > 0) {
-			uint32_t *agginfo = agginfoptr(ds, bid, frag_id, offset);
-			*agginfo = 0;
+		    if (ds->tslice[bid]->values[frag_id]) {
+			memset(valueptr(ds, bid, frag_id, offset), 0,
+			    sizeof(dbats_value) * dh->cfg.values_per_entry);
+			if (bid > 0)
+			    *(agginfoptr(ds, bid, frag_id, offset)) = 0;
 		    }
 		}
 	    }
@@ -2734,7 +2731,7 @@ int dbats_set(dbats_snapshot *ds, uint32_t key_id, const dbats_value *valuep)
 	return -1;
     }
 
-    if ((rc = instantiate_frag(ds, 0, frag_id, 1)) != 0)
+    if ((rc = instantiate_settable_frag(ds, 0, frag_id)) != 0)
 	return rc;
 
     uint8_t was_set = vec_test(ds->tslice[0]->is_set[frag_id], offset);
@@ -2756,7 +2753,7 @@ int dbats_set(dbats_snapshot *ds, uint32_t key_id, const dbats_value *valuep)
 		    continue;
 	}
 
-	if ((rc = instantiate_frag(ds, bid, frag_id, 1)) != 0)
+	if ((rc = instantiate_settable_frag(ds, bid, frag_id)) != 0)
 	    return rc;
 
 	uint8_t changed = 0; // change in aggval or agginfo?
@@ -2938,7 +2935,7 @@ int dbats_get(dbats_snapshot *ds, uint32_t key_id,
     uint32_t frag_id = keyfrag(key_id);
     uint32_t offset = keyoff(key_id);
 
-    if ((rc = instantiate_frag(ds, bid, frag_id, 0)) == 0) {
+    if ((rc = instantiate_existing_frag(ds, bid, frag_id)) == 0) {
 	if (!vec_test(tslice->is_set[frag_id], offset)) {
 	    if (dbats_log_level >= DBATS_LOG_FINE) {
 		char keyname[DBATS_KEYLEN] = "";
