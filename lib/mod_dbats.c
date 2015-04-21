@@ -321,7 +321,7 @@ static void render(request_rec *r, mod_dbats_reqstate *reqstate)
     int rc;
     int bid = 0;
     int i;
-    uint32_t q_from, from, q_until, until, max_points = 0;
+    uint32_t q_from, from, o_until, q_until, until, max_points = 0;
     enum dbats_agg_func agg_func = DBATS_AGG_AVG;
     int no_pad = 0;
     int nsamples = 0;
@@ -341,7 +341,7 @@ static void render(request_rec *r, mod_dbats_reqstate *reqstate)
     char *p;
     from = strtol(str_from, &p, 10);
     if (!*str_from || *p) return;
-    until = strtol(str_until, &p, 10);
+    o_until = until = strtol(str_until, &p, 10);
     if (!*str_until || *p) return;
     if (str_max_points) {
 	max_points = strtol(str_max_points, &p, 10);
@@ -368,7 +368,14 @@ static void render(request_rec *r, mod_dbats_reqstate *reqstate)
     bundle = dbats_get_bundle_info(reqstate->dh, bid);
     dbats_normalize_time(reqstate->dh, bid, &from);
     dbats_normalize_time(reqstate->dh, bid, &until);
-    q_from = from += bundle->period;
+    // adjust times to always respond with data that satisfies [from - until)
+    // i.e. [inclusive, exclusive)
+    // NB: this assumes that data is stored using the time at the *beginning* of
+    // the sample window, not the end.
+    if (until == o_until) until -= bundle->period;
+
+    // save query times for padded responses
+    q_from = from; // (to make from exclusive: += bundle->period)
     q_until = until;
 
     uint32_t starttime, endtime;
