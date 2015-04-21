@@ -1389,7 +1389,7 @@ static int write_bitvector_frag(DB *db, DB_TXN *txn, fragkey_t *dbkey, const uin
 	}
 	dh->cfg.version = newversion;
     }
-    dbats_log(DBATS_LOG_FINE, "write_bitvector_frag: run-length, %u bytes", rlesize);
+    dbats_log(DBATS_LOG_FINE, "write_bitvector_frag: run-length, %lu bytes", (unsigned long)rlesize);
     log_hex("vec", vec, vec_size(ENTRIES_PER_FRAG));
     log_hex("rle", buf, rlesize);
     int rc = raw_db_set(db, txn, dbkey, sizeof(*dbkey), buf, rlesize, 0);
@@ -1668,8 +1668,9 @@ static int load_isset(dbats_snapshot *ds, fragkey_t *dbkey, uint8_t **dest,
 	if (!*dest) return errno ? errno : -1; // error
 	if (datasize != vec_size(ENTRIES_PER_FRAG)) {
 	    dbats_log(DBATS_LOG_ERR,
-		"internal error: decoded RLE length %u != vec size %u",
-		datasize, vec_size(ENTRIES_PER_FRAG));
+		"internal error: decoded RLE length %lu != vec size %lu",
+                      (unsigned long)datasize,
+                      (unsigned long)vec_size(ENTRIES_PER_FRAG));
 	    free(*dest);
 	    return -1;
 	}
@@ -2672,7 +2673,7 @@ int dbats_delete_keys(dbats_handler *dh, const char *pattern)
     DB_TXN *txn;
     int rc;
     int n = -1;
-    uint32_t **keyids; // array of arrays of ids
+    uint32_t **keyids = NULL; // array of arrays of ids
     char namebuf[DBATS_KEYLEN];
 
     if (dh->cfg.readonly || !dh->cfg.updatable)
