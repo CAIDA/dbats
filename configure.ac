@@ -41,7 +41,7 @@ fi
 
 
 # Checks for programs.
-
+AM_PROG_AR
 # note: AM_INIT_AUTOMAKE may or may not have already called AC_PROG_CC
 AC_PROG_CC
 AC_MSG_CHECKING([whether "$CC" accepts the "-std=c99" option])
@@ -108,8 +108,8 @@ AC_TYPE_SIZE_T
 dnl Note: AC_LIB_LINKFLAGS doesn't have an ACTION-IF-NOT-FOUND option.  If
 dnl needed, we should also test for linkability of a function in the library
 dnl with WITH_LIBS(..., AC_CHECK_FUNC(...)).
-AC_LIB_LINKFLAGS([db])
-
+AC_CHECK_LIB([db], [db_version], ,[AC_MSG_ERROR([bdb is required by DBATS])])
+AC_LIB_LINKFLAGS(db)
 
 # Checks for library functions.
 
