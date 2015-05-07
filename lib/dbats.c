@@ -1496,6 +1496,7 @@ static void free_snapshot(dbats_snapshot *ds)
 	free(ds->tslice[bid]);
 	// ds->tslice[bid] = NULL;
     }
+    free(ds->tslice);
 
     if (ds->state_decompress)
 	free(ds->state_decompress);
