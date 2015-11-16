@@ -228,11 +228,16 @@ static void metrics_find(request_rec *r, mod_dbats_reqstate *reqstate)
 	    if (bstart < nstart)
 		start = bstart;
 	}
+	log_rerror(APLOG_DEBUG, reqstate, "## r=%p", r);
+	log_rerror(APLOG_DEBUG, reqstate, "## metrics=%p", metrics);
+	log_rerror(APLOG_DEBUG, reqstate, "## metrics->nelts=%d", metrics->nelts);
 	ap_set_content_type(r, "application/json");
 	int n = 0;
 	ap_rprintf(r, "[");
 	for (i = 0; i < metrics->nelts; i++) {
+	    log_rerror(APLOG_DEBUG, reqstate, "## print element #%d", i);
 	    mfinfo_t *info = APR_ARRAY_IDX(metrics, i, mfinfo_t*);
+	    log_rerror(APLOG_DEBUG, reqstate, "## info=%p", info);
 	    const char *ename = ap_escape_quotes(r->pool, info->name);
 	    ap_rprintf(r, "%s\n{", n ? "," : "");
 	    ap_rprintf(r, "\"path\": \"%s\", ", ename);
@@ -241,6 +246,7 @@ static void metrics_find(request_rec *r, mod_dbats_reqstate *reqstate)
 	    n++;
 	}
 	ap_rprintf(r, "\n]\n");
+	log_rerror(APLOG_DEBUG, reqstate, "## done metrics_find %s", "json-internal");
 
     } else { // default to json
 	ap_set_content_type(r, "application/json");
@@ -702,10 +708,12 @@ static int req_handler(request_rec *r)
 
     // clean up
     if (reqstate->dki) {
+	log_rerror(APLOG_DEBUG, reqstate, "## clean up %s", "reqstate->dki");
 	dbats_glob_keyname_end(reqstate->dki);
 	reqstate->dki = NULL;
     }
     if (reqstate->snap) {
+	log_rerror(APLOG_DEBUG, reqstate, "## clean up %s", "reqstate->snap");
 	dbats_abort_snap(reqstate->snap);
 	reqstate->snap = NULL;
     }
