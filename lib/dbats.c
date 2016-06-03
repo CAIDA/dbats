@@ -1647,6 +1647,7 @@ static int load_isset(dbats_snapshot *ds, fragkey_t *dbkey, uint8_t **dest,
 	return rc; // no match
     } else if (rc != 0) {
 	*dest = NULL;
+        free(buf);
 	return rc; // error
     }
 
@@ -1666,6 +1667,7 @@ static int load_isset(dbats_snapshot *ds, fragkey_t *dbkey, uint8_t **dest,
 	// vector was compressed with run-length encoding
 	size_t datasize = vec_size(ENTRIES_PER_FRAG);
 	*dest = run_length_decode(buf, value_len, &datasize);
+        free(buf);
 	if (!*dest) return errno ? errno : -1; // error
 	if (datasize != vec_size(ENTRIES_PER_FRAG)) {
 	    dbats_log(DBATS_LOG_ERR,
@@ -1753,14 +1755,14 @@ static int load_frag(dbats_snapshot *ds, int bid, uint32_t frag_id)
 
     assert(!ds->tslice[bid]->is_set[frag_id]);
     rc = load_isset(ds, &dbkey, &ds->tslice[bid]->is_set[frag_id], flags);
+    if (ds->tslice[bid]->num_frags <= frag_id)
+      ds->tslice[bid]->num_frags = frag_id + 1;
     if (rc != 0) return rc; // no data, or error
 
     void *ptr;
     rc = read_int_frag(ds, ds->dh->dbValues, &dbkey, fragsize(ds->dh), &ptr, flags);
     if (rc != 0) return rc; // no data, or error
     ds->tslice[bid]->values[frag_id] = ptr;
-    if (ds->tslice[bid]->num_frags <= frag_id)
-	ds->tslice[bid]->num_frags = frag_id + 1;
 
     if (bid > 0 && !ds->readonly) {
 	rc = read_int_frag(ds, ds->dh->dbAgginfo, &dbkey, agginfo_size,
