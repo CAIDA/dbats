@@ -1,6 +1,61 @@
 DBATS - DataBase of Aggregated Time Series
 Version 0.1
 
+DBATS is a high performance time series database engine optimized for
+inserting/updating values for many series simultaneously. DBATS can easily
+sustain write speeds of more than 1.6 million values per second, and CAIDA has
+used DBATS databases with more than 40 million distinct series.
+
+Since DBATS is a low-level time series database engine, it has limited tools for
+inserting and querying data. As such, DBATS should be used in conjuction with
+mod_dbats (included in this release) to provide a Graphite-compatible HTTP read
+interface, and with libtimeseries
+(http://www.caida.org/tools/utilities/libtimeseries) to provide a high(er)-level
+write API.
+
+A DBATS time series is a sequence of data entries measured at regular time
+intervals. A set of similar time series with the same period and entry size is a
+"bundle". Each time series in a bundle is identified by a user-defined string
+key and an automatically assigned integer key id. The primary bundle stores the
+original raw data. Additional "aggregate" bundles can be defined that merge
+sub-sequences of data points for a key in the primary bundle into single data
+points for the same key in the aggregate bundle.
+
+Conceptually, DBATS stores a bundle in a logical table where rows are time and
+columns are metric keys, and each cell entry contains an array of one or more
+64-bit values. Each row of an aggregate bundle table corresponds to a set of
+rows in the primary data bundle table.
+
+Internally, DBATS uses a number of BDB databases (tables):
+
+ - key_name -> key_id
+ - key_id -> key_name
+ - bundle_id -> { agg_func, steps, period, time_range }
+ - { bundle_id, time, frag_id } -> is_set_fragment
+ - { bundle_id, time, frag_id } -> data_fragment
+
+Each metric key is assigned an id when it is created. Keys can not be deleted
+and key ids can never change. Data fragments are blocks of 10000 data entries,
+covering sequential key_ids with the same time and bundle_id. Data fragments are
+stored compressed in BDB. Is_set_fragments are corresponding blocks of flags
+indicating whether each entry is actually set. Aggregate values are calculated
+immediately (in the same transaction) when primary values are set.
+
+The design is optimized for inserting many values in the same timeslice before
+moving to another timeslice.
+
+DBATS is based on TSDB (http://luca.ntop.org/tsdb.pdf), with the following key
+differences:
+ - aggregation series (calculated at insert time)
+ - option to truncate old series values
+ - functions to iterate over list of keys
+ - faster reading with key id
+ - ACID transactions
+ - 64 bit values
+
+----------------------------------------------------------------------
+Documentation for the C API is in the "html" directory of the release tarball.
+
 ----------------------------------------------------------------------
 Requirements
 
@@ -60,10 +115,8 @@ Run any program with the "-?" option for a list of options.
 
 * dbats_delete_key
   Delete a set of keys from a DBATS database.
-  
+
 * report-in
 * report-out
   Example programs that write to and read from a DBATS database.
 
-----------------------------------------------------------------------
-Documentation for the C API is in the "html" directory.
