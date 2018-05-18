@@ -1,4 +1,5 @@
 #define _POSIX_C_SOURCE 200809L
+#include <assert.h>
 #include <inttypes.h>
 #include <unistd.h>
 #include <stdio.h>
@@ -123,13 +124,14 @@ int main(int argc, char *argv[]) {
 
     for (int i = 0; i < argc; i++) {
 	int bid;
-	const dbats_bundle_info *bundle;
+	const dbats_bundle_info *bundle = NULL;
 	for (bid = 0; bid < cfg->num_bundles; bid++) {
 	    bundle = dbats_get_bundle_info(handler, bid);
 	    if (bundle->func == aggfunc[i] && bundle->steps == aggsteps[i]) {
 		break;
 	    }
 	}
+        assert(bundle);
 	if (bid == cfg->num_bundles) {
 	    // new aggregate
 	    dbats_log(DBATS_LOG_INFO, "defining aggregate #%d %s:%d:%d",
