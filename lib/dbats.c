@@ -2663,8 +2663,10 @@ static int delete_data(dbats_handler *dh, uint32_t **keyids, int n)
 		    if (ds->tslice[bid]->values[frag_id]) {
 			memset(valueptr(ds, bid, frag_id, offset), 0,
 			    sizeof(dbats_value) * dh->cfg.values_per_entry);
-			if (bid > 0)
-			    *(agginfoptr(ds, bid, frag_id, offset)) = 0;
+			if (bid > 0) {
+                            uint32_t *agginfo = agginfoptr(ds, bid, frag_id, offset);
+                            *agginfo = 0;
+                        }
 		    }
 		}
 	    }
