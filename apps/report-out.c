@@ -24,6 +24,7 @@ static void help(void) {
     fprintf(stderr, "-e{end}      end time (default: last time in db)\n");
     fprintf(stderr, "-o text      output text (default)\n");
     fprintf(stderr, "-o gnuplot   output gnuplot script\n");
+    fprintf(stderr, "-o count     output key counts per snapshot\n");
     exit(-1);
 }
 
@@ -73,7 +74,7 @@ static void get_keys(dbats_handler *handler)
     dbats_walk_keyid_end(dki);
 }
 
-enum { OT_TEXT, OT_GNUPLOT };
+enum { OT_TEXT, OT_GNUPLOT, OT_COUNT };
 
 int main(int argc, char *argv[]) {
     dbats_handler *handler;
@@ -113,6 +114,8 @@ int main(int argc, char *argv[]) {
 		outtype = OT_TEXT;
 	    } else if (strcmp(optarg, "gnuplot") == 0) {
 		outtype = OT_GNUPLOT;
+	    } else if (strcmp(optarg, "count") == 0) {
+		outtype = OT_COUNT;
 	    } else {
 		fprintf(stderr, "unknown output type \"%s\"\n", optarg);
 		help();
@@ -221,14 +224,18 @@ int main(int argc, char *argv[]) {
 
 	    if ((rc = dbats_select_snap(handler, &snapshot, t, 0)) != 0) {
 		dbats_log(DBATS_LOG_INFO, "Unable to find time %u", t);
+		if(outtype == OT_COUNT)
+		    fprintf(out, "%u %d 0\n", t, bid);
 		continue;
 	    }
 
 	    const dbats_value *values;
+	    uint32_t non_null = 0;
 	    for (int k = 0; k < n_keys && !dbats_caught_signal; k++) {
 		rc = dbats_get(snapshot, keys[k].keyid, &values, bid);
-		if (rc == DB_NOTFOUND)
+		if (rc == DB_NOTFOUND) {
 		    continue;
+		}
 		if (rc != 0) {
 		    fprintf(stderr, "error in dbats_get(%s): rc=%d\n", keys[k].key, rc);
 		    dbats_abort_snap(snapshot);
@@ -255,8 +262,13 @@ int main(int argc, char *argv[]) {
 			    t, values ? values[0].u64 : 0);
 		    }
 		    break;
+		case OT_COUNT:
+		    non_null++;
+		    break;
 		}
 	    }
+	    if(outtype == OT_COUNT)
+		fprintf(out, "%u %d %u\n", t, bid, non_null);
 
 	    dbats_commit_snap(snapshot);
 	}
