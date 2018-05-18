@@ -19,6 +19,7 @@
 # Compiled programs
 dbats-*.tar.gz
 apps/dbats_best_bundle
+apps/dbats_dump
 apps/dbats_delete_key
 apps/dbats_info
 apps/dbats_init
