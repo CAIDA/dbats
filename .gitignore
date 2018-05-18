@@ -81,6 +81,8 @@ m4/lt~obsolete.m4
 *.metrics.*[0-9]
 *.keys
 .*.sw?
+tests/*.log
+tests/*.trs
 tmp
 stuff
 ar-lib
