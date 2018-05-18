@@ -597,9 +597,12 @@ static void error_callback(const DB_ENV *dbenv, const char *errpfx, const char *
 	dbats_log(DBATS_LOG_ERR, "%s", msg);
 }
 
-static void message_callback(const DB_ENV *dbenv, const char *msg)
+static void message_callback(const DB_ENV *dbenv, const char *msgpfx, const char *msg)
 {
-    dbats_log(DBATS_LOG_FINE, "%s", msg);
+    if (msgpfx)
+        dbats_log(DBATS_LOG_FINE, "%s: %s", msgpfx, msg);
+    else
+        dbats_log(DBATS_LOG_FINE, "%s", msg);
 }
 
 // Warning: never open the same dbats more than once in the same process,
