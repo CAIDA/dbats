@@ -99,7 +99,7 @@ static void child_init_handler(apr_pool_t *pchild, server_rec *s)
 
     main_server = s;
     apr_threadkey_private_create(&tlskey_req, NULL, pchild);
-    apr_pool_cleanup_register(pchild, tlskey_req, mod_dbats_threadkey_private_delete, NULL);
+    apr_pool_cleanup_register(pchild, tlskey_req, mod_dbats_threadkey_private_delete, apr_pool_cleanup_null);
 
     dbats_log_callback = log_callback;
 }
@@ -697,7 +697,7 @@ static int req_handler(request_rec *r)
 	log_rerror(APLOG_DEBUG, reqstate, "mod_dbats: dbats_open: %s", "ok");
 	apr_hash_set(procstate.dht, apr_pstrdup(procstate.pool, dbats_path),
 	    APR_HASH_KEY_STRING, reqstate->dh);
-	apr_pool_cleanup_register(procstate.pool, reqstate->dh, mod_dbats_close, NULL);
+	apr_pool_cleanup_register(procstate.pool, reqstate->dh, mod_dbats_close, apr_pool_cleanup_null);
 	apr_thread_mutex_unlock(procstate.dht_mutex);
 	dbats_commit_open(reqstate->dh);
 	log_rerror(APLOG_DEBUG, reqstate, "mod_dbats: dbats_commit_open: %s", "ok");
