@@ -1762,9 +1762,12 @@ static int load_frag(dbats_snapshot *ds, int bid, uint32_t frag_id)
       ds->tslice[bid]->num_frags = frag_id + 1;
     if (rc != 0) return rc; // no data, or error
 
-    void *ptr;
+    void *ptr = NULL;
     rc = read_int_frag(ds, ds->dh->dbValues, &dbkey, fragsize(ds->dh), &ptr, flags);
-    if (rc != 0) return rc; // no data, or error
+    if (rc != 0) {
+      free(ptr);
+      return rc; // no data, or error
+    }
     ds->tslice[bid]->values[frag_id] = ptr;
 
     if (bid > 0 && !ds->readonly) {
