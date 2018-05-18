@@ -91,7 +91,7 @@ extern "C" {
 
 #define DBATS_DB_VERSION     11  ///< Version of db format written by this API
 
-#define DBATS_KEYLEN         128 ///< max length of key name
+#define DBATS_KEYLEN         1024 ///< max length of key name
 #define DBATS_KEY_IS_PREFIX  0x80000000 ///< keyid describes a node, not a key
 
 /** @name Flags */
