@@ -865,7 +865,7 @@ int dbats_open(dbats_handler **dhp,
 	rc = ktseq->set_range(ktseq, 1, KTKEY_MAX_NODE);
 	if (rc != 0) goto abort;
 	DBT_in(dbt_seq, (void*)"keytree_seq", strlen("keytree_seq"));
-	rc = ktseq->open(ktseq, NULL, &dbt_seq, DB_CREATE);
+	rc = ktseq->open(ktseq, dh->txn, &dbt_seq, DB_CREATE);
 	if (rc != 0) goto abort;
 	ktseq->close(ktseq, 0);
 
