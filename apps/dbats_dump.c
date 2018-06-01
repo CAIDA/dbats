@@ -1,4 +1,5 @@
 #define _POSIX_C_SOURCE 200809L
+#include <assert.h>
 #include <unistd.h>
 #include <inttypes.h>
 #include <stdio.h>
@@ -65,6 +66,11 @@ static void load_keys(dbats_handler *in_handler, dbats_handler *out_handler,
 	}
         out_keys[n_keys] = keys[n_keys].key = strdup(keybuf);
 	n_keys++;
+        if (n_keys >= MAX_KEYS) {
+          dbats_log(DBATS_LOG_ERR,
+                    "dbats_dump supports dumping at most %d keys", MAX_KEYS);
+          exit (-1);
+        }
     }
     if (out_handler) {
         dbats_log(DBATS_LOG_INFO, "dbats_bulk_get_key_id: %d keys", n_keys);
@@ -91,6 +97,11 @@ static void get_keys(dbats_handler *in_handler, dbats_handler *out_handler)
     while (dbats_walk_keyid_next(dki, &keys[n_keys].keyid, keybuf) == 0) {
         out_keys[n_keys] = keys[n_keys].key = strdup(keybuf);
 	n_keys++;
+        if (n_keys >= MAX_KEYS) {
+          dbats_log(DBATS_LOG_ERR,
+                    "dbats_dump supports dumping at most %d keys", MAX_KEYS);
+          exit (-1);
+        }
     }
     if (out_handler) {
         dbats_log(DBATS_LOG_INFO, "dbats_bulk_get_key_id: %d keys", n_keys);
